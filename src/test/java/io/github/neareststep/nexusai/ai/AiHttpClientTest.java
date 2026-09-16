@@ -78,6 +78,21 @@ class AiHttpClientTest {
     }
 
     @Test
+    void generateFreshBypassesCache() {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("fresh-" + calls.get());
+        };
+        AiHttpClient client = new AiHttpClient(cache, provider, configWithKey, Logger.getLogger("test"));
+        cache.put(client.cacheKey("hello"), "cached");
+
+        assertEquals("fresh-1", client.generateFreshAsync("hello").join());
+        assertEquals("cached", cache.get(client.cacheKey("hello")).orElseThrow());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
     void parallelRequestsShareSingleInFlightCall() throws Exception {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);

@@ -4,9 +4,11 @@
 # Do not commit real keys. api.key below is only a fallback for local testing.
 
 api:
+  # openai | groq | cerebras | gemini | deepseek
   provider: openai
   model: gpt-4o-mini
-  base-url: https://api.openai.com/v1
+  # Empty = default base-url for the selected provider
+  base-url: ""
   # Leave empty and use NEXUSAI_API_KEY instead
   key: ""
   connect-timeout: 5
@@ -21,5 +23,27 @@ limits:
   requests-per-minute: 30
   requests-per-day: 1000
   max-prompt-length: 128
+
+# Unique-answer pools for %ainexus_generate_<prompt>%
+pool:
+  enabled: true
+  max-total-prompts: 10
+  entries: []
+  # Example:
+  # entries:
+  #   - prompt: "One short tip for miners"
+  #     size: 3
+  #     min-threshold: 1
+
+# TTL cache warm-up for %ainexus_cached_<prompt>%
+prewarm:
+  enabled: true
+  # Seconds between freshness checks (refresh when not isFresh / ~80% TTL)
+  refresh-before-ttl: 60
+  prompts: []
+  # Example:
+  # prompts:
+  #   - "Welcome, {player}"
+  #   - "Server tip of the day"
 
 fallback: "..."

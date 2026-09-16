@@ -5,40 +5,50 @@ import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
+import io.github.neareststep.nexusai.pool.AiPool;
+import io.github.neareststep.nexusai.pool.PoolService;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Optional;
 import java.util.UUID;
 import java.util.logging.Level;
 
 /**
- * Registers {@code %ainexus_generate_<prompt>%}.
- * Always returns immediately: cached text or configured fallback.
+ * Registers {@code %ainexus_generate_<prompt>%} (unique pool) and
+ * {@code %ainexus_cached_<prompt>%} (shared TTL cache).
  */
 public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     private static final String GENERATE_PREFIX = "generate_";
+    private static final String CACHED_PREFIX = "cached_";
 
     private final NexusAI plugin;
     private final PluginConfig config;
     private final AiCache cache;
     private final AiHttpClient httpClient;
     private final RateLimiter rateLimiter;
+    private final AiPool pool;
+    private final PoolService poolService;
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
             PluginConfig config,
             AiCache cache,
             AiHttpClient httpClient,
-            RateLimiter rateLimiter
+            RateLimiter rateLimiter,
+            AiPool pool,
+            PoolService poolService
     ) {
         this.plugin = plugin;
         this.config = config;
         this.cache = cache;
         this.httpClient = httpClient;
         this.rateLimiter = rateLimiter;
+        this.pool = pool;
+        this.poolService = poolService;
     }
 
     @Override
@@ -63,11 +73,25 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     @Override
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
-        if (!params.startsWith(GENERATE_PREFIX)) {
-            return null;
+        if (params.startsWith(GENERATE_PREFIX)) {
+            return resolveGenerate(params.substring(GENERATE_PREFIX.length()));
         }
+        if (params.startsWith(CACHED_PREFIX)) {
+            return resolveCached(player, params.substring(CACHED_PREFIX.length()));
+        }
+        return null;
+    }
 
-        String prompt = params.substring(GENERATE_PREFIX.length());
+    private String resolveGenerate(String prompt) {
+        if (!PromptValidation.isUsablePrompt(prompt, config.getMaxPromptLength())) {
+            return config.getFallback();
+        }
+        Optional<String> answer = pool.poll(prompt);
+        poolService.onConsume(prompt);
+        return answer.orElseGet(config::getFallback);
+    }
+
+    private String resolveCached(Player player, String prompt) {
         if (!PromptValidation.isUsablePrompt(prompt, config.getMaxPromptLength())) {
             return config.getFallback();
         }

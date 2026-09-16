@@ -4,6 +4,9 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,12 +27,17 @@ class PluginConfigTest {
         config.set("limits.requests-per-day", 1000);
         config.set("limits.max-prompt-length", 128);
         config.set("fallback", "...");
+        config.set("pool.enabled", true);
+        config.set("pool.max-total-prompts", 10);
+        config.set("pool.entries", List.of());
+        config.set("prewarm.enabled", true);
+        config.set("prewarm.refresh-before-ttl", 60);
+        config.set("prewarm.prompts", List.of());
         return config;
     }
 
     @Test
     void emptyKeyMeansNoApiKey() {
-        // Skip when CI/dev shell already exports a key — env always wins.
         if (hasEnvKey()) {
             return;
         }
@@ -47,6 +55,39 @@ class PluginConfigTest {
         PluginConfig pluginConfig = new PluginConfig(yaml);
         assertTrue(pluginConfig.hasApiKey());
         assertEquals("yaml-secret", pluginConfig.getApiKey());
+    }
+
+    @Test
+    void groqWithoutBaseUrlUsesProviderDefault() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("api.provider", "groq");
+        yaml.set("api.base-url", "");
+        PluginConfig pluginConfig = new PluginConfig(yaml);
+        assertEquals("https://api.groq.com/openai/v1", pluginConfig.getBaseUrl());
+    }
+
+    @Test
+    void explicitBaseUrlWinsOverProviderDefault() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("api.provider", "groq");
+        yaml.set("api.base-url", "https://custom.example/v1/");
+        PluginConfig pluginConfig = new PluginConfig(yaml);
+        assertEquals("https://custom.example/v1", pluginConfig.getBaseUrl());
+    }
+
+    @Test
+    void poolEntriesAreTruncatedToMaxTotalPrompts() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("pool.max-total-prompts", 2);
+        yaml.set("pool.entries", List.of(
+                Map.of("prompt", "a", "size", 3, "min-threshold", 1),
+                Map.of("prompt", "b", "size", 2, "min-threshold", 1),
+                Map.of("prompt", "c", "size", 1, "min-threshold", 0)
+        ));
+        PluginConfig pluginConfig = new PluginConfig(yaml);
+        assertEquals(2, pluginConfig.getPoolEntries().size());
+        assertEquals("a", pluginConfig.getPoolEntries().get(0).prompt());
+        assertEquals("b", pluginConfig.getPoolEntries().get(1).prompt());
     }
 
     private static boolean hasEnvKey() {

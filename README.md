@@ -2,7 +2,7 @@
 
 Асинхронный инфраструктурный плагин для Paper: мост между игровым движком и моделями ИИ через PlaceholderAPI.
 
-Другие плагины (меню, чат, голограммы) могут запрашивать текст у ИИ плейсхолдером `%ainexus_generate_<промпт>%` без блокировки главного потока и без просадки TPS.
+Другие плагины (меню, чат, голограммы) могут запрашивать текст у ИИ плейсхолдерами без блокировки главного потока и без просадки TPS.
 
 ## Требования
 
@@ -13,7 +13,7 @@
 ## Установка
 
 1. Соберите shadow JAR: `./gradlew shadowJar`
-2. Скопируйте `build/libs/NexusAI-0.1.0-SNAPSHOT.jar` в папку `plugins/`
+2. Скопируйте `build/libs/NexusAI-0.2.0-SNAPSHOT.jar` в папку `plugins/`
 3. Установите PlaceholderAPI
 4. Задайте ключ (предпочтительно через окружение):
 
@@ -27,7 +27,7 @@ export NEXUSAI_API_KEY=sk-...
 
 Либо укажите `api.key` в `plugins/NexusAI/config.yml` (не коммитьте секреты).
 
-Без ключа плагин загружается, пишет warning в лог и **не** отправляет HTTP-запросы — плейсхолдер всегда возвращает `fallback`.
+Без ключа плагин загружается, пишет warning в лог и **не** отправляет HTTP-запросы — плейсхолдеры возвращают `fallback`.
 
 ## Конфигурация
 
@@ -35,33 +35,68 @@ export NEXUSAI_API_KEY=sk-...
 
 | Секция | Параметры |
 |--------|-----------|
-| `api` | `provider`, `model`, `base-url`, `key`, `connect-timeout`, `read-timeout` |
+| `api` | `provider`, `model`, `base-url` (пустой = дефолт провайдера), `key`, `connect-timeout`, `read-timeout` |
 | `cache` | `ttl` (сек), `max-size` |
 | `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (по умолчанию **128**) |
-| `fallback` | строка, возвращаемая при cache miss / лимитах / отсутствии ключа |
+| `pool` | `enabled`, `max-total-prompts`, `entries[]` (`prompt`, `size`, `min-threshold`) |
+| `prewarm` | `enabled`, `refresh-before-ttl` (сек), `prompts[]` (поддерживает `{player}`) |
+| `fallback` | строка при miss / лимитах / отсутствии ключа |
 
 Приоритет API-ключа: **`NEXUSAI_API_KEY`** → `api.key` в YAML.
 
-Если `api.openai.com` недоступен из региона сервера (часто `403 Forbidden`), укажите в `api.base-url` любой OpenAI-compatible endpoint, до которого есть доступ, и соответствующий ключ/модель.
+### Провайдеры
 
-## Плейсхолдер
+`api.provider` выбирает дефолтный `base-url`, если поле `api.base-url` пустое:
+
+| provider | base-url по умолчанию |
+|----------|------------------------|
+| `openai` | `https://api.openai.com/v1` |
+| `groq` | `https://api.groq.com/openai/v1` |
+| `cerebras` | `https://api.cerebras.ai/v1` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `deepseek` | `https://api.deepseek.com` |
+
+Явный `api.base-url` всегда побеждает. При старте в лог пишется: `Using provider: …, base-url: …, model: …`.
+
+## Плейсхолдеры
+
+### Уникальные ответы (пул)
 
 ```
 %ainexus_generate_<промпт>%
 ```
 
-Примеры:
+Берёт и **удаляет** один ответ из пула для этого промпта. Если пул пуст — сразу `fallback`, параллельно `PoolService` может пополнить очередь (если промпт есть в `pool.entries`).
 
-- `%ainexus_generate_Say hello%`
-- `%ainexus_generate_One short tip for miners%`
+Пример `pool.entries`:
+
+```yaml
+pool:
+  enabled: true
+  max-total-prompts: 10
+  entries:
+    - prompt: "One short tip for miners"
+      size: 3
+      min-threshold: 1
+```
+
+### Общий TTL-кэш (голограммы)
+
+```
+%ainexus_cached_<промпт>%
+```
 
 Поведение:
 
-1. Если ответ есть в кэше — сразу текст из кэша
-2. Иначе мгновенно возвращается `fallback`, а запрос уходит в фоне (`CompletableFuture` + свой `ExecutorService`)
-3. Повторный резолв того же промпта после ответа ИИ отдаёт кэш
-4. Промпт длиннее `limits.max-prompt-length` (128) → сразу `fallback`, без HTTP
-5. In-flight дедупликация через `ConcurrentHashMap.computeIfAbsent` — параллельные одинаковые запросы не дублируют HTTP
+1. Если ответ есть в TTL-кэше — сразу общий текст
+2. Иначе мгновенно `fallback`, запрос уходит в фоне
+3. Повторный резолв того же промпта после ответа отдаёт кэш до истечения TTL
+4. Промпт длиннее `limits.max-prompt-length` → сразу `fallback`, без HTTP
+5. In-flight дедупликация — параллельные одинаковые запросы не дублируют HTTP
+
+### Prewarm
+
+Секция `prewarm` прогревает TTL-кэш при старте и периодически обновляет промпты, когда запись уже не `isFresh` (возраст ≥ 80% TTL). Шаблоны с `{player}` на старте пропускаются; для них вызывайте `PrewarmService.warmForPlayer(playerName)`.
 
 ## Сборка
 
@@ -76,12 +111,14 @@ export NEXUSAI_API_KEY=sk-...
 
 ## Архитектура (кратко)
 
-- `PluginConfig` — config.yml + env
-- `AiCache` — Caffeine (TTL + max-size)
+- `PluginConfig` — config.yml + env + дефолты провайдеров
+- `AiCache` — Caffeine (TTL + max-size + `isFresh`)
+- `AiPool` / `PoolService` — очереди уникальных ответов для `generate_`
+- `PrewarmService` — прогрев и refresh TTL-кэша для `cached_`
 - `RateLimiter` — лимиты на игрока и на сервер
 - `AiProvider` / `OpenAiProvider` — HTTP к `/chat/completions`
-- `AiHttpClient` — кэш + in-flight + проверка ключа
-- `AiPlaceholderExpansion` — регистрация `%ainexus_...%`
+- `AiHttpClient` — кэш + in-flight + `generateFreshAsync` для пула
+- `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
 
 ## License
 

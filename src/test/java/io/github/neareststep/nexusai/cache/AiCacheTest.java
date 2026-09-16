@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AiCacheTest {
@@ -23,5 +24,20 @@ class AiCacheTest {
         cache.put("k", "v");
         Thread.sleep(80);
         assertTrue(cache.get("k").isEmpty());
+    }
+
+    @Test
+    void isFreshRightAfterPut() {
+        AiCache cache = new AiCache(Duration.ofSeconds(10), 100);
+        cache.put("k", "v");
+        assertTrue(cache.isFresh("k"));
+    }
+
+    @Test
+    void isFreshFalseAfterEightyPercentOfTtl() throws InterruptedException {
+        AiCache cache = new AiCache(Duration.ofMillis(100), 100);
+        cache.put("k", "v");
+        Thread.sleep(90);
+        assertFalse(cache.isFresh("k"));
     }
 }
