@@ -1,0 +1,79 @@
+# ===== Секреты и доступы (КРИТИЧНО) =====
+.env
+.env.*
+*.key
+*.pem
+id_rsa
+id_ed25519
+credentials.json
+secrets.json
+
+# ===== Node.js =====
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.Python
+
+# ===== Docker (если используешь) =====
+docker-compose.override.yml
+docker-compose.*.yml
+docker-compose.*.env
+*.tar
+*.tar.gz
+
+# ===== Артефакты сборки и логи =====
+dist/
+build/
+out/
+.gradle/
+*.log
+*.pid
+
+# ===== Системное и редакторы =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ===== MCP config and editor rule files with secrets =====
+openai-gpt-image-mcp/
+.cursor/
+mcp.json
+
+# ===== Сгенерированные картинки =====
+sprites/
+
+# ===== OneDrive-артефакты (если появятся) =====
+*.tmp
+~$*
+# ===== Java / Maven =====
+target/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+# ===== Локальный сервер Minecraft (Тесты) =====
+/run/
+/server/
+/cache/
+/bundler/
+/libraries/
+/logs/
+/plugins/
+/world/
+/world_nether/
+/world_the_end/
+eula.txt
+server.properties
+# ===== Maven Wrapper =====
+.mvn/
+mvnw
+mvnw.cmd

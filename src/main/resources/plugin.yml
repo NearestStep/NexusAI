@@ -1,0 +1,7 @@
+name: NexusAI
+version: '${version}'
+main: io.github.neareststep.nexusai.NexusAI
+api-version: '26.2'
+authors: [ mo00Wy ]
+description: Asynchronous bridge between Minecraft and AI models via PlaceholderAPI
+softdepend: [PlaceholderAPI]

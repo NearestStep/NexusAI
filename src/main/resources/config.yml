@@ -1,0 +1,25 @@
+# NexusAI configuration
+#
+# Prefer setting the API key via environment variable NEXUSAI_API_KEY.
+# Do not commit real keys. api.key below is only a fallback for local testing.
+
+api:
+  provider: openai
+  model: gpt-4o-mini
+  base-url: https://api.openai.com/v1
+  # Leave empty and use NEXUSAI_API_KEY instead
+  key: ""
+  connect-timeout: 5
+  read-timeout: 30
+
+cache:
+  # Seconds
+  ttl: 300
+  max-size: 1000
+
+limits:
+  requests-per-minute: 30
+  requests-per-day: 1000
+  max-prompt-length: 128
+
+fallback: "..."
