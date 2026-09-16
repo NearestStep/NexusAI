@@ -1,0 +1,29 @@
+# NexusAI messages (Spanish)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&cNo tienes permiso."
+  unknown: "{prefix}&cSubcomando desconocido. Usa &e/nai help&c."
+  help-header: "{prefix}&eComandos de NexusAI:"
+  help-help: "&7/nai help &8- &fMostrar esta ayuda"
+  help-version: "&7/nai version &8- &fMostrar la versión del plugin"
+  help-reload: "&7/nai reload &8- &fRecargar config y locale"
+  help-status: "&7/nai status &8- &fMostrar el estado"
+  version: "{prefix}&fVersión: &a{version}"
+  reload-ok: "{prefix}&aConfiguración recargada."
+  reload-fail: "{prefix}&cError al recargar: &f{error}"
+  status-header: "{prefix}&eEstado:"
+  status-locale: "&7Locale: &f{locale}"
+  status-provider: "&7Proveedor: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7Modelo: &f{model}"
+  status-api-key: "&7Clave API: &f{api_key}"
+  status-pool: "&7Pool: &f{pool_state} &8({pool_entries} entradas)"
+  status-cache: "&7Tamaño de caché: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "sí"
+  no: "no"
+  enabled: "activado"
+  disabled: "desactivado"

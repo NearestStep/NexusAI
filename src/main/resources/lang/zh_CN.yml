@@ -1,0 +1,29 @@
+# NexusAI messages (Simplified Chinese)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&c你没有权限。"
+  unknown: "{prefix}&c未知子命令。请使用 &e/nai help&c。"
+  help-header: "{prefix}&eNexusAI 命令："
+  help-help: "&7/nai help &8- &f显示此帮助"
+  help-version: "&7/nai version &8- &f显示插件版本"
+  help-reload: "&7/nai reload &8- &f重载配置与语言"
+  help-status: "&7/nai status &8- &f显示运行状态"
+  version: "{prefix}&f版本：&a{version}"
+  reload-ok: "{prefix}&a配置已重载。"
+  reload-fail: "{prefix}&c重载失败：&f{error}"
+  status-header: "{prefix}&e状态："
+  status-locale: "&7语言：&f{locale}"
+  status-provider: "&7提供商：&f{provider}"
+  status-base-url: "&7Base URL：&f{base_url}"
+  status-model: "&7模型：&f{model}"
+  status-api-key: "&7API 密钥：&f{api_key}"
+  status-pool: "&7池：&f{pool_state} &8({pool_entries} 条)"
+  status-cache: "&7缓存大小：&f{cache_size}"
+  status-papi: "&7PlaceholderAPI：&f{papi}"
+
+common:
+  yes: "是"
+  no: "否"
+  enabled: "已启用"
+  disabled: "已禁用"

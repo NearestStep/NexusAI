@@ -1,0 +1,29 @@
+# NexusAI messages (Turkish)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&cYetkiniz yok."
+  unknown: "{prefix}&cBilinmeyen alt komut. &e/nai help&c kullanın."
+  help-header: "{prefix}&eNexusAI komutları:"
+  help-help: "&7/nai help &8- &fBu yardımı göster"
+  help-version: "&7/nai version &8- &fEklenti sürümünü göster"
+  help-reload: "&7/nai reload &8- &fConfig ve locale'i yenile"
+  help-status: "&7/nai status &8- &fDurumu göster"
+  version: "{prefix}&fSürüm: &a{version}"
+  reload-ok: "{prefix}&aYapılandırma yenilendi."
+  reload-fail: "{prefix}&cYenileme başarısız: &f{error}"
+  status-header: "{prefix}&eDurum:"
+  status-locale: "&7Locale: &f{locale}"
+  status-provider: "&7Sağlayıcı: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7Model: &f{model}"
+  status-api-key: "&7API anahtarı: &f{api_key}"
+  status-pool: "&7Havuz: &f{pool_state} &8({pool_entries} kayıt)"
+  status-cache: "&7Önbellek boyutu: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "evet"
+  no: "hayır"
+  enabled: "açık"
+  disabled: "kapalı"

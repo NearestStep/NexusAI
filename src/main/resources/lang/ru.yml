@@ -1,0 +1,29 @@
+# NexusAI messages (Russian)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&cНедостаточно прав."
+  unknown: "{prefix}&cНеизвестная подкоманда. Используйте &e/nai help&c."
+  help-header: "{prefix}&eКоманды NexusAI:"
+  help-help: "&7/nai help &8- &fПоказать эту справку"
+  help-version: "&7/nai version &8- &fПоказать версию плагина"
+  help-reload: "&7/nai reload &8- &fПерезагрузить конфиг и локаль"
+  help-status: "&7/nai status &8- &fПоказать статус"
+  version: "{prefix}&fВерсия: &a{version}"
+  reload-ok: "{prefix}&aКонфигурация перезагружена."
+  reload-fail: "{prefix}&cОшибка перезагрузки: &f{error}"
+  status-header: "{prefix}&eСтатус:"
+  status-locale: "&7Локаль: &f{locale}"
+  status-provider: "&7Провайдер: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7Модель: &f{model}"
+  status-api-key: "&7API-ключ: &f{api_key}"
+  status-pool: "&7Пул: &f{pool_state} &8({pool_entries} записей)"
+  status-cache: "&7Размер кэша: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "да"
+  no: "нет"
+  enabled: "включён"
+  disabled: "выключен"

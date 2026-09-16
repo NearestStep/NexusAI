@@ -1,0 +1,29 @@
+# NexusAI messages (Czech)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&cNemáte oprávnění."
+  unknown: "{prefix}&cNeznámý podpříkaz. Použijte &e/nai help&c."
+  help-header: "{prefix}&ePříkazy NexusAI:"
+  help-help: "&7/nai help &8- &fZobrazit tuto nápovědu"
+  help-version: "&7/nai version &8- &fZobrazit verzi pluginu"
+  help-reload: "&7/nai reload &8- &fZnovu načíst config a locale"
+  help-status: "&7/nai status &8- &fZobrazit stav"
+  version: "{prefix}&fVerze: &a{version}"
+  reload-ok: "{prefix}&aKonfigurace znovu načtena."
+  reload-fail: "{prefix}&cObnovení selhalo: &f{error}"
+  status-header: "{prefix}&eStav:"
+  status-locale: "&7Locale: &f{locale}"
+  status-provider: "&7Poskytovatel: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7Model: &f{model}"
+  status-api-key: "&7API klíč: &f{api_key}"
+  status-pool: "&7Pool: &f{pool_state} &8({pool_entries} záznamů)"
+  status-cache: "&7Velikost cache: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "ano"
+  no: "ne"
+  enabled: "zapnuto"
+  disabled: "vypnuto"

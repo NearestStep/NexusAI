@@ -37,6 +37,7 @@ public final class PluginConfig {
     private int requestsPerDay;
     private int maxPromptLength;
     private String fallback;
+    private String locale;
     private boolean poolEnabled;
     private int poolMaxTotalPrompts;
     private List<PoolEntry> poolEntries;
@@ -62,6 +63,7 @@ public final class PluginConfig {
         this.requestsPerDay = Math.max(1, config.getInt("limits.requests-per-day", 1000));
         this.maxPromptLength = Math.max(1, config.getInt("limits.max-prompt-length", 128));
         this.fallback = config.getString("fallback", "...");
+        this.locale = normalizeLocaleCode(config.getString("locale", "en"));
 
         this.poolEnabled = config.getBoolean("pool.enabled", true);
         this.poolMaxTotalPrompts = Math.max(0, config.getInt("pool.max-total-prompts", 10));
@@ -143,6 +145,13 @@ public final class PluginConfig {
         return trimTrailingSlash(defaults);
     }
 
+    private static String normalizeLocaleCode(String requested) {
+        if (requested == null || requested.isBlank()) {
+            return "en";
+        }
+        return requested.trim().replace('-', '_');
+    }
+
     private static String trimTrailingSlash(String url) {
         if (url == null || url.isBlank()) {
             return PROVIDER_BASE_URLS.get("openai");
@@ -204,6 +213,10 @@ public final class PluginConfig {
 
     public String getFallback() {
         return fallback;
+    }
+
+    public String getLocale() {
+        return locale;
     }
 
     public boolean isPoolEnabled() {

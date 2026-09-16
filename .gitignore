@@ -45,6 +45,7 @@ Thumbs.db
 # ===== MCP config and editor rule files with secrets =====
 openai-gpt-image-mcp/
 .cursor/
+.cursorignore
 mcp.json
 
 # ===== Сгенерированные картинки =====

@@ -1,21 +1,21 @@
 # NexusAI
 
-Асинхронный инфраструктурный плагин для Paper: мост между игровым движком и моделями ИИ через PlaceholderAPI.
+Asynchronous infrastructure plugin for Paper: a bridge between the game engine and AI models via PlaceholderAPI.
 
-Другие плагины (меню, чат, голограммы) могут запрашивать текст у ИИ плейсхолдерами без блокировки главного потока и без просадки TPS.
+Other plugins (menus, chat, holograms) can request AI text through placeholders without blocking the main thread or hurting TPS.
 
-## Требования
+## Requirements
 
 - Paper **26.2** (Java **25**)
 - [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6+ (soft-depend)
-- API-ключ OpenAI-совместимого провайдера
+- API key for an OpenAI-compatible provider
 
-## Установка
+## Installation
 
-1. Соберите shadow JAR: `./gradlew shadowJar`
-2. Скопируйте `build/libs/NexusAI-0.2.0-SNAPSHOT.jar` в папку `plugins/`
-3. Установите PlaceholderAPI
-4. Задайте ключ (предпочтительно через окружение):
+1. Build the shadow JAR: `./gradlew shadowJar`
+2. Copy `build/libs/NexusAI-0.3.0-SNAPSHOT.jar` into `plugins/`
+3. Install PlaceholderAPI
+4. Set the API key (prefer environment):
 
 ```bash
 # Windows (PowerShell)
@@ -25,50 +25,64 @@ $env:NEXUSAI_API_KEY = "sk-..."
 export NEXUSAI_API_KEY=sk-...
 ```
 
-Либо укажите `api.key` в `plugins/NexusAI/config.yml` (не коммитьте секреты).
+Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets).
 
-Без ключа плагин загружается, пишет warning в лог и **не** отправляет HTTP-запросы — плейсхолдеры возвращают `fallback`.
+Without a key the plugin still loads, logs a warning, and **does not** send HTTP requests — placeholders return `fallback`.
 
-## Конфигурация
+## Configuration
 
 `plugins/NexusAI/config.yml`:
 
-| Секция | Параметры |
-|--------|-----------|
-| `api` | `provider`, `model`, `base-url` (пустой = дефолт провайдера), `key`, `connect-timeout`, `read-timeout` |
-| `cache` | `ttl` (сек), `max-size` |
-| `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (по умолчанию **128**) |
+| Section | Parameters |
+|---------|------------|
+| `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
+| `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `connect-timeout`, `read-timeout` |
+| `cache` | `ttl` (seconds), `max-size` |
+| `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (default **128**) |
 | `pool` | `enabled`, `max-total-prompts`, `entries[]` (`prompt`, `size`, `min-threshold`) |
-| `prewarm` | `enabled`, `refresh-before-ttl` (сек), `prompts[]` (поддерживает `{player}`) |
-| `fallback` | строка при miss / лимитах / отсутствии ключа |
+| `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
+| `fallback` | String on miss / rate limits / missing key |
 
-Приоритет API-ключа: **`NEXUSAI_API_KEY`** → `api.key` в YAML.
+API key priority: **`NEXUSAI_API_KEY`** → `api.key` in YAML.
 
-### Провайдеры
+Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`. Optional overrides: `plugins/NexusAI/lang/<locale>.yml`.
 
-`api.provider` выбирает дефолтный `base-url`, если поле `api.base-url` пустое:
+### Providers
 
-| provider | base-url по умолчанию |
-|----------|------------------------|
+`api.provider` selects the default `base-url` when `api.base-url` is empty:
+
+| provider | Default base-url |
+|----------|------------------|
 | `openai` | `https://api.openai.com/v1` |
 | `groq` | `https://api.groq.com/openai/v1` |
 | `cerebras` | `https://api.cerebras.ai/v1` |
 | `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `deepseek` | `https://api.deepseek.com` |
 
-Явный `api.base-url` всегда побеждает. При старте в лог пишется: `Using provider: …, base-url: …, model: …`.
+An explicit `api.base-url` always wins. On startup the log prints: `Using provider: …, base-url: …, model: …`.
 
-## Плейсхолдеры
+## Commands
 
-### Уникальные ответы (пул)
+| Command | Permission | Description |
+|---------|------------|-------------|
+| `/nai help` | `nexusai.command` | Show command help |
+| `/nai version` | `nexusai.command` | Show plugin version |
+| `/nai reload` | `nexusai.reload` | Reload config + locale; rebuild cache/pool/prewarm |
+| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI |
+
+Alias: `/nexusai`. Defaults: OP.
+
+## Placeholders
+
+### Unique answers (pool)
 
 ```
-%ainexus_generate_<промпт>%
+%ainexus_generate_<prompt>%
 ```
 
-Берёт и **удаляет** один ответ из пула для этого промпта. Если пул пуст — сразу `fallback`, параллельно `PoolService` может пополнить очередь (если промпт есть в `pool.entries`).
+Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`.
 
-Пример `pool.entries`:
+Example `pool.entries`:
 
 ```yaml
 pool:
@@ -80,46 +94,59 @@ pool:
       min-threshold: 1
 ```
 
-### Общий TTL-кэш (голограммы)
+### Shared TTL cache (holograms)
 
 ```
-%ainexus_cached_<промпт>%
+%ainexus_cached_<prompt>%
 ```
 
-Поведение:
+Behavior:
 
-1. Если ответ есть в TTL-кэше — сразу общий текст
-2. Иначе мгновенно `fallback`, запрос уходит в фоне
-3. Повторный резолв того же промпта после ответа отдаёт кэш до истечения TTL
-4. Промпт длиннее `limits.max-prompt-length` → сразу `fallback`, без HTTP
-5. In-flight дедупликация — параллельные одинаковые запросы не дублируют HTTP
+1. Cached answer → return it immediately
+2. Otherwise return `fallback` and fetch in the background
+3. Later resolves of the same prompt return the cache until TTL expires
+4. Prompt longer than `limits.max-prompt-length` → `fallback`, no HTTP
+5. In-flight deduplication — parallel identical requests share one HTTP call
 
 ### Prewarm
 
-Секция `prewarm` прогревает TTL-кэш при старте и периодически обновляет промпты, когда запись уже не `isFresh` (возраст ≥ 80% TTL). Шаблоны с `{player}` на старте пропускаются; для них вызывайте `PrewarmService.warmForPlayer(playerName)`.
+`prewarm` warms the TTL cache on startup and periodically refreshes prompts that are no longer `isFresh` (age ≥ 80% of TTL). Templates with `{player}` are skipped on startup; use `PrewarmService.warmForPlayer(playerName)` for those.
 
-## Сборка
+## FAQ
+
+### Why is there no top-level “pool capacity” setting?
+
+Capacity is per prompt: `pool.entries[].size` (with `min-threshold` for refill). There is no global `pool.size`.  
+Also, Bukkit `saveDefaultConfig()` does **not** merge new keys into an existing `plugins/NexusAI/config.yml` — after upgrading, add new sections manually or regenerate the file.
+
+### What is prewarm?
+
+Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so holograms (and similar) can show a ready answer instead of the first-hit `fallback`. It is not the unique-answer pool (`generate_` / `pool`).
+
+## Build
 
 ```bash
 ./gradlew test
 ./gradlew shadowJar
 ```
 
-Зависимости Jackson и Caffeine упакованы в JAR и relocated в `io.github.neareststep.nexusai.libs.*`.
+Jackson and Caffeine are shaded and relocated under `io.github.neareststep.nexusai.libs.*`.
 
-Стек тестов: JUnit 5 (без Mockito — совместимость с Java 25).
+Test stack: JUnit 5 (no Mockito — Java 25 compatibility).
 
-## Архитектура (кратко)
+## Architecture (short)
 
-- `PluginConfig` — config.yml + env + дефолты провайдеров
+- `PluginConfig` — config.yml + env + provider defaults + locale
+- `MessageService` — `lang/*.yml` with English fallback
 - `AiCache` — Caffeine (TTL + max-size + `isFresh`)
-- `AiPool` / `PoolService` — очереди уникальных ответов для `generate_`
-- `PrewarmService` — прогрев и refresh TTL-кэша для `cached_`
-- `RateLimiter` — лимиты на игрока и на сервер
-- `AiProvider` / `OpenAiProvider` — HTTP к `/chat/completions`
-- `AiHttpClient` — кэш + in-flight + `generateFreshAsync` для пула
+- `AiPool` / `PoolService` — unique answer queues for `generate_`
+- `PrewarmService` — TTL warm-up/refresh for `cached_`
+- `RateLimiter` — per-player and server limits
+- `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
+- `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
+- `NaiCommand` — `/nai` admin commands
 
 ## License
 
-MIT License — Copyright (c) 2026 mo00Wy. Полный текст: [LICENSE](LICENSE).
+MIT License — Copyright (c) 2026 mo00Wy. Full text: [LICENSE](LICENSE).
