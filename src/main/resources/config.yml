@@ -34,6 +34,12 @@ pool:
   entries: []
   # Example:
   # entries:
+  #   - prompt: "Short warm welcome for the joining player"
+  #     size: 3
+  #     min-threshold: 1
+  #     # Model leaves {player_name} in the answer; NexusAI substitutes via PlaceholderAPI on delivery
+  #     vars:
+  #       player_name: "%player_name%"
   #   - prompt: "One short tip for miners"
   #     size: 3
   #     min-threshold: 1

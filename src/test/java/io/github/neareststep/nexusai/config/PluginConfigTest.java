@@ -92,6 +92,24 @@ class PluginConfigTest {
         assertEquals("b", pluginConfig.getPoolEntries().get(1).prompt());
     }
 
+    @Test
+    void poolEntryVarsAreParsed() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("pool.entries", List.of(
+                Map.of(
+                        "prompt", "Short warm welcome",
+                        "size", 3,
+                        "min-threshold", 1,
+                        "vars", Map.of("player_name", "%player_name%")
+                )
+        ));
+        PluginConfig pluginConfig = new PluginConfig(yaml);
+        assertEquals(1, pluginConfig.getPoolEntries().size());
+        PoolEntry entry = pluginConfig.getPoolEntries().get(0);
+        assertTrue(entry.hasVars());
+        assertEquals("%player_name%", entry.vars().get("player_name"));
+    }
+
     private static boolean hasEnvKey() {
         String env = System.getenv("NEXUSAI_API_KEY");
         return env != null && !env.isBlank();

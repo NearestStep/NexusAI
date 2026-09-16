@@ -13,7 +13,7 @@ Other plugins (menus, chat, holograms) can request AI text through placeholders 
 ## Installation
 
 1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-0.3.0-SNAPSHOT.jar` into `plugins/`
+2. Copy `build/libs/NexusAI-0.4.0-SNAPSHOT.jar` into `plugins/`
 3. Install PlaceholderAPI
 4. Set the API key (prefer environment):
 
@@ -39,7 +39,7 @@ Without a key the plugin still loads, logs a warning, and **does not** send HTTP
 | `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `connect-timeout`, `read-timeout` |
 | `cache` | `ttl` (seconds), `max-size` |
 | `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (default **128**) |
-| `pool` | `enabled`, `max-total-prompts`, `entries[]` (`prompt`, `size`, `min-threshold`) |
+| `pool` | `enabled`, `max-total-prompts`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
 | `fallback` | String on miss / rate limits / missing key |
 
@@ -82,16 +82,32 @@ Alias: `/nexusai`. Defaults: OP.
 
 Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`.
 
-Example `pool.entries`:
+Example `pool.entries` with personalization vars:
 
 ```yaml
 pool:
   enabled: true
   max-total-prompts: 10
   entries:
-    - prompt: "One short tip for miners"
+    - prompt: "Short warm welcome for the joining player"
       size: 3
       min-threshold: 1
+      vars:
+        player_name: "%player_name%"
+```
+
+How `vars` work:
+
+1. On refill, NexusAI tells the model to leave brace tokens like `{player_name}` in the answer (no real name invented).
+2. Answers are stored in the shared unique pool with those tokens.
+3. On `%ainexus_generate_<same prompt>%`, tokens are replaced via PlaceholderAPI for the viewing player → e.g. `Hello, Steve!`.
+
+The placeholder prompt string must match `entries[].prompt` exactly for `vars` to apply.
+
+CustomWelcome-style join message (prompt text must match the entry):
+
+```yaml
+join-message: '&e%ainexus_generate_Short warm welcome for the joining player%'
 ```
 
 ### Shared TTL cache (holograms)
@@ -123,6 +139,11 @@ Also, Bukkit `saveDefaultConfig()` does **not** merge new keys into an existing 
 
 Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so holograms (and similar) can show a ready answer instead of the first-hit `fallback`. It is not the unique-answer pool (`generate_` / `pool`).
 
+### Why doesn’t `%player_name%` inside the AI answer get replaced?
+
+NexusAI returns the model text as-is. Asking the model to emit `%player_name%` usually leaves that literal string — PlaceholderAPI is not re-run on the whole AI answer.  
+Use pool `vars` instead: the model writes `{player_name}`, and NexusAI substitutes it from `%player_name%` (or another PAPI template) when delivering `%ainexus_generate_*%`. Nested placeholders *inside* the NexusAI placeholder identifier are also unreliable across host plugins.
+
 ## Build
 
 ```bash
@@ -140,6 +161,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 compatibility).
 - `MessageService` — `lang/*.yml` with English fallback
 - `AiCache` — Caffeine (TTL + max-size + `isFresh`)
 - `AiPool` / `PoolService` — unique answer queues for `generate_`
+- `VarSubstitutor` — `{token}` delivery substitution from pool `vars`
 - `PrewarmService` — TTL warm-up/refresh for `cached_`
 - `RateLimiter` — per-player and server limits
 - `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
