@@ -3,10 +3,12 @@ package io.github.neareststep.nexusai.pool;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
+import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -68,8 +70,9 @@ public final class PoolService {
         }
 
         List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
+        String httpPrompt = VarSubstitutor.appendVarsRules(prompt, entry.vars());
         for (int i = 0; i < needed; i++) {
-            jobs.add(httpClient.generateFreshAsync(prompt).handle((answer, error) -> {
+            jobs.add(httpClient.generateFreshAsync(httpPrompt).handle((answer, error) -> {
                 if (error != null) {
                     logger.log(Level.FINE, "Pool replenish failed for prompt", error);
                 } else if (answer != null && !answer.isBlank()) {
@@ -92,6 +95,11 @@ public final class PoolService {
         if (pool.size(prompt) < entry.minThreshold()) {
             replenish(prompt);
         }
+    }
+
+    public Optional<PoolEntry> findEntry(String prompt) {
+        Objects.requireNonNull(prompt, "prompt");
+        return Optional.ofNullable(entriesByPrompt.get(prompt));
     }
 
     public void shutdown() {

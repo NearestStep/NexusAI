@@ -5,6 +5,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -102,9 +103,28 @@ public final class PluginConfig {
             if (minThreshold > size) {
                 minThreshold = size;
             }
-            entries.add(new PoolEntry(prompt, size, minThreshold));
+            entries.add(new PoolEntry(prompt, size, minThreshold, loadVars(map.get("vars"))));
         }
         return entries;
+    }
+
+    private static Map<String, String> loadVars(Object raw) {
+        if (!(raw instanceof Map<?, ?> map) || map.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> vars = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            String key = String.valueOf(entry.getKey()).trim();
+            String value = String.valueOf(entry.getValue()).trim();
+            if (key.isEmpty() || value.isEmpty()) {
+                continue;
+            }
+            vars.put(key, value);
+        }
+        return vars;
     }
 
     private static List<String> loadPrewarmPrompts(FileConfiguration config) {

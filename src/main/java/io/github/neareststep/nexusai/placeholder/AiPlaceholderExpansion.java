@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
@@ -74,7 +75,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     @Override
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
         if (params.startsWith(GENERATE_PREFIX)) {
-            return resolveGenerate(params.substring(GENERATE_PREFIX.length()));
+            return resolveGenerate(player, params.substring(GENERATE_PREFIX.length()));
         }
         if (params.startsWith(CACHED_PREFIX)) {
             return resolveCached(player, params.substring(CACHED_PREFIX.length()));
@@ -82,13 +83,20 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         return null;
     }
 
-    private String resolveGenerate(String prompt) {
+    private String resolveGenerate(Player player, String prompt) {
         if (!PromptValidation.isUsablePrompt(prompt, config.getMaxPromptLength())) {
             return config.getFallback();
         }
         Optional<String> answer = pool.poll(prompt);
         poolService.onConsume(prompt);
-        return answer.orElseGet(config::getFallback);
+        if (answer.isEmpty()) {
+            return config.getFallback();
+        }
+        Optional<PoolEntry> entry = poolService.findEntry(prompt);
+        if (entry.isPresent() && entry.get().hasVars()) {
+            return VarSubstitutor.apply(answer.get(), entry.get().vars(), player);
+        }
+        return answer.get();
     }
 
     private String resolveCached(Player player, String prompt) {
