@@ -4,13 +4,16 @@ import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import org.bukkit.Bukkit;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.Set;
@@ -28,6 +31,7 @@ public final class NexusAI extends JavaPlugin {
     );
 
     private PluginConfig pluginConfig;
+    private MessageService messageService;
     private AiCache aiCache;
     private RateLimiter rateLimiter;
     private AiHttpClient aiHttpClient;
@@ -42,6 +46,8 @@ public final class NexusAI extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         this.pluginConfig = new PluginConfig(getConfig());
+        this.messageService = new MessageService(this);
+        this.messageService.reload(pluginConfig.getLocale());
 
         if (!pluginConfig.hasApiKey()) {
             getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
@@ -54,6 +60,38 @@ public final class NexusAI extends JavaPlugin {
 
         this.httpExecutor = createHttpExecutor();
         this.scheduler = createScheduler();
+        startRuntimeServices();
+        registerPlaceholderExpansion();
+        registerCommands();
+
+        getLogger().info("NexusAI enabled.");
+    }
+
+    @Override
+    public void onDisable() {
+        unregisterPlaceholderExpansion();
+        stopRuntimeServices(true);
+        shutdownExecutor(scheduler);
+        shutdownExecutor(httpExecutor);
+        getLogger().info("NexusAI disabled.");
+    }
+
+    /**
+     * Reloads config.yml + locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
+     */
+    public void reloadPlugin() {
+        reloadConfig();
+        pluginConfig.reload(getConfig());
+        messageService.reload(pluginConfig.getLocale());
+
+        stopRuntimeServices(true);
+        startRuntimeServices();
+        registerPlaceholderExpansion();
+
+        getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale() + ").");
+    }
+
+    private void startRuntimeServices() {
         this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize());
         this.rateLimiter = new RateLimiter(pluginConfig.getRequestsPerMinute(), pluginConfig.getRequestsPerDay());
 
@@ -67,7 +105,25 @@ public final class NexusAI extends JavaPlugin {
         poolService.start();
         prewarmService.start();
         prewarmService.scheduleRefresh();
+    }
 
+    private void stopRuntimeServices(boolean invalidateCache) {
+        unregisterPlaceholderExpansion();
+        if (prewarmService != null) {
+            prewarmService.shutdown();
+            prewarmService = null;
+        }
+        if (poolService != null) {
+            poolService.shutdown();
+            poolService = null;
+        }
+        if (invalidateCache && aiCache != null) {
+            aiCache.invalidateAll();
+        }
+    }
+
+    private void registerPlaceholderExpansion() {
+        unregisterPlaceholderExpansion();
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             this.placeholderExpansion = new AiPlaceholderExpansion(
                     this, pluginConfig, aiCache, aiHttpClient, rateLimiter, aiPool, poolService);
@@ -80,28 +136,24 @@ public final class NexusAI extends JavaPlugin {
         } else {
             getLogger().warning("PlaceholderAPI not found. Placeholders will be unavailable.");
         }
-
-        getLogger().info("NexusAI enabled.");
     }
 
-    @Override
-    public void onDisable() {
+    private void unregisterPlaceholderExpansion() {
         if (placeholderExpansion != null) {
             placeholderExpansion.unregister();
             placeholderExpansion = null;
         }
-        if (prewarmService != null) {
-            prewarmService.shutdown();
+    }
+
+    private void registerCommands() {
+        PluginCommand command = getCommand("nai");
+        if (command == null) {
+            getLogger().warning("Command 'nai' missing from plugin.yml");
+            return;
         }
-        if (poolService != null) {
-            poolService.shutdown();
-        }
-        if (aiCache != null) {
-            aiCache.invalidateAll();
-        }
-        shutdownExecutor(scheduler);
-        shutdownExecutor(httpExecutor);
-        getLogger().info("NexusAI disabled.");
+        NaiCommand executor = new NaiCommand(this);
+        command.setExecutor(executor);
+        command.setTabCompleter(executor);
     }
 
     private AiProvider createProvider(PluginConfig config) {
@@ -149,6 +201,10 @@ public final class NexusAI extends JavaPlugin {
 
     public PluginConfig getPluginConfig() {
         return pluginConfig;
+    }
+
+    public MessageService getMessageService() {
+        return messageService;
     }
 
     public AiCache getAiCache() {

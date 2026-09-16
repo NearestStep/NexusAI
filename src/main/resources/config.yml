@@ -3,6 +3,9 @@
 # Prefer setting the API key via environment variable NEXUSAI_API_KEY.
 # Do not commit real keys. api.key below is only a fallback for local testing.
 
+# Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
+locale: en
+
 api:
   # openai | groq | cerebras | gemini | deepseek
   provider: openai

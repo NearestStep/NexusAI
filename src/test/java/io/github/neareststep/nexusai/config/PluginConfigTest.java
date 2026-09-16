@@ -27,6 +27,7 @@ class PluginConfigTest {
         config.set("limits.requests-per-day", 1000);
         config.set("limits.max-prompt-length", 128);
         config.set("fallback", "...");
+        config.set("locale", "en");
         config.set("pool.enabled", true);
         config.set("pool.max-total-prompts", 10);
         config.set("pool.entries", List.of());
@@ -45,6 +46,7 @@ class PluginConfigTest {
         assertFalse(pluginConfig.hasApiKey());
         assertEquals(128, pluginConfig.getMaxPromptLength());
         assertEquals("https://api.openai.com/v1", pluginConfig.getBaseUrl());
+        assertEquals("en", pluginConfig.getLocale());
     }
 
     @Test

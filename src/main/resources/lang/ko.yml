@@ -1,0 +1,29 @@
+# NexusAI messages (Korean)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&c권한이 없습니다."
+  unknown: "{prefix}&c알 수 없는 하위 명령입니다. &e/nai help&c를 사용하세요."
+  help-header: "{prefix}&eNexusAI 명령어:"
+  help-help: "&7/nai help &8- &f이 도움말 표시"
+  help-version: "&7/nai version &8- &f플러그인 버전 표시"
+  help-reload: "&7/nai reload &8- &f설정과 로케일 다시 로드"
+  help-status: "&7/nai status &8- &f상태 표시"
+  version: "{prefix}&f버전: &a{version}"
+  reload-ok: "{prefix}&a설정을 다시 불러왔습니다."
+  reload-fail: "{prefix}&c다시 불러오기 실패: &f{error}"
+  status-header: "{prefix}&e상태:"
+  status-locale: "&7로케일: &f{locale}"
+  status-provider: "&7제공자: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7모델: &f{model}"
+  status-api-key: "&7API 키: &f{api_key}"
+  status-pool: "&7풀: &f{pool_state} &8({pool_entries}개)"
+  status-cache: "&7캐시 크기: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "예"
+  no: "아니오"
+  enabled: "사용"
+  disabled: "사용 안 함"

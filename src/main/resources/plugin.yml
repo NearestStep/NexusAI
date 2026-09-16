@@ -5,3 +5,21 @@ api-version: '26.2'
 authors: [ mo00Wy ]
 description: Asynchronous bridge between Minecraft and AI models via PlaceholderAPI
 softdepend: [PlaceholderAPI]
+
+commands:
+  nai:
+    description: NexusAI admin commands
+    usage: /nai <help|version|reload|status>
+    aliases: [nexusai]
+    permission: nexusai.command
+
+permissions:
+  nexusai.command:
+    description: Access /nai base commands
+    default: op
+  nexusai.reload:
+    description: Reload NexusAI configuration
+    default: op
+  nexusai.status:
+    description: View NexusAI runtime status
+    default: op

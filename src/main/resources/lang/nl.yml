@@ -1,0 +1,29 @@
+# NexusAI messages (Dutch)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&cGeen toestemming."
+  unknown: "{prefix}&cOnbekende subopdracht. Gebruik &e/nai help&c."
+  help-header: "{prefix}&eNexusAI-opdrachten:"
+  help-help: "&7/nai help &8- &fDeze hulp tonen"
+  help-version: "&7/nai version &8- &fPluginversie tonen"
+  help-reload: "&7/nai reload &8- &fConfig en locale herladen"
+  help-status: "&7/nai status &8- &fStatus tonen"
+  version: "{prefix}&fVersie: &a{version}"
+  reload-ok: "{prefix}&aConfiguratie herladen."
+  reload-fail: "{prefix}&cHerladen mislukt: &f{error}"
+  status-header: "{prefix}&eStatus:"
+  status-locale: "&7Locale: &f{locale}"
+  status-provider: "&7Provider: &f{provider}"
+  status-base-url: "&7Base-URL: &f{base_url}"
+  status-model: "&7Model: &f{model}"
+  status-api-key: "&7API-sleutel: &f{api_key}"
+  status-pool: "&7Pool: &f{pool_state} &8({pool_entries} items)"
+  status-cache: "&7Cachegrootte: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "ja"
+  no: "nee"
+  enabled: "ingeschakeld"
+  disabled: "uitgeschakeld"

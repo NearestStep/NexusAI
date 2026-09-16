@@ -1,0 +1,29 @@
+# NexusAI messages (Japanese)
+prefix: "&8[&bNexusAI&8]&r "
+
+command:
+  no-permission: "{prefix}&c権限がありません。"
+  unknown: "{prefix}&c不明なサブコマンドです。&e/nai help&c を使用してください。"
+  help-header: "{prefix}&eNexusAI コマンド:"
+  help-help: "&7/nai help &8- &fこのヘルプを表示"
+  help-version: "&7/nai version &8- &fプラグインのバージョンを表示"
+  help-reload: "&7/nai reload &8- &f設定とロケールを再読込"
+  help-status: "&7/nai status &8- &fステータスを表示"
+  version: "{prefix}&fバージョン: &a{version}"
+  reload-ok: "{prefix}&a設定を再読み込みしました。"
+  reload-fail: "{prefix}&c再読み込みに失敗しました: &f{error}"
+  status-header: "{prefix}&eステータス:"
+  status-locale: "&7ロケール: &f{locale}"
+  status-provider: "&7プロバイダー: &f{provider}"
+  status-base-url: "&7Base URL: &f{base_url}"
+  status-model: "&7モデル: &f{model}"
+  status-api-key: "&7APIキー: &f{api_key}"
+  status-pool: "&7プール: &f{pool_state} &8({pool_entries} 件)"
+  status-cache: "&7キャッシュサイズ: &f{cache_size}"
+  status-papi: "&7PlaceholderAPI: &f{papi}"
+
+common:
+  yes: "はい"
+  no: "いいえ"
+  enabled: "有効"
+  disabled: "無効"
