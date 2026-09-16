@@ -42,6 +42,19 @@ public final class AiHttpClient {
                 });
     }
 
+    /**
+     * Fresh completion that never reads or writes the shared TTL cache.
+     * Used by response pools so each fill stays unique.
+     */
+    public CompletableFuture<String> generateFreshAsync(String prompt) {
+        Objects.requireNonNull(prompt, "prompt");
+        if (!config.hasApiKey()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("NexusAI API key is not configured"));
+        }
+        return provider.complete(prompt);
+    }
+
     private CompletableFuture<String> startRequest(String key) {
         String prompt = promptFromKey(key);
         CompletableFuture<String> future = provider.complete(prompt);

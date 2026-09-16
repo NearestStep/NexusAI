@@ -7,22 +7,35 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
+import io.github.neareststep.nexusai.pool.AiPool;
+import io.github.neareststep.nexusai.pool.PoolService;
+import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class NexusAI extends JavaPlugin {
 
+    private static final Set<String> KNOWN_PROVIDERS = Set.of(
+            "openai", "groq", "cerebras", "gemini", "deepseek"
+    );
+
     private PluginConfig pluginConfig;
     private AiCache aiCache;
     private RateLimiter rateLimiter;
     private AiHttpClient aiHttpClient;
+    private AiPool aiPool;
+    private PoolService poolService;
+    private PrewarmService prewarmService;
     private ExecutorService httpExecutor;
+    private ScheduledExecutorService scheduler;
     private AiPlaceholderExpansion placeholderExpansion;
 
     @Override
@@ -35,18 +48,32 @@ public final class NexusAI extends JavaPlugin {
                     + "Plugin will load, but AI requests will not be sent.");
         }
 
+        getLogger().info("Using provider: " + pluginConfig.getProvider()
+                + ", base-url: " + pluginConfig.getBaseUrl()
+                + ", model: " + pluginConfig.getModel());
+
         this.httpExecutor = createHttpExecutor();
+        this.scheduler = createScheduler();
         this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize());
         this.rateLimiter = new RateLimiter(pluginConfig.getRequestsPerMinute(), pluginConfig.getRequestsPerDay());
 
         AiProvider provider = createProvider(pluginConfig);
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, getLogger());
+        this.aiPool = new AiPool();
+        this.poolService = new PoolService(pluginConfig, aiPool, aiHttpClient, getLogger());
+        this.prewarmService = new PrewarmService(
+                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger());
+
+        poolService.start();
+        prewarmService.start();
+        prewarmService.scheduleRefresh();
 
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             this.placeholderExpansion = new AiPlaceholderExpansion(
-                    this, pluginConfig, aiCache, aiHttpClient, rateLimiter);
+                    this, pluginConfig, aiCache, aiHttpClient, rateLimiter, aiPool, poolService);
             if (placeholderExpansion.register()) {
-                getLogger().info("Registered PlaceholderAPI expansion %ainexus_generate_<prompt>%");
+                getLogger().info("Registered PlaceholderAPI expansion "
+                        + "%ainexus_generate_<prompt>% / %ainexus_cached_<prompt>%");
             } else {
                 getLogger().warning("Failed to register PlaceholderAPI expansion.");
             }
@@ -54,8 +81,7 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("PlaceholderAPI not found. Placeholders will be unavailable.");
         }
 
-        getLogger().info("NexusAI enabled (provider=" + pluginConfig.getProvider()
-                + ", model=" + pluginConfig.getModel() + ").");
+        getLogger().info("NexusAI enabled.");
     }
 
     @Override
@@ -64,17 +90,24 @@ public final class NexusAI extends JavaPlugin {
             placeholderExpansion.unregister();
             placeholderExpansion = null;
         }
+        if (prewarmService != null) {
+            prewarmService.shutdown();
+        }
+        if (poolService != null) {
+            poolService.shutdown();
+        }
         if (aiCache != null) {
             aiCache.invalidateAll();
         }
-        shutdownExecutor();
+        shutdownExecutor(scheduler);
+        shutdownExecutor(httpExecutor);
         getLogger().info("NexusAI disabled.");
     }
 
     private AiProvider createProvider(PluginConfig config) {
         String provider = config.getProvider();
-        if (!"openai".equals(provider)) {
-            getLogger().warning("Unknown api.provider '" + provider + "', falling back to openai.");
+        if (!KNOWN_PROVIDERS.contains(provider)) {
+            getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
         return new OpenAiProvider(config, httpExecutor, getLogger());
     }
@@ -89,18 +122,27 @@ public final class NexusAI extends JavaPlugin {
         return Executors.newFixedThreadPool(4, factory);
     }
 
-    private void shutdownExecutor() {
-        if (httpExecutor == null) {
+    private static ScheduledExecutorService createScheduler() {
+        ThreadFactory factory = runnable -> {
+            Thread thread = new Thread(runnable, "nexusai-scheduler");
+            thread.setDaemon(true);
+            return thread;
+        };
+        return Executors.newSingleThreadScheduledExecutor(factory);
+    }
+
+    private static void shutdownExecutor(ExecutorService executor) {
+        if (executor == null) {
             return;
         }
-        httpExecutor.shutdown();
+        executor.shutdown();
         try {
-            if (!httpExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                httpExecutor.shutdownNow();
-                httpExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+                executor.awaitTermination(2, TimeUnit.SECONDS);
             }
         } catch (InterruptedException e) {
-            httpExecutor.shutdownNow();
+            executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
@@ -119,6 +161,18 @@ public final class NexusAI extends JavaPlugin {
 
     public AiHttpClient getAiHttpClient() {
         return aiHttpClient;
+    }
+
+    public AiPool getAiPool() {
+        return aiPool;
+    }
+
+    public PoolService getPoolService() {
+        return poolService;
+    }
+
+    public PrewarmService getPrewarmService() {
+        return prewarmService;
     }
 
     public ExecutorService getHttpExecutor() {
