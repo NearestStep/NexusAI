@@ -1,4 +1,4 @@
-# ===== Секреты и доступы (КРИТИЧНО) =====
+# ===== Secrets and credentials (CRITICAL) =====
 .env
 .env.*
 *.key
@@ -20,14 +20,14 @@ venv/
 .venv/
 .Python
 
-# ===== Docker (если используешь) =====
+# ===== Docker (if used) =====
 docker-compose.override.yml
 docker-compose.*.yml
 docker-compose.*.env
 *.tar
 *.tar.gz
 
-# ===== Артефакты сборки и логи =====
+# ===== Build artifacts and logs =====
 dist/
 build/
 out/
@@ -35,7 +35,7 @@ out/
 *.log
 *.pid
 
-# ===== Системное и редакторы =====
+# ===== System and editors =====
 .DS_Store
 Thumbs.db
 .vscode/
@@ -48,10 +48,11 @@ openai-gpt-image-mcp/
 .cursorignore
 mcp.json
 
-# ===== Сгенерированные картинки =====
+# ===== Generated images / publication materials (not product) =====
 sprites/
+file_output/
 
-# ===== OneDrive-артефакты (если появятся) =====
+# ===== OneDrive artifacts (if any) =====
 *.tmp
 ~$*
 # ===== Java / Maven =====
@@ -61,7 +62,7 @@ target/
 !gradle/wrapper/gradle-wrapper.jar
 *.war
 *.ear
-# ===== Локальный сервер Minecraft (Тесты) =====
+# ===== Local Minecraft server (tests) =====
 /run/
 /server/
 /cache/
