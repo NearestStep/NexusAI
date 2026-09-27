@@ -39,7 +39,7 @@ public final class PrewarmService {
 
     public void start() {
         running = true;
-        if (!config.isPrewarmEnabled() || !config.hasApiKey()) {
+        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
         for (String prompt : config.getPrewarmPrompts()) {
@@ -48,7 +48,7 @@ public final class PrewarmService {
     }
 
     public void scheduleRefresh() {
-        if (!config.isPrewarmEnabled() || !config.hasApiKey()) {
+        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
         long periodSeconds = Math.max(1L, config.getPrewarmRefreshBeforeTtl().toSeconds());
@@ -57,7 +57,7 @@ public final class PrewarmService {
 
     public void warmForPlayer(String playerName) {
         Objects.requireNonNull(playerName, "playerName");
-        if (!running || !config.isPrewarmEnabled() || !config.hasApiKey()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
         for (String template : config.getPrewarmPrompts()) {
@@ -76,7 +76,7 @@ public final class PrewarmService {
     }
 
     void refreshStale() {
-        if (!running || !config.isPrewarmEnabled() || !config.hasApiKey()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
         for (String prompt : config.getPrewarmPrompts()) {
@@ -93,6 +93,9 @@ public final class PrewarmService {
 
     private void warmPrompt(String prompt) {
         if (prompt == null || prompt.isBlank() || prompt.contains("{player}")) {
+            return;
+        }
+        if (httpClient.isAdmissionBlocked(prompt)) {
             return;
         }
         httpClient.requestAsync(prompt).whenComplete((ignored, error) -> {

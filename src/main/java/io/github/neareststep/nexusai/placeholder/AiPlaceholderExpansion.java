@@ -5,7 +5,6 @@ import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
-import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
@@ -30,7 +29,6 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private final PluginConfig config;
     private final AiCache cache;
     private final AiHttpClient httpClient;
-    private final RateLimiter rateLimiter;
     private final AiPool pool;
     private final PoolService poolService;
 
@@ -39,7 +37,6 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             PluginConfig config,
             AiCache cache,
             AiHttpClient httpClient,
-            RateLimiter rateLimiter,
             AiPool pool,
             PoolService poolService
     ) {
@@ -47,7 +44,6 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.config = config;
         this.cache = cache;
         this.httpClient = httpClient;
-        this.rateLimiter = rateLimiter;
         this.pool = pool;
         this.poolService = poolService;
     }
@@ -106,15 +102,11 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
         String key = httpClient.cacheKey(prompt);
         return cache.get(key).orElseGet(() -> {
-            UUID playerId = player != null ? player.getUniqueId() : RateLimiter.SERVER_SENTINEL;
-            if (!rateLimiter.tryAcquire(playerId)) {
+            if (!config.canSendRequests()) {
                 return config.getFallback();
             }
-            if (!config.hasApiKey()) {
-                return config.getFallback();
-            }
-
-            httpClient.requestAsync(prompt).whenComplete((ignored, error) -> {
+            UUID playerId = player != null ? player.getUniqueId() : null;
+            httpClient.requestAsync(prompt, playerId).whenComplete((ignored, error) -> {
                 if (error != null) {
                     plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
                 }

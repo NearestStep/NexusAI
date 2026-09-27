@@ -1,22 +1,33 @@
 package io.github.neareststep.nexusai;
 
+import io.github.neareststep.nexusai.ai.AiDiagnostics;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
+import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
+import io.github.neareststep.nexusai.config.ConfigMerger;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
+import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.time.Duration;
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -27,7 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class NexusAI extends JavaPlugin {
 
     private static final Set<String> KNOWN_PROVIDERS = Set.of(
-            "openai", "groq", "cerebras", "gemini", "deepseek"
+            "openai", "groq", "cerebras", "gemini", "deepseek", "ollama", "openrouter"
     );
 
     private PluginConfig pluginConfig;
@@ -44,14 +55,16 @@ public final class NexusAI extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        saveDefaultConfig();
+        mergeMissingConfig();
         this.pluginConfig = new PluginConfig(getConfig());
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
 
-        if (!pluginConfig.hasApiKey()) {
+        if (!pluginConfig.canSendRequests()) {
             getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
                     + "Plugin will load, but AI requests will not be sent.");
+        } else if (!pluginConfig.hasApiKey()) {
+            getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
         }
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
@@ -80,6 +93,7 @@ public final class NexusAI extends JavaPlugin {
      * Reloads config.yml + locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
      */
     public void reloadPlugin() {
+        mergeMissingConfig();
         reloadConfig();
         pluginConfig.reload(getConfig());
         messageService.reload(pluginConfig.getLocale());
@@ -96,9 +110,19 @@ public final class NexusAI extends JavaPlugin {
         this.rateLimiter = new RateLimiter(pluginConfig.getRequestsPerMinute(), pluginConfig.getRequestsPerDay());
 
         AiProvider provider = createProvider(pluginConfig);
-        this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, getLogger());
+        RequestGate gate = RequestGate.fromConfig(rateLimiter, pluginConfig);
+        AiDiagnostics diagnostics = new AiDiagnostics(
+                getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
+        this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
         this.aiPool = new AiPool();
-        this.poolService = new PoolService(pluginConfig, aiPool, aiHttpClient, getLogger());
+        PoolStore poolStore = new PoolStore(
+                new File(getDataFolder(), "pool.yml"),
+                scheduler,
+                Duration.ofSeconds(pluginConfig.getPoolSaveDelaySeconds()),
+                getLogger(),
+                pluginConfig.isPoolPersist()
+        );
+        this.poolService = new PoolService(pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore);
         this.prewarmService = new PrewarmService(
                 pluginConfig, aiCache, aiHttpClient, scheduler, getLogger());
 
@@ -126,7 +150,7 @@ public final class NexusAI extends JavaPlugin {
         unregisterPlaceholderExpansion();
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             this.placeholderExpansion = new AiPlaceholderExpansion(
-                    this, pluginConfig, aiCache, aiHttpClient, rateLimiter, aiPool, poolService);
+                    this, pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
             if (placeholderExpansion.register()) {
                 getLogger().info("Registered PlaceholderAPI expansion "
                         + "%ainexus_generate_<prompt>% / %ainexus_cached_<prompt>%");
@@ -154,6 +178,27 @@ public final class NexusAI extends JavaPlugin {
         NaiCommand executor = new NaiCommand(this);
         command.setExecutor(executor);
         command.setTabCompleter(executor);
+    }
+
+    private void mergeMissingConfig() {
+        saveDefaultConfig();
+        File file = new File(getDataFolder(), "config.yml");
+        try (InputStream in = getResource("config.yml")) {
+            if (in == null || !file.isFile()) {
+                return;
+            }
+            String defaults = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            String existing = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+            ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+            if (result.addedKeys().isEmpty()) {
+                return;
+            }
+            Files.writeString(file.toPath(), result.yaml(), StandardCharsets.UTF_8);
+            getLogger().info("Added missing config keys: " + String.join(", ", result.addedKeys()));
+            reloadConfig();
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Failed to merge missing config keys", e);
+        }
     }
 
     private AiProvider createProvider(PluginConfig config) {

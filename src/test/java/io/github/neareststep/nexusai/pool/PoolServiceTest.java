@@ -1,9 +1,14 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.ai.AiDiagnostics;
+import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +18,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -153,6 +159,73 @@ class PoolServiceTest {
         assertEquals(0, calls.get());
         assertEquals(0, pool.size("tip"));
         service.shutdown();
+    }
+
+    @Test
+    void replenishStopsWhenTheSharedRateLimitIsSpent() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> CompletableFuture.completedFuture("v" + calls.incrementAndGet());
+        PluginConfig pluginConfig = config("test-key", 5, 1);
+        AiHttpClient client = gated(pluginConfig, new RateLimiter(2, 100), new AtomicLong(1_000L), provider);
+        PoolService service = new PoolService(pluginConfig, pool, client, Logger.getLogger("test"));
+        service.start();
+        await(() -> calls.get() >= 2, 2, TimeUnit.SECONDS);
+        assertEquals(2, calls.get());
+        assertEquals(2, pool.size("tip"));
+        service.replenish("tip");
+        Thread.sleep(40);
+        assertEquals(2, calls.get());
+        service.shutdown();
+    }
+
+    @Test
+    void emptyPoolDoesNotRefireWhileTheProviderIsPaused() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        CompletableFuture<String> pending = new CompletableFuture<>();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return pending;
+        };
+        PluginConfig pluginConfig = config("test-key", 3, 1);
+        AiHttpClient client = gated(pluginConfig, new RateLimiter(100, 100), new AtomicLong(1_000L), provider);
+        PoolService service = new PoolService(pluginConfig, pool, client, Logger.getLogger("test"));
+        service.start();
+        await(() -> calls.get() == 3, 2, TimeUnit.SECONDS);
+        pending.completeExceptionally(new AiRequestException(AiErrorKind.RATE_LIMIT, 429, "HTTP 429", null));
+        await(() -> client.isProviderPaused(), 2, TimeUnit.SECONDS);
+
+        service.replenish("tip");
+        service.onConsume("tip");
+        Thread.sleep(40);
+        assertEquals(3, calls.get());
+        assertEquals(0, pool.size("tip"));
+        service.shutdown();
+    }
+
+    @Test
+    void ollamaWithoutKeyStillFillsThePool() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> CompletableFuture.completedFuture("local-" + calls.incrementAndGet());
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("api.provider", "ollama");
+        yaml.set("api.model", "llama3.2");
+        yaml.set("api.base-url", "");
+        yaml.set("api.key", "");
+        yaml.set("pool.enabled", true);
+        yaml.set("pool.entries", List.of(Map.of("prompt", "tip", "size", 1, "min-threshold", 1)));
+        PluginConfig pluginConfig = new PluginConfig(yaml);
+        AiHttpClient client = new AiHttpClient(cache, provider, pluginConfig, Logger.getLogger("test"));
+        PoolService service = new PoolService(pluginConfig, pool, client, Logger.getLogger("test"));
+        service.start();
+        await(() -> pool.size("tip") == 1, 2, TimeUnit.SECONDS);
+        assertEquals(1, calls.get());
+        service.shutdown();
+    }
+
+    private AiHttpClient gated(PluginConfig pluginConfig, RateLimiter limiter, AtomicLong clock, AiProvider provider) {
+        RequestGate gate = new RequestGate(limiter, 2_000L, 30_000L, 60_000L, 300_000L, clock::get);
+        AiDiagnostics diagnostics = new AiDiagnostics(Logger.getLogger("pool-gate"), Duration.ofSeconds(30));
+        return new AiHttpClient(cache, provider, pluginConfig, gate, diagnostics, Logger.getLogger("pool-gate"));
     }
 
     private static void await(Condition condition, long timeout, TimeUnit unit) throws InterruptedException {

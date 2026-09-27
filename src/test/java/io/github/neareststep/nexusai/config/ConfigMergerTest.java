@@ -1,0 +1,69 @@
+package io.github.neareststep.nexusai.config;
+
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.junit.jupiter.api.Test;
+
+import java.io.StringReader;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ConfigMergerTest {
+
+    @Test
+    void addsMissingKeysWithoutReplacingUserValuesOrComments() {
+        String existing = """
+                # user header
+                locale: ru
+                api:
+                  # keep this comment
+                  provider: groq
+                  model: my-model
+                  key: "secret"
+                limits:
+                  requests-per-minute: 4
+                fallback: "wait"
+                """;
+        String defaults = """
+                locale: en
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                  key: ""
+                  system-prompt: ""
+                  temperature: -1
+                limits:
+                  requests-per-minute: 30
+                  provider-pause-seconds: 60
+                fallback: "..."
+                pool:
+                  persist: true
+                """;
+
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+        assertTrue(result.addedKeys().contains("api.system-prompt"));
+        assertTrue(result.addedKeys().contains("api.temperature"));
+        assertTrue(result.addedKeys().contains("limits.provider-pause-seconds"));
+        assertTrue(result.addedKeys().contains("pool.persist"));
+        assertFalse(result.addedKeys().contains("api.model"));
+        assertTrue(result.yaml().contains("# user header"));
+        assertTrue(result.yaml().contains("# keep this comment"));
+
+        YamlConfiguration parsed = YamlConfiguration.loadConfiguration(new StringReader(result.yaml()));
+        assertEquals("ru", parsed.getString("locale"));
+        assertEquals("groq", parsed.getString("api.provider"));
+        assertEquals("my-model", parsed.getString("api.model"));
+        assertEquals("secret", parsed.getString("api.key"));
+        assertEquals(4, parsed.getInt("limits.requests-per-minute"));
+        assertEquals("wait", parsed.getString("fallback"));
+        assertEquals("", parsed.getString("api.system-prompt"));
+        assertEquals(-1, parsed.getInt("api.temperature"));
+        assertEquals(60, parsed.getInt("limits.provider-pause-seconds"));
+        assertTrue(parsed.getBoolean("pool.persist"));
+
+        ConfigMerger.Result second = ConfigMerger.mergeMissing(result.yaml(), defaults);
+        assertTrue(second.addedKeys().isEmpty());
+        assertEquals(result.yaml(), second.yaml());
+    }
+}

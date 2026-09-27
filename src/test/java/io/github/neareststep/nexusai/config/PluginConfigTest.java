@@ -93,6 +93,70 @@ class PluginConfigTest {
     }
 
     @Test
+    void ollamaAndOpenRouterHaveDefaultBaseUrls() {
+        YamlConfiguration ollama = baseYaml();
+        ollama.set("api.provider", "ollama");
+        ollama.set("api.base-url", "");
+        ollama.set("api.key", "");
+        PluginConfig local = new PluginConfig(ollama);
+        assertEquals("http://localhost:11434/v1", local.getBaseUrl());
+        assertTrue(local.allowsKeylessRequests());
+        if (!hasEnvKey()) {
+            assertFalse(local.hasApiKey());
+            assertTrue(local.canSendRequests());
+        }
+
+        YamlConfiguration openRouter = baseYaml();
+        openRouter.set("api.provider", "openrouter");
+        openRouter.set("api.base-url", "");
+        PluginConfig remote = new PluginConfig(openRouter);
+        assertEquals("https://openrouter.ai/api/v1", remote.getBaseUrl());
+        assertFalse(remote.allowsKeylessRequests());
+    }
+
+    @Test
+    void localhostAndOllamaPortAllowKeylessRequests() {
+        assertTrue(PluginConfig.isLocalBaseUrl("http://127.0.0.1:8080/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://[::1]:11434/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://10.0.0.8:11434/v1"));
+        assertFalse(PluginConfig.isLocalBaseUrl("https://api.openai.com/v1"));
+    }
+
+    @Test
+    void generationDefaultsOmitOptionalParameters() {
+        PluginConfig pluginConfig = new PluginConfig(baseYaml());
+        assertEquals(null, pluginConfig.getSystemPrompt());
+        assertEquals(null, pluginConfig.getTemperature());
+        assertEquals(null, pluginConfig.getMaxTokens());
+        assertFalse(pluginConfig.isStripMarkdown());
+        assertEquals("low", pluginConfig.getReasoningEffort());
+        assertEquals(60, pluginConfig.getProviderPauseSeconds());
+        assertEquals(300, pluginConfig.getAuthPauseSeconds());
+        assertTrue(pluginConfig.isPoolPersist());
+    }
+
+    @Test
+    void poolEntryCanOverrideGenerationSettings() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("api.temperature", 0.9);
+        yaml.set("api.max-tokens", 400);
+        yaml.set("pool.entries", List.of(
+                Map.of(
+                        "prompt", "Short warm welcome",
+                        "size", 3,
+                        "min-threshold", 1,
+                        "system-prompt", "Be brief",
+                        "temperature", 0,
+                        "max-tokens", 40
+                )
+        ));
+        PoolEntry entry = new PluginConfig(yaml).getPoolEntries().getFirst();
+        assertEquals("Be brief", entry.overrides().systemPrompt("global"));
+        assertEquals(0.0, entry.overrides().temperature(0.9), 0.0001);
+        assertEquals(40, entry.overrides().maxTokens(400));
+    }
+
+    @Test
     void poolEntryVarsAreParsed() {
         YamlConfiguration yaml = baseYaml();
         yaml.set("pool.entries", List.of(

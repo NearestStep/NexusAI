@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.pool;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -36,5 +38,31 @@ public final class AiPool {
 
     public Set<String> prompts() {
         return pools.keySet();
+    }
+
+    public List<String> copy(String prompt) {
+        Objects.requireNonNull(prompt, "prompt");
+        ConcurrentLinkedDeque<String> queue = pools.get(prompt);
+        if (queue == null) {
+            return List.of();
+        }
+        return new ArrayList<>(queue);
+    }
+
+    public void replace(String prompt, List<String> answers) {
+        Objects.requireNonNull(prompt, "prompt");
+        ConcurrentLinkedDeque<String> queue = new ConcurrentLinkedDeque<>();
+        if (answers != null) {
+            for (String answer : answers) {
+                if (answer != null && !answer.isBlank()) {
+                    queue.addLast(answer);
+                }
+            }
+        }
+        if (queue.isEmpty()) {
+            pools.remove(prompt);
+        } else {
+            pools.put(prompt, queue);
+        }
     }
 }

@@ -9,6 +9,10 @@ command:
   help-version: "&7/nai version &8- &fPlugin-Version anzeigen"
   help-reload: "&7/nai reload &8- &fConfig und Locale neu laden"
   help-status: "&7/nai status &8- &fStatus anzeigen"
+  help-test: "&7/nai test [prompt] &8- &fEine Testanfrage senden"
+  test-sending: "{prefix}&7Testanfrage wird gesendet..."
+  test-ok: "{prefix}&aAntwort &8({latency_ms} ms)&a: &f{answer}"
+  test-fail: "{prefix}&cTest fehlgeschlagen &8({latency_ms} ms)&c: &f{error}"
   version: "{prefix}&fVersion: &a{version}"
   reload-ok: "{prefix}&aKonfiguration neu geladen."
   reload-fail: "{prefix}&cNeuladen fehlgeschlagen: &f{error}"
@@ -21,9 +25,20 @@ command:
   status-pool: "&7Pool: &f{pool_state} &8({pool_entries} Einträge)"
   status-cache: "&7Cache-Größe: &f{cache_size}"
   status-papi: "&7PlaceholderAPI: &f{papi}"
+  status-last-error: "&7Letzter Fehler: &f{last_error}"
+  status-provider-pause: "&7Anbieter-Pause: &f{provider_pause}"
 
 common:
   yes: "ja"
   no: "nein"
   enabled: "aktiviert"
   disabled: "deaktiviert"
+  none: "keine"
+
+error:
+  rate-limit: "Ratenlimit"
+  quota: "Kontingent"
+  bad-key: "ungültiger API-Schlüssel"
+  unknown-model: "unbekanntes Modell"
+  timeout: "Zeitüberschreitung"
+  other: "Fehler"
