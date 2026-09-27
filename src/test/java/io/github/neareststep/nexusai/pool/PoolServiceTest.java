@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -117,7 +118,7 @@ class PoolServiceTest {
         AtomicInteger calls = new AtomicInteger();
 
         AiProvider provider = prompt -> {
-            calls.incrementAndGet();
+            int n = calls.incrementAndGet();
             started.countDown();
             return CompletableFuture.supplyAsync(() -> {
                 try {
@@ -125,7 +126,7 @@ class PoolServiceTest {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                return "unique";
+                return "unique-" + n;
             });
         };
 
@@ -219,6 +220,57 @@ class PoolServiceTest {
         service.start();
         await(() -> pool.size("tip") == 1, 2, TimeUnit.SECONDS);
         assertEquals(1, calls.get());
+        service.shutdown();
+    }
+
+    @Test
+    void duplicateAnswersOccupyOneSlotAndScheduleAnotherTry() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<Runnable> pending = new AtomicReference<>();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("DUPLICATE-ANSWER");
+        };
+        PluginConfig pluginConfig = config("test-key", 3, 1);
+        AiHttpClient client = new AiHttpClient(cache, provider, pluginConfig, Logger.getLogger("test"));
+        PoolService service = new PoolService(
+                pluginConfig, pool, client, Logger.getLogger("test"), PoolStore.disabled(),
+                (wait, task) -> pending.set(task));
+        service.start();
+        await(() -> pending.get() != null, 2, TimeUnit.SECONDS);
+        assertEquals(1, pool.size("tip"));
+        assertEquals(3, calls.get());
+        pending.get().run();
+        await(() -> calls.get() > 3, 2, TimeUnit.SECONDS);
+        assertEquals(1, pool.size("tip"));
+        service.shutdown();
+    }
+
+    @Test
+    void providerErrorSchedulesAnotherRefillWithoutAPlaceholderRead() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<Runnable> pending = new AtomicReference<>();
+        AtomicLong clock = new AtomicLong(1_000L);
+        AiProvider provider = prompt -> {
+            int n = calls.incrementAndGet();
+            if (n == 1) {
+                return CompletableFuture.failedFuture(new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500", null));
+            }
+            return CompletableFuture.completedFuture("ok-" + n);
+        };
+        PluginConfig pluginConfig = config("test-key", 2, 1);
+        AiHttpClient client = gated(pluginConfig, new RateLimiter(100, 100), clock, provider);
+        PoolService service = new PoolService(
+                pluginConfig, pool, client, Logger.getLogger("test"), PoolStore.disabled(),
+                (wait, task) -> pending.set(task));
+        service.start();
+        await(() -> pending.get() != null, 2, TimeUnit.SECONDS);
+        assertEquals(0, pool.size("tip"));
+        assertEquals(1, calls.get());
+        clock.addAndGet(10_000L);
+        pending.get().run();
+        await(() -> pool.size("tip") == 2, 2, TimeUnit.SECONDS);
+        assertEquals(3, calls.get());
         service.shutdown();
     }
 

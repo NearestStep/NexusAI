@@ -21,6 +21,9 @@ class LocaleFilesTest {
             "command.status-last-error",
             "command.status-provider-pause",
             "common.none",
+            "common.yes",
+            "common.no",
+            "command.extra-args",
             "error.rate-limit",
             "error.quota",
             "error.bad-key",
@@ -41,6 +44,16 @@ class LocaleFilesTest {
             for (String key : REQUIRED) {
                 assertTrue(yaml.contains(key), file.getFileName() + " missing " + key);
                 assertFalse(yaml.getString(key).isBlank(), file.getFileName() + " blank " + key);
+            }
+            String yes = yaml.getString("common.yes");
+            String no = yaml.getString("common.no");
+            assertTrue(yes != null && !yes.isBlank(), file.getFileName() + " yes");
+            assertTrue(no != null && !no.isBlank(), file.getFileName() + " no");
+            assertTrue(yaml.get("common.yes") instanceof String, file.getFileName() + " yes type");
+            assertTrue(yaml.get("common.no") instanceof String, file.getFileName() + " no type");
+            if (file.getFileName().toString().equals("ru.yml")) {
+                assertEquals("нет ошибки", yaml.getString("common.none"));
+                assertEquals("нет", no);
             }
         }
     }

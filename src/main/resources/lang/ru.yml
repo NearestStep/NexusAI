@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&cНедостаточно прав."
   unknown: "{prefix}&cНеизвестная подкоманда. Используйте &e/nai help&c."
+  extra-args: "{prefix}&cЛишние аргументы. Используйте &e/nai help&c."
   help-header: "{prefix}&eКоманды NexusAI:"
   help-help: "&7/nai help &8- &fПоказать эту справку"
   help-version: "&7/nai version &8- &fПоказать версию плагина"
@@ -29,11 +30,11 @@ command:
   status-provider-pause: "&7Пауза провайдера: &f{provider_pause}"
 
 common:
-  yes: "да"
-  no: "нет"
+  "yes": "да"
+  "no": "нет"
   enabled: "включён"
   disabled: "выключен"
-  none: "нет"
+  none: "нет ошибки"
 
 error:
   rate-limit: "лимит запросов"

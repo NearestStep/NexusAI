@@ -66,4 +66,18 @@ class ConfigMergerTest {
         assertTrue(second.addedKeys().isEmpty());
         assertEquals(result.yaml(), second.yaml());
     }
+
+    @Test
+    void brokenYamlIsReturnedUnchanged() {
+        String broken = "api: [\n  this is not valid yaml\n";
+        String defaults = """
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                """;
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(broken, defaults);
+        assertFalse(result.valid());
+        assertTrue(result.addedKeys().isEmpty());
+        assertEquals(broken, result.yaml());
+    }
 }

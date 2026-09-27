@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&c権限がありません。"
   unknown: "{prefix}&c不明なサブコマンドです。&e/nai help&c を使用してください。"
+  extra-args: "{prefix}&c余分な引数があります。&e/nai help&c を使ってください。"
   help-header: "{prefix}&eNexusAI コマンド:"
   help-help: "&7/nai help &8- &fこのヘルプを表示"
   help-version: "&7/nai version &8- &fプラグインのバージョンを表示"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7プロバイダー一時停止: &f{provider_pause}"
 
 common:
-  yes: "はい"
-  no: "いいえ"
+  "yes": "はい"
+  "no": "いいえ"
   enabled: "有効"
   disabled: "無効"
   none: "なし"

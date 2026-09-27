@@ -24,10 +24,20 @@ public final class AiPool {
         return Optional.ofNullable(queue.pollFirst());
     }
 
-    public void add(String prompt, String answer) {
+    /**
+     * @return {@code false} when this prompt already holds the same text
+     */
+    public boolean add(String prompt, String answer) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(answer, "answer");
-        pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>()).addLast(answer);
+        ConcurrentLinkedDeque<String> queue = pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>());
+        synchronized (queue) {
+            if (contains(queue, answer)) {
+                return false;
+            }
+            queue.addLast(answer);
+            return true;
+        }
     }
 
     public int size(String prompt) {
@@ -49,12 +59,21 @@ public final class AiPool {
         return new ArrayList<>(queue);
     }
 
+    private static boolean contains(ConcurrentLinkedDeque<String> queue, String answer) {
+        for (String existing : queue) {
+            if (answer.equals(existing)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void replace(String prompt, List<String> answers) {
         Objects.requireNonNull(prompt, "prompt");
         ConcurrentLinkedDeque<String> queue = new ConcurrentLinkedDeque<>();
         if (answers != null) {
             for (String answer : answers) {
-                if (answer != null && !answer.isBlank()) {
+                if (answer != null && !answer.isBlank() && !contains(queue, answer)) {
                     queue.addLast(answer);
                 }
             }

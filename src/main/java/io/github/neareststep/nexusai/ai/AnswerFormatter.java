@@ -16,6 +16,8 @@ public final class AnswerFormatter {
     private static final Pattern BOLD = Pattern.compile("\\*\\*([^*]+)\\*\\*|__([^_]+)__");
     private static final Pattern ITALIC = Pattern.compile("(?<!\\*)\\*([^*]+)\\*(?!\\*)|(?<!_)_([^_]+)_(?!_)");
     private static final Pattern STRIKE = Pattern.compile("~~([^~]+)~~");
+    private static final Pattern LIST_MARKER = Pattern.compile("(?m)^[ \\t]*(?:[-*+]|\\d+[.)])\\s+");
+    private static final Pattern QUOTE_MARKER = Pattern.compile("(?m)^[ \\t]*>\\s?");
 
     private AnswerFormatter() {
     }
@@ -56,6 +58,8 @@ public final class AnswerFormatter {
             return stars != null ? stars : match.group(2);
         });
         stripped = STRIKE.matcher(stripped).replaceAll("$1");
+        stripped = LIST_MARKER.matcher(stripped).replaceAll("");
+        stripped = QUOTE_MARKER.matcher(stripped).replaceAll("");
         return stripped;
     }
 }

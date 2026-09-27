@@ -38,7 +38,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
 | `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `system-prompt`, `temperature` (negative = omit), `max-tokens` (`0` = omit), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
 | `cache` | `ttl` (seconds), `max-size` |
-| `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (default **128**), `provider-pause-seconds`, `auth-pause-seconds`, `error-backoff-initial-seconds`, `error-backoff-max-seconds`, `error-log-cooldown-seconds` |
+| `limits` | `requests-per-minute`, `requests-per-day` (server), `player-requests-per-minute`, `player-requests-per-day`, `max-prompt-length` (default **128**), `provider-pause-seconds`, `auth-pause-seconds`, `error-backoff-initial-seconds`, `error-backoff-max-seconds`, `error-log-cooldown-seconds` |
 | `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
 | `fallback` | String on miss / rate limits / missing key |
@@ -85,9 +85,9 @@ Answers whose `content` is an array of parts are joined into one string.
 | `/nai version` | `nexusai.command` | Show plugin version |
 | `/nai reload` | `nexusai.reload` | Reload config + locale; rebuild cache/pool/prewarm |
 | `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI, last error, provider pause |
-| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong` |
+| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. This command does not apply `limits.max-prompt-length` and does not clear a provider pause |
 
-Alias: `/nexusai`. Defaults: OP.
+Alias: `/nexusai`. Defaults: OP. `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`.
 
 ## Placeholders
 
@@ -97,7 +97,7 @@ Alias: `/nexusai`. Defaults: OP.
 %ainexus_generate_<prompt>%
 ```
 
-Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. Refills, prewarm, and cache misses all spend the shared server rate limit. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider for a while instead of launching another batch on the next empty read.
+Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. The same text is stored only once per prompt. Repeated model output does not fill `size`, and after the error backoff the pool asks again until it has enough different answers or it logs that it stopped. A short pool also asks again after a provider error or pause ends, without waiting for a placeholder read. Refills, prewarm, and cache misses all spend the shared server rate limit. A player request also spends `player-requests-per-minute` and `player-requests-per-day`. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider except `/nai test`. A numeric `Retry-After` on HTTP 429 is used only when it is longer than `provider-pause-seconds`. `/nai test` does not shorten that pause.
 
 With `pool.persist: true` (default), answers are written to `plugins/NexusAI/pool.yml` on shutdown and, while the server is running, after `pool.save-delay-seconds` of quiet. They are loaded again on startup and `/nai reload`, so a restart does not buy a full pool if it was already filled.
 
@@ -142,6 +142,7 @@ Behavior:
 3. Later resolves of the same prompt return the cache until TTL expires
 4. Prompt longer than `limits.max-prompt-length` → `fallback`, no HTTP
 5. In-flight deduplication — parallel identical requests share one HTTP call
+6. `cache.max-size` is Caffeine's maximum. The cache does not promise to drop the oldest key in the same millisecond a new one is written
 
 ### Prewarm
 
@@ -155,7 +156,9 @@ Capacity is per prompt: `pool.entries[].size` (with `min-threshold` for refill).
 
 ### Will an upgrade overwrite my config?
 
-On startup and `/nai reload`, NexusAI inserts keys that exist in the default `config.yml` and are missing from `plugins/NexusAI/config.yml`. Values you already set are left as they are, and comments already in the file stay put. Added keys are listed in the server log (`Added missing config keys: …`). Keys that are new to you still use defaults until you edit them: a negative `temperature` and `max-tokens: 0` mean those fields are not sent, which matches older behavior.
+On startup and `/nai reload`, NexusAI inserts keys that exist in the default `config.yml` and are missing from `plugins/NexusAI/config.yml`, when that file is valid YAML. Values you already set are left as they are, and comments already in the file stay put. Added keys are listed in the server log (`Added missing config keys: …`). Keys that are new to you still use defaults until you edit them: a negative `temperature` and `max-tokens: 0` mean those fields are not sent, which matches older behavior.
+
+If `config.yml` is not valid YAML, startup and `/nai reload` leave the file byte for byte as it is. Reload reports the failure and keeps the configuration already in memory. It does not append default keys and it does not print `Configuration reloaded`. A broken file on startup does not enable requests, so an `NEXUSAI_API_KEY` in the environment is not sent to the default OpenAI URL. A reload onto a remote provider with no key logs the missing-key warning once; reloading that same state again does not repeat it. A local endpoint such as Ollama does not log that warning.
 
 ### What is prewarm?
 

@@ -100,13 +100,14 @@ public final class AiHttpClient {
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
         CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, true);
         return created;
     }
 
     /**
      * One live request for {@code /nai test}. Skips pause and backoff so an admin can probe,
      * but still spends a server rate-limit slot. Does not read or write the TTL cache.
+     * A successful probe does not clear a provider pause.
      */
     public CompletableFuture<String> testAsync(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
@@ -120,12 +121,16 @@ public final class AiHttpClient {
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(prompt);
         CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, GenerationOverrides.none());
+        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, GenerationOverrides.none(), false);
         return created;
     }
 
     public boolean isAdmissionBlocked(String admissionKey) {
         return gate.isBlocked(admissionKey);
+    }
+
+    public long admissionDelayMillis(String admissionKey) {
+        return gate.blockedForMillis(admissionKey);
     }
 
     public boolean isProviderPaused() {
@@ -177,7 +182,7 @@ public final class AiHttpClient {
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, true);
         return created;
     }
 
@@ -189,18 +194,19 @@ public final class AiHttpClient {
             CompletableFuture<String> created,
             boolean writeCache,
             String cacheKey,
-            GenerationOverrides overrides
+            GenerationOverrides overrides,
+            boolean clearPause
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         CompletableFuture<String> upstream;
         try {
             upstream = provider.complete(prompt, effective);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache);
+            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, clearPause);
             return;
         }
         upstream.whenComplete((value, error) ->
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache));
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache, clearPause));
     }
 
     private void finish(
@@ -211,25 +217,29 @@ public final class AiHttpClient {
             CompletableFuture<String> created,
             String value,
             Throwable error,
-            boolean writeCache
+            boolean writeCache,
+            boolean clearPause
     ) {
         try {
             if (error == null && value != null && !value.isBlank()) {
                 if (writeCache && cacheKey != null) {
                     cache.put(cacheKey, value);
                 }
-                gate.recordSuccess(admissionKey, pauseStamp, failureEpoch);
+                gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);
                 created.complete(value);
-            } else if (error != null) {
-                AiErrorKind kind = AiErrors.classify(error);
+            } else if (error != null || value == null || value.isBlank()) {
+                Throwable failure = error != null
+                        ? error
+                        : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
+                AiErrorKind kind = AiErrors.classify(failure);
                 if (kind != AiErrorKind.LOCAL_LIMIT) {
-                    gate.recordFailure(admissionKey, kind);
-                    diagnostics.report(kind, AiErrors.detail(error));
+                    AiRequestException typed = AiErrors.find(failure);
+                    long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
+                    gate.recordFailure(admissionKey, kind, retryAfter);
+                    diagnostics.report(kind, AiErrors.detail(failure));
                 }
-                logger.log(Level.FINE, "AI request failed", error);
-                created.completeExceptionally(AiErrors.unwrap(error));
-            } else {
-                created.complete(value);
+                logger.log(Level.FINE, "AI request failed", failure);
+                created.completeExceptionally(AiErrors.unwrap(failure));
             }
         } catch (RuntimeException e) {
             created.completeExceptionally(e);

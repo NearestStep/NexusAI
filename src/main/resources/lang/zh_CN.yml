@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&c你没有权限。"
   unknown: "{prefix}&c未知子命令。请使用 &e/nai help&c。"
+  extra-args: "{prefix}&c多余的参数。请使用 &e/nai help&c。"
   help-header: "{prefix}&eNexusAI 命令："
   help-help: "&7/nai help &8- &f显示此帮助"
   help-version: "&7/nai version &8- &f显示插件版本"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7提供商暂停：&f{provider_pause}"
 
 common:
-  yes: "是"
-  no: "否"
+  "yes": "是"
+  "no": "否"
   enabled: "已启用"
   disabled: "已禁用"
   none: "无"
