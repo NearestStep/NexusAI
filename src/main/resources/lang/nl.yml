@@ -9,6 +9,10 @@ command:
   help-version: "&7/nai version &8- &fPluginversie tonen"
   help-reload: "&7/nai reload &8- &fConfig en locale herladen"
   help-status: "&7/nai status &8- &fStatus tonen"
+  help-test: "&7/nai test [prompt] &8- &fEén testverzoek sturen"
+  test-sending: "{prefix}&7Testverzoek wordt verzonden..."
+  test-ok: "{prefix}&aAntwoord &8({latency_ms} ms)&a: &f{answer}"
+  test-fail: "{prefix}&cTest mislukt &8({latency_ms} ms)&c: &f{error}"
   version: "{prefix}&fVersie: &a{version}"
   reload-ok: "{prefix}&aConfiguratie herladen."
   reload-fail: "{prefix}&cHerladen mislukt: &f{error}"
@@ -21,9 +25,20 @@ command:
   status-pool: "&7Pool: &f{pool_state} &8({pool_entries} items)"
   status-cache: "&7Cachegrootte: &f{cache_size}"
   status-papi: "&7PlaceholderAPI: &f{papi}"
+  status-last-error: "&7Laatste fout: &f{last_error}"
+  status-provider-pause: "&7Providerpauze: &f{provider_pause}"
 
 common:
   yes: "ja"
   no: "nee"
   enabled: "ingeschakeld"
   disabled: "uitgeschakeld"
+  none: "geen"
+
+error:
+  rate-limit: "snelheidslimiet"
+  quota: "quotum"
+  bad-key: "ongeldige API-sleutel"
+  unknown-model: "onbekend model"
+  timeout: "time-out"
+  other: "fout"

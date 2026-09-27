@@ -1,14 +1,18 @@
 package io.github.neareststep.nexusai.ai;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionRequest;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionResponse;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -19,6 +23,7 @@ import java.util.logging.Logger;
 
 /**
  * OpenAI-compatible chat completions client.
+ * Logging of classified failures happens in {@link AiDiagnostics}; this class only throws.
  */
 public final class OpenAiProvider implements AiProvider {
 
@@ -32,10 +37,11 @@ public final class OpenAiProvider implements AiProvider {
         this.config = Objects.requireNonNull(config, "config");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.logger = Objects.requireNonNull(logger, "logger");
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        // Do not reuse the plugin HTTP pool here. doComplete() blocks on HttpClient.send,
+        // and the client's own timeouts/callbacks must be able to run on a different pool.
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(config.getConnectTimeout())
-                .executor(executor)
                 .build();
     }
 
@@ -49,67 +55,129 @@ public final class OpenAiProvider implements AiProvider {
 
     @Override
     public CompletableFuture<String> complete(String prompt) {
-        Objects.requireNonNull(prompt, "prompt");
-        return CompletableFuture.supplyAsync(() -> doComplete(prompt), executor);
+        return complete(prompt, GenerationOverrides.none());
     }
 
-    private String doComplete(String prompt) {
-        try {
-            URI parsedUri = URI.create(config.getBaseUrl() + "/chat/completions");
+    @Override
+    public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides) {
+        Objects.requireNonNull(prompt, "prompt");
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        return CompletableFuture.supplyAsync(() -> doComplete(prompt, effective), executor);
+    }
 
-            ChatCompletionRequest body = new ChatCompletionRequest(
-                    config.getModel(),
-                    List.of(new ChatCompletionRequest.Message("user", prompt))
-            );
+    static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
+        Double temperature = effective.temperature(config.getTemperature());
+        Integer maxTokens = effective.maxTokens(config.getMaxTokens());
+        String model = config.getModel();
+        Integer maxCompletionTokens = null;
+        String reasoningEffort = null;
+        if (ReasoningModels.isReasoning(model)) {
+            reasoningEffort = config.getReasoningEffort();
+            int requested = maxTokens == null
+                    ? ReasoningModels.TOKEN_FLOOR
+                    : Math.max(maxTokens, ReasoningModels.TOKEN_FLOOR);
+            if (ReasoningModels.usesCompletionTokenCap(model)) {
+                maxCompletionTokens = requested;
+                maxTokens = null;
+                temperature = null;
+            } else {
+                maxTokens = requested;
+            }
+        }
+        List<ChatCompletionRequest.Message> messages = new ArrayList<>(2);
+        if (system != null) {
+            messages.add(new ChatCompletionRequest.Message("system", system));
+        }
+        messages.add(new ChatCompletionRequest.Message("user", prompt));
+        return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
+    }
+
+    private String doComplete(String prompt, GenerationOverrides overrides) {
+        URI parsedUri = URI.create(config.getBaseUrl() + "/chat/completions");
+        logger.log(Level.FINE, "POST {0}", parsedUri);
+        try {
+            ChatCompletionRequest body = buildBody(config, prompt, overrides);
             byte[] json = objectMapper.writeValueAsBytes(body);
 
-            HttpRequest request = HttpRequest.newBuilder()
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(parsedUri)
                     .timeout(config.getReadTimeout())
-                    .header("Authorization", "Bearer " + config.getApiKey())
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
-                    .header("User-Agent", "NexusAI (Paper-plugin; Java-HttpClient)")
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(json))
-                    .build();
+                    .header("User-Agent", "NexusAI (Paper-plugin; Java-HttpClient)");
+            if (config.hasApiKey()) {
+                builder.header("Authorization", "Bearer " + config.getApiKey());
+            }
+            HttpRequest request = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body() == null ? "" : response.body();
             boolean htmlBody = looksLikeHtml(responseBody);
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                if (response.statusCode() == 403 && htmlBody) {
-                    logger.warning("HTTP 403 returned an HTML page (likely Cloudflare/WAF), not a JSON API error. "
-                            + "Check api.base-url host, server IP allowlists, and that the endpoint accepts this client. "
-                            + "host=" + parsedUri.getHost());
-                } else if (response.statusCode() == 403) {
-                    logger.warning("OpenAI returned HTTP 403 Forbidden. "
-                            + "This often means the API key/account cannot access the endpoint "
-                            + "from this server (region/org restriction). "
-                            + "Try another api.base-url or a key with access.");
-                } else if (response.statusCode() == 402) {
-                    logger.warning("OpenAI returned HTTP 402 Insufficient Balance. "
-                            + "The API accepted the key, but the provider account has no credit. "
-                            + "Top up billing on the provider (or switch api.key / api.base-url), then retry.");
-                }
-                throw new IllegalStateException("OpenAI HTTP " + response.statusCode() + ": " + truncate(responseBody));
+                throw httpError(response.statusCode(), responseBody, htmlBody, parsedUri);
             }
-
             if (htmlBody) {
-                throw new IllegalStateException("API returned HTML instead of JSON from " + parsedUri.getHost());
+                throw new AiRequestException(
+                        AiErrorKind.OTHER,
+                        response.statusCode(),
+                        "API returned HTML instead of JSON from " + parsedUri.getHost(),
+                        null
+                );
             }
 
             ChatCompletionResponse parsed = objectMapper.readValue(responseBody, ChatCompletionResponse.class);
             if (parsed.getChoices() == null || parsed.getChoices().isEmpty()
                     || parsed.getChoices().getFirst().getMessage() == null
                     || parsed.getChoices().getFirst().getMessage().getContent() == null) {
-                throw new IllegalStateException("OpenAI response missing choices/message/content");
+                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            return parsed.getChoices().getFirst().getMessage().getContent().trim();
+            String text = parsed.getChoices().getFirst().getMessage().getContent();
+            return AnswerFormatter.format(
+                    text,
+                    config.isStripMarkdown(),
+                    config.getMaxAnswerChars(),
+                    config.getMaxAnswerLines()
+            );
+        } catch (AiRequestException e) {
+            throw e;
+        } catch (HttpTimeoutException e) {
+            throw new AiRequestException(
+                    AiErrorKind.TIMEOUT,
+                    0,
+                    "Request timed out calling " + parsedUri.getHost() + " after " + config.getReadTimeout().toSeconds() + "s",
+                    e
+            );
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", e);
         } catch (Exception e) {
-            logger.log(Level.WARNING, "OpenAI request failed: " + e.getMessage());
-            throw new RuntimeException(e);
+            AiErrorKind kind = AiErrors.classify(e);
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            throw new AiRequestException(kind, 0, message, e);
         }
+    }
+
+    private static AiRequestException httpError(int status, String body, boolean html, URI uri) {
+        String truncated = truncate(body);
+        AiErrorKind kind = AiErrors.classifyHttp(status, body, html);
+        String host = uri.getHost() == null ? uri.toString() : uri.getHost();
+        String message = switch (kind) {
+            case RATE_LIMIT -> "HTTP 429 rate limit from " + host + ": " + truncated;
+            case QUOTA -> "HTTP " + status + " quota or insufficient balance from " + host + ": " + truncated;
+            case BAD_KEY -> status == 403
+                    ? "HTTP 403 from " + host + ". The API key or account cannot access this endpoint: " + truncated
+                    : "HTTP 401 unauthorized. The API key was rejected: " + truncated;
+            case UNKNOWN_MODEL -> "HTTP " + status + " unknown model from " + host + ": " + truncated;
+            case TIMEOUT -> "Request timed out calling " + host;
+            case LOCAL_LIMIT -> "Local rate limit reached";
+            case OTHER -> html && status == 403
+                    ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
+                    : "HTTP " + status + " from " + host + ": " + truncated;
+        };
+        return new AiRequestException(kind, status, message, null);
     }
 
     private static boolean looksLikeHtml(String body) {
@@ -125,5 +193,12 @@ public final class OpenAiProvider implements AiProvider {
             return "";
         }
         return body.length() <= 200 ? body : body.substring(0, 200) + "...";
+    }
+
+    private static String blankToNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value;
     }
 }

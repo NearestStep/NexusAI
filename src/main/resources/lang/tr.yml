@@ -9,6 +9,10 @@ command:
   help-version: "&7/nai version &8- &fEklenti sürümünü göster"
   help-reload: "&7/nai reload &8- &fConfig ve locale'i yenile"
   help-status: "&7/nai status &8- &fDurumu göster"
+  help-test: "&7/nai test [prompt] &8- &fBir test isteği gönder"
+  test-sending: "{prefix}&7Test isteği gönderiliyor..."
+  test-ok: "{prefix}&aYanıt &8({latency_ms} ms)&a: &f{answer}"
+  test-fail: "{prefix}&cTest başarısız &8({latency_ms} ms)&c: &f{error}"
   version: "{prefix}&fSürüm: &a{version}"
   reload-ok: "{prefix}&aYapılandırma yenilendi."
   reload-fail: "{prefix}&cYenileme başarısız: &f{error}"
@@ -21,9 +25,20 @@ command:
   status-pool: "&7Havuz: &f{pool_state} &8({pool_entries} kayıt)"
   status-cache: "&7Önbellek boyutu: &f{cache_size}"
   status-papi: "&7PlaceholderAPI: &f{papi}"
+  status-last-error: "&7Son hata: &f{last_error}"
+  status-provider-pause: "&7Sağlayıcı duraklaması: &f{provider_pause}"
 
 common:
   yes: "evet"
   no: "hayır"
   enabled: "açık"
   disabled: "kapalı"
+  none: "yok"
+
+error:
+  rate-limit: "istek sınırı"
+  quota: "kota"
+  bad-key: "geçersiz API anahtarı"
+  unknown-model: "bilinmeyen model"
+  timeout: "zaman aşımı"
+  other: "hata"

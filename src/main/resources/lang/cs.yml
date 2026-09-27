@@ -9,6 +9,10 @@ command:
   help-version: "&7/nai version &8- &fZobrazit verzi pluginu"
   help-reload: "&7/nai reload &8- &fZnovu načíst config a locale"
   help-status: "&7/nai status &8- &fZobrazit stav"
+  help-test: "&7/nai test [prompt] &8- &fOdeslat jeden testovací požadavek"
+  test-sending: "{prefix}&7Odesílání testovacího požadavku..."
+  test-ok: "{prefix}&aOdpověď &8({latency_ms} ms)&a: &f{answer}"
+  test-fail: "{prefix}&cTest selhal &8({latency_ms} ms)&c: &f{error}"
   version: "{prefix}&fVerze: &a{version}"
   reload-ok: "{prefix}&aKonfigurace znovu načtena."
   reload-fail: "{prefix}&cObnovení selhalo: &f{error}"
@@ -21,9 +25,20 @@ command:
   status-pool: "&7Pool: &f{pool_state} &8({pool_entries} záznamů)"
   status-cache: "&7Velikost cache: &f{cache_size}"
   status-papi: "&7PlaceholderAPI: &f{papi}"
+  status-last-error: "&7Poslední chyba: &f{last_error}"
+  status-provider-pause: "&7Pauza poskytovatele: &f{provider_pause}"
 
 common:
   yes: "ano"
   no: "ne"
   enabled: "zapnuto"
   disabled: "vypnuto"
+  none: "žádná"
+
+error:
+  rate-limit: "limit požadavků"
+  quota: "kvóta"
+  bad-key: "neplatný API klíč"
+  unknown-model: "neznámý model"
+  timeout: "časový limit"
+  other: "chyba"

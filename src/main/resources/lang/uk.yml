@@ -9,6 +9,10 @@ command:
   help-version: "&7/nai version &8- &fПоказати версію плагіна"
   help-reload: "&7/nai reload &8- &fПерезавантажити конфіг і локаль"
   help-status: "&7/nai status &8- &fПоказати статус"
+  help-test: "&7/nai test [prompt] &8- &fОдин тестовий запит"
+  test-sending: "{prefix}&7Надсилаю тестовий запит..."
+  test-ok: "{prefix}&aВідповідь &8({latency_ms} мс)&a: &f{answer}"
+  test-fail: "{prefix}&cТест не вдався &8({latency_ms} мс)&c: &f{error}"
   version: "{prefix}&fВерсія: &a{version}"
   reload-ok: "{prefix}&aКонфігурацію перезавантажено."
   reload-fail: "{prefix}&cПомилка перезавантаження: &f{error}"
@@ -21,9 +25,20 @@ command:
   status-pool: "&7Пул: &f{pool_state} &8({pool_entries} записів)"
   status-cache: "&7Розмір кешу: &f{cache_size}"
   status-papi: "&7PlaceholderAPI: &f{papi}"
+  status-last-error: "&7Остання помилка: &f{last_error}"
+  status-provider-pause: "&7Пауза провайдера: &f{provider_pause}"
 
 common:
   yes: "так"
   no: "ні"
   enabled: "увімкнено"
   disabled: "вимкнено"
+  none: "немає"
+
+error:
+  rate-limit: "ліміт запитів"
+  quota: "квота"
+  bad-key: "невірний API-ключ"
+  unknown-model: "невідома модель"
+  timeout: "таймаут"
+  other: "помилка"

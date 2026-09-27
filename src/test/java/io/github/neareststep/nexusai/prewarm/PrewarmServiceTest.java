@@ -1,9 +1,14 @@
 package io.github.neareststep.nexusai.prewarm;
 
+import io.github.neareststep.nexusai.ai.AiDiagnostics;
+import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -126,6 +132,36 @@ class PrewarmServiceTest {
         await(() -> "Welcome, Steve".equals(seen.get()), 2, TimeUnit.SECONDS);
         assertEquals("Welcome, Steve", seen.get());
         assertEquals("ok", cache.get(client.cacheKey("Welcome, Steve")).orElseThrow());
+        service.shutdown();
+    }
+
+    @Test
+    void prewarmRespectsTheSharedRateLimitAndPause() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(1_000L);
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.failedFuture(new AiRequestException(AiErrorKind.QUOTA, 402, "HTTP 402", null));
+        };
+        PluginConfig pluginConfig = config("test-key", List.of("one", "two"));
+        RequestGate gate = new RequestGate(new RateLimiter(100, 100), 2_000L, 30_000L, 60_000L, 300_000L, clock::get);
+        AiHttpClient client = new AiHttpClient(
+                cache,
+                provider,
+                pluginConfig,
+                gate,
+                new AiDiagnostics(Logger.getLogger("prewarm-gate"), Duration.ofSeconds(30)),
+                Logger.getLogger("prewarm-gate")
+        );
+        PrewarmService service = new PrewarmService(pluginConfig, cache, client, scheduler, Logger.getLogger("prewarm-gate"));
+        service.start();
+        await(() -> client.isProviderPaused(), 2, TimeUnit.SECONDS);
+        int afterPause = calls.get();
+        assertTrue(afterPause >= 1);
+        assertTrue(afterPause <= 2);
+        service.refreshStale();
+        Thread.sleep(40);
+        assertEquals(afterPause, calls.get());
         service.shutdown();
     }
 

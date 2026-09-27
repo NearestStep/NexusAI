@@ -6,7 +6,9 @@ import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -24,15 +26,21 @@ public final class PoolService {
     private final AiPool pool;
     private final AiHttpClient httpClient;
     private final Logger logger;
+    private final PoolStore store;
     private final ConcurrentHashMap<String, AtomicBoolean> replenishing = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PoolEntry> entriesByPrompt = new ConcurrentHashMap<>();
     private volatile boolean running;
 
     public PoolService(PluginConfig config, AiPool pool, AiHttpClient httpClient, Logger logger) {
+        this(config, pool, httpClient, logger, PoolStore.disabled());
+    }
+
+    public PoolService(PluginConfig config, AiPool pool, AiHttpClient httpClient, Logger logger, PoolStore store) {
         this.config = Objects.requireNonNull(config, "config");
         this.pool = Objects.requireNonNull(pool, "pool");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.store = store == null ? PoolStore.disabled() : store;
         for (PoolEntry entry : config.getPoolEntries()) {
             entriesByPrompt.put(entry.prompt(), entry);
         }
@@ -40,7 +48,10 @@ public final class PoolService {
 
     public void start() {
         running = true;
-        if (!config.isPoolEnabled() || !config.hasApiKey()) {
+        if (config.isPoolEnabled()) {
+            store.load(pool, limits());
+        }
+        if (!config.isPoolEnabled() || !config.canSendRequests()) {
             return;
         }
         for (PoolEntry entry : config.getPoolEntries()) {
@@ -50,11 +61,14 @@ public final class PoolService {
 
     public void replenish(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
-        if (!running || !config.isPoolEnabled() || !config.hasApiKey()) {
+        if (!running || !config.isPoolEnabled() || !config.canSendRequests()) {
             return;
         }
         PoolEntry entry = entriesByPrompt.get(prompt);
         if (entry == null) {
+            return;
+        }
+        if (httpClient.isAdmissionBlocked(prompt)) {
             return;
         }
 
@@ -72,11 +86,12 @@ public final class PoolService {
         List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
         String httpPrompt = VarSubstitutor.appendVarsRules(prompt, entry.vars());
         for (int i = 0; i < needed; i++) {
-            jobs.add(httpClient.generateFreshAsync(httpPrompt).handle((answer, error) -> {
+            jobs.add(httpClient.generateFreshAsync(httpPrompt, prompt, entry.overrides()).handle((answer, error) -> {
                 if (error != null) {
                     logger.log(Level.FINE, "Pool replenish failed for prompt", error);
                 } else if (answer != null && !answer.isBlank()) {
                     pool.add(prompt, answer);
+                    store.markDirty(pool, limits());
                 }
                 return null;
             }));
@@ -92,6 +107,7 @@ public final class PoolService {
         if (entry == null) {
             return;
         }
+        store.markDirty(pool, limits());
         if (pool.size(prompt) < entry.minThreshold()) {
             replenish(prompt);
         }
@@ -104,5 +120,14 @@ public final class PoolService {
 
     public void shutdown() {
         running = false;
+        store.flush(pool, limits());
+    }
+
+    private Map<String, Integer> limits() {
+        Map<String, Integer> limits = new LinkedHashMap<>();
+        for (PoolEntry entry : entriesByPrompt.values()) {
+            limits.put(entry.prompt(), entry.size());
+        }
+        return limits;
     }
 }

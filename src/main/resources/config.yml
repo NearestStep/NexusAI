@@ -7,13 +7,26 @@
 locale: en
 
 api:
-  # openai | groq | cerebras | gemini | deepseek
+  # openai | groq | cerebras | gemini | deepseek | ollama | openrouter
   provider: openai
   model: gpt-4o-mini
-  # Empty = default base-url for the selected provider
+  # Empty = default base-url for the selected provider.
+  # Ollama works without a key (Authorization is omitted). Any localhost / port 11434 base-url does too.
   base-url: ""
-  # Leave empty and use NEXUSAI_API_KEY instead
+  # Leave empty and use NEXUSAI_API_KEY instead. Empty is valid for local endpoints.
   key: ""
+  # Empty = do not send a system message
+  system-prompt: ""
+  # Negative = do not send temperature. 0 is a real value.
+  temperature: -1
+  # 0 = do not send max_tokens. Reasoning models are raised to at least 2048.
+  max-tokens: 0
+  # Strip markdown and clamp the answer (0 = no limit). Useful for holograms and menus.
+  strip-markdown: false
+  max-answer-chars: 0
+  max-answer-lines: 0
+  # Sent only for reasoning models (o1/o3/o4, gpt-oss, deepseek-r1, qwq, *reasoner*). off = never send.
+  reasoning-effort: low
   connect-timeout: 5
   read-timeout: 30
 
@@ -26,17 +39,32 @@ limits:
   requests-per-minute: 30
   requests-per-day: 1000
   max-prompt-length: 128
+  # After HTTP 429, pause every request to this provider (seconds).
+  provider-pause-seconds: 60
+  # After HTTP 401 or 402, pause for longer (seconds).
+  auth-pause-seconds: 300
+  # Per-prompt backoff after any provider error. Doubles until the max.
+  error-backoff-initial-seconds: 2
+  error-backoff-max-seconds: 120
+  # How often the same error kind is written to the server log.
+  error-log-cooldown-seconds: 30
 
 # Unique-answer pools for %ainexus_generate_<prompt>%
 pool:
   enabled: true
   max-total-prompts: 10
+  # Save answers to pool.yml so a restart does not buy the pool again.
+  persist: true
+  save-delay-seconds: 2
   entries: []
   # Example:
   # entries:
   #   - prompt: "Short warm welcome for the joining player"
   #     size: 3
   #     min-threshold: 1
+  #     # Optional overrides of api.system-prompt / temperature / max-tokens
+  #     # temperature: 0.2
+  #     # max-tokens: 64
   #     # Model leaves {player_name} in the answer; NexusAI substitutes via PlaceholderAPI on delivery
   #     vars:
   #       player_name: "%player_name%"
