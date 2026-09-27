@@ -117,19 +117,42 @@ public final class RequestGate {
         return failureEpochByKey.getOrDefault(admissionKey, 0L);
     }
 
+    public long blockedForMillis(String admissionKey) {
+        Objects.requireNonNull(admissionKey, "admissionKey");
+        long now = clock.getAsLong();
+        long pauseLeft = Math.max(0L, pausedUntil - now);
+        Backoff backoff = backoffByKey.get(admissionKey);
+        long backoffLeft = backoff == null ? 0L : Math.max(0L, backoff.untilMillis - now);
+        return Math.max(pauseLeft, backoffLeft);
+    }
+
     public void recordSuccess(String admissionKey, long pauseStamp, long failureEpoch) {
+        recordSuccess(admissionKey, pauseStamp, failureEpoch, true);
+    }
+
+    /**
+     * @param clearPause {@code false} for {@code /nai test}, which must not shorten a provider pause
+     */
+    public void recordSuccess(String admissionKey, long pauseStamp, long failureEpoch, boolean clearPause) {
         Objects.requireNonNull(admissionKey, "admissionKey");
         long currentEpoch = failureEpochByKey.getOrDefault(admissionKey, 0L);
         if (currentEpoch == failureEpoch) {
             backoffByKey.remove(admissionKey);
         }
-        if (pauseGeneration.get() == pauseStamp) {
+        if (clearPause && pauseGeneration.get() == pauseStamp) {
             pausedUntil = 0L;
             pauseKind = null;
         }
     }
 
     public void recordFailure(String admissionKey, AiErrorKind kind) {
+        recordFailure(admissionKey, kind, 0L);
+    }
+
+    /**
+     * @param retryAfterSeconds {@code Retry-After} delta-seconds; the provider pause is at least the configured length
+     */
+    public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds) {
         Objects.requireNonNull(admissionKey, "admissionKey");
         if (kind == null || kind == AiErrorKind.LOCAL_LIMIT) {
             return;
@@ -146,6 +169,9 @@ public final class RequestGate {
         });
         if (kind.pausesProvider()) {
             long pause = kind == AiErrorKind.RATE_LIMIT ? rateLimitPauseMillis : authPauseMillis;
+            if (kind == AiErrorKind.RATE_LIMIT && retryAfterSeconds > 0L) {
+                pause = Math.max(pause, retryAfterSeconds * 1000L);
+            }
             pausedUntil = now + pause;
             pauseKind = kind;
             pauseGeneration.incrementAndGet();

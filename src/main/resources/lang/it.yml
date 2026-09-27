@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&cPermesso negato."
   unknown: "{prefix}&cSottocomando sconosciuto. Usa &e/nai help&c."
+  extra-args: "{prefix}&cArgomenti di troppo. Usa &e/nai help&c."
   help-header: "{prefix}&eComandi NexusAI:"
   help-help: "&7/nai help &8- &fMostra questo aiuto"
   help-version: "&7/nai version &8- &fMostra la versione del plugin"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7Pausa del provider: &f{provider_pause}"
 
 common:
-  yes: "sì"
-  no: "no"
+  "yes": "sì"
+  "no": "no"
   enabled: "attivo"
   disabled: "disattivo"
   none: "nessuno"

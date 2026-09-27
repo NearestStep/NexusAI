@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AiPoolTest {
@@ -66,6 +67,17 @@ class AiPoolTest {
 
         assertEquals(total, taken.get());
         assertEquals(0, pool.size("prompt"));
+    }
+
+    @Test
+    void duplicateTextIsStoredOnce() {
+        AiPool pool = new AiPool();
+        assertTrue(pool.add("p", "DUPLICATE-ANSWER"));
+        assertFalse(pool.add("p", "DUPLICATE-ANSWER"));
+        assertEquals(1, pool.size("p"));
+        assertEquals(List.of("DUPLICATE-ANSWER"), pool.copy("p"));
+        pool.replace("p", List.of("DUPLICATE-ANSWER", "DUPLICATE-ANSWER", "other"));
+        assertEquals(List.of("DUPLICATE-ANSWER", "other"), pool.copy("p"));
     }
 
     @Test
