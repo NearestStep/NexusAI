@@ -8,7 +8,7 @@ Other plugins (menus, chat, holograms) can request AI text through placeholders 
 
 - Paper **26.2** (Java **25**)
 - [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6+ (soft-depend)
-- API key for an OpenAI-compatible provider
+- API key for an OpenAI-compatible provider, unless you use a local endpoint such as Ollama
 
 ## Installation
 
@@ -27,7 +27,7 @@ export NEXUSAI_API_KEY=sk-...
 
 Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets).
 
-Without a key the plugin still loads, logs a warning, and **does not** send HTTP requests — placeholders return `fallback`.
+Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `::1`, or any base URL on port `11434`) are called without an `Authorization` header.
 
 ## Configuration
 
@@ -36,10 +36,10 @@ Without a key the plugin still loads, logs a warning, and **does not** send HTTP
 | Section | Parameters |
 |---------|------------|
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
-| `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `connect-timeout`, `read-timeout` |
+| `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `system-prompt`, `temperature` (negative = omit), `max-tokens` (`0` = omit), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
 | `cache` | `ttl` (seconds), `max-size` |
-| `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (default **128**) |
-| `pool` | `enabled`, `max-total-prompts`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`) |
+| `limits` | `requests-per-minute`, `requests-per-day`, `max-prompt-length` (default **128**), `provider-pause-seconds`, `auth-pause-seconds`, `error-backoff-initial-seconds`, `error-backoff-max-seconds`, `error-log-cooldown-seconds` |
+| `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
 | `fallback` | String on miss / rate limits / missing key |
 
@@ -58,8 +58,24 @@ Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_B
 | `cerebras` | `https://api.cerebras.ai/v1` |
 | `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `deepseek` | `https://api.deepseek.com` |
+| `ollama` | `http://localhost:11434/v1` |
+| `openrouter` | `https://openrouter.ai/api/v1` |
 
 An explicit `api.base-url` always wins. On startup the log prints: `Using provider: …, base-url: …, model: …`.
+
+`ollama` does not need an API key. Any other provider pointed at localhost or port `11434` is treated the same way: if `api.key` and `NEXUSAI_API_KEY` are empty, the `Authorization` header is omitted.
+
+### Generation
+
+Optional request fields, all omitted when left at the defaults (`system-prompt` empty, `temperature` negative, `max-tokens` 0):
+
+- `api.system-prompt` — sent as a system message before the user prompt
+- `api.temperature` and `api.max-tokens` — copied onto the JSON body
+- each `pool.entries[]` item may override those three for pool refills only
+- `api.strip-markdown`, `api.max-answer-chars`, `api.max-answer-lines` — applied to every answer (`0` means no limit)
+- `api.reasoning-effort` — sent only for reasoning models (`o1` / `o3` / `o4`, `gpt-oss`, `deepseek-r1`, `qwq`, names containing `reasoner`). Their token budget is raised to at least 2048. o-series models receive `max_completion_tokens` instead of `max_tokens`, and temperature is not sent. Set the effort to `off` to skip the field.
+
+Answers whose `content` is an array of parts are joined into one string.
 
 ## Commands
 
@@ -68,7 +84,8 @@ An explicit `api.base-url` always wins. On startup the log prints: `Using provid
 | `/nai help` | `nexusai.command` | Show command help |
 | `/nai version` | `nexusai.command` | Show plugin version |
 | `/nai reload` | `nexusai.reload` | Reload config + locale; rebuild cache/pool/prewarm |
-| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI |
+| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI, last error, provider pause |
+| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong` |
 
 Alias: `/nexusai`. Defaults: OP.
 
@@ -80,7 +97,9 @@ Alias: `/nexusai`. Defaults: OP.
 %ainexus_generate_<prompt>%
 ```
 
-Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`.
+Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. Refills, prewarm, and cache misses all spend the shared server rate limit. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider for a while instead of launching another batch on the next empty read.
+
+With `pool.persist: true` (default), answers are written to `plugins/NexusAI/pool.yml` on shutdown and, while the server is running, after `pool.save-delay-seconds` of quiet. They are loaded again on startup and `/nai reload`, so a restart does not buy a full pool if it was already filled.
 
 Example `pool.entries` with personalization vars:
 
@@ -132,8 +151,11 @@ Behavior:
 
 ### Why is there no top-level “pool capacity” setting?
 
-Capacity is per prompt: `pool.entries[].size` (with `min-threshold` for refill). There is no global `pool.size`.  
-Also, Bukkit `saveDefaultConfig()` does **not** merge new keys into an existing `plugins/NexusAI/config.yml` — after upgrading, add new sections manually or regenerate the file.
+Capacity is per prompt: `pool.entries[].size` (with `min-threshold` for refill). There is no global `pool.size`.
+
+### Will an upgrade overwrite my config?
+
+On startup and `/nai reload`, NexusAI inserts keys that exist in the default `config.yml` and are missing from `plugins/NexusAI/config.yml`. Values you already set are left as they are, and comments already in the file stay put. Added keys are listed in the server log (`Added missing config keys: …`). Keys that are new to you still use defaults until you edit them: a negative `temperature` and `max-tokens: 0` mean those fields are not sent, which matches older behavior.
 
 ### What is prewarm?
 
@@ -158,16 +180,18 @@ Test stack: JUnit 5 (no Mockito — Java 25 compatibility).
 ## Architecture (short)
 
 - `PluginConfig` — config.yml + env + provider defaults + locale
+- `ConfigMerger` — adds missing config keys without overwriting user values
 - `MessageService` — `lang/*.yml` with English fallback
 - `AiCache` — Caffeine (TTL + max-size + `isFresh`)
-- `AiPool` / `PoolService` — unique answer queues for `generate_`
+- `AiPool` / `PoolService` / `PoolStore` — unique answer queues for `generate_`, saved to `pool.yml`
 - `VarSubstitutor` — `{token}` delivery substitution from pool `vars`
 - `PrewarmService` — TTL warm-up/refresh for `cached_`
-- `RateLimiter` — per-player and server limits
+- `RateLimiter` / `RequestGate` — per-player and server limits, per-prompt backoff, provider pause
+- `AiDiagnostics` — last error and rate-limited WARNING logs
 - `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
 - `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
-- `NaiCommand` — `/nai` admin commands
+- `NaiCommand` — `/nai` admin commands, including `/nai test`
 
 ## License
 
