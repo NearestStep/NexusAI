@@ -13,7 +13,7 @@ Other plugins (menus, chat, holograms) can request AI text through placeholders 
 ## Installation
 
 1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-0.4.0-SNAPSHOT.jar` into `plugins/`
+2. Copy `build/libs/NexusAI-0.5.0-SNAPSHOT.jar` into `plugins/`
 3. Install PlaceholderAPI
 4. Set the API key (prefer environment):
 
