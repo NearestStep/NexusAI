@@ -119,7 +119,7 @@ public final class PoolService {
                 if (error != null) {
                     logger.log(Level.FINE, "Pool replenish failed for prompt", error);
                 } else if (answer != null && !answer.isBlank()) {
-                    if (pool.add(prompt, answer)) {
+                    if (pool.add(prompt, answer, isPersonalizedTemplate(answer, entry))) {
                         storedUnique.set(true);
                         duplicateStrikes.remove(prompt);
                         duplicateLimitLogged.remove(prompt);
@@ -161,6 +161,23 @@ public final class PoolService {
                     }
                     scheduleRetry(prompt, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
                 });
+    }
+
+    /**
+     * A repeated template such as {@code Hello {player_name}!} is one delivery per player, so it may fill {@code size}.
+     * Finished text with none of this entry's tokens stays unique.
+     */
+    private static boolean isPersonalizedTemplate(String answer, PoolEntry entry) {
+        Map<String, String> vars = entry.vars();
+        if (vars.isEmpty()) {
+            return false;
+        }
+        for (String key : vars.keySet()) {
+            if (key != null && !key.isBlank() && answer.contains('{' + key + '}')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void scheduleRetry(String prompt, long delayMillis) {

@@ -107,7 +107,7 @@ public final class AiHttpClient {
     /**
      * One live request for {@code /nai test}. Skips pause and backoff so an admin can probe,
      * but still spends a server rate-limit slot. Does not read or write the TTL cache.
-     * A successful probe does not clear a provider pause.
+     * A probe does not clear, start, or extend a provider pause.
      */
     public CompletableFuture<String> testAsync(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
@@ -235,7 +235,7 @@ public final class AiHttpClient {
                 if (kind != AiErrorKind.LOCAL_LIMIT) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
-                    gate.recordFailure(admissionKey, kind, retryAfter);
+                    gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
                     diagnostics.report(kind, AiErrors.detail(failure));
                 }
                 logger.log(Level.FINE, "AI request failed", failure);

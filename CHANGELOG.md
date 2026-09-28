@@ -9,8 +9,8 @@ Replace the published `NexusAI-0.5.0-SNAPSHOT.jar` with this build. Your existin
 - `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. `/nai test` still treats the rest of the line as the prompt, and that prompt is not cut to `limits.max-prompt-length`.
 - `/nai status` shows the locale words for yes and no (`yes` / `no` in English, `да` / `нет` in Russian) instead of the raw message keys. In Russian, an empty last error is «нет ошибки», so it is distinct from «нет».
 - Locale codes ignore case. `RU` loads Russian, and `PT-br` loads `pt_BR`. An unknown code still falls back to English with one warning.
-- A successful `/nai test` no longer clears a provider pause. The test itself still reaches the provider so you can check the channel. Placeholders, prewarm, and the pool stay paused until `auth-pause-seconds` or `provider-pause-seconds` ends.
-- Reloading onto a remote provider with no API key logs the missing-key warning once. Reloading again in that same state does not repeat it. Ollama and other local endpoints still run without a key and without that warning.
+- `/nai test` no longer changes a provider pause. A successful probe does not clear it, and a failed probe (401, 402, or 429) does not start a new pause or extend the one already running. A normal request still starts the pause. The test itself still reaches the provider so you can check the channel. Placeholders, prewarm, and the pool stay paused until `auth-pause-seconds` or `provider-pause-seconds` ends.
+- Reloading onto a remote provider with no API key logs the missing-key warning once. Reloading again in that same state does not repeat it. Ollama and other local endpoints still run without a key and without that warning. `http://[::1]:…` is local, the same as `::1` and `127.0.0.1`.
 - `/nai reload` no longer re-registers the PlaceholderAPI expansion, so the log is not filled with “Successfully registered internal expansion: ainexus” on every reload.
 
 ### Config reload
@@ -28,6 +28,7 @@ Replace the published `NexusAI-0.5.0-SNAPSHOT.jar` with this build. Your existin
 
 ### Pools and limits
 
-- The same answer text is stored only once per pool prompt. Handing it out does not make it eligible again until `/nai reload` or a restart. If the model keeps repeating itself, later `%ainexus_generate_...%` reads return `fallback` until a different answer is stored. The pool keeps asking until it has enough different answers or it logs, once, that it stopped.
+- Finished answer text is stored only once per pool prompt. Handing it out does not make it eligible again until `/nai reload` or a restart. If the model keeps repeating that text, later `%ainexus_generate_...%` reads return `fallback` until a different answer is stored. The pool keeps asking until it has enough different answers or it logs, once, that it stopped.
+- An answer that still contains a configured `{token}`, such as `{player_name}`, is a template. The same template can fill every slot up to `size`, so the welcome example can greet several players even when the model repeats one line. Each player gets that line with their own name substituted.
 - After a provider error or a provider pause, a short pool refills on its own. It does not wait for a player to read the placeholder. Reading an empty pool still returns `fallback` immediately.
 - Console commands, pool refills, and prewarm spend only the server rate limit. A request made for a player also spends `player-requests-per-minute` and `player-requests-per-day`. Hitting the player cap does not pause the provider and is not recorded as a provider error.

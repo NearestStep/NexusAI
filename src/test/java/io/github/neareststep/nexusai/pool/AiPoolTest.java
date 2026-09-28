@@ -77,7 +77,11 @@ class AiPoolTest {
         assertEquals(1, pool.size("p"));
         assertEquals(List.of("DUPLICATE-ANSWER"), pool.copy("p"));
         pool.replace("p", List.of("DUPLICATE-ANSWER", "DUPLICATE-ANSWER", "other"));
-        assertEquals(List.of("DUPLICATE-ANSWER", "other"), pool.copy("p"));
+        assertEquals(List.of("DUPLICATE-ANSWER", "DUPLICATE-ANSWER", "other"), pool.copy("p"));
+        assertFalse(pool.add("p", "DUPLICATE-ANSWER"));
+        assertTrue(pool.add("p", "Hello {player_name}!", true));
+        assertTrue(pool.add("p", "Hello {player_name}!", true));
+        assertEquals(2, pool.copy("p").stream().filter("Hello {player_name}!"::equals).count());
     }
 
     @Test

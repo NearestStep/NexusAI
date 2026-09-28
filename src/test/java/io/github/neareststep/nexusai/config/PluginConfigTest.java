@@ -118,8 +118,13 @@ class PluginConfigTest {
     void localhostAndOllamaPortAllowKeylessRequests() {
         assertTrue(PluginConfig.isLocalBaseUrl("http://127.0.0.1:8080/v1"));
         assertTrue(PluginConfig.isLocalBaseUrl("http://[::1]:11434/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://[::1]:18080/v1"));
         assertTrue(PluginConfig.isLocalBaseUrl("http://10.0.0.8:11434/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://localhost:9/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://0.0.0.0:18080/v1"));
+        assertTrue(PluginConfig.isLocalBaseUrl("http://nexusai.local:9/v1"));
         assertFalse(PluginConfig.isLocalBaseUrl("https://api.openai.com/v1"));
+        assertFalse(PluginConfig.isLocalBaseUrl("http://203.0.113.10:18080/v1"));
     }
 
     @Test

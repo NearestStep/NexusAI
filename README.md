@@ -27,7 +27,7 @@ export NEXUSAI_API_KEY=sk-...
 
 Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets).
 
-Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `::1`, or any base URL on port `11434`) are called without an `Authorization` header.
+Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`, including the bracketed form `[::1]`, a host ending in `.local`, or any base URL on port `11434`) are called without an `Authorization` header.
 
 ## Configuration
 
@@ -85,7 +85,7 @@ Answers whose `content` is an array of parts are joined into one string.
 | `/nai version` | `nexusai.command` | Show plugin version |
 | `/nai reload` | `nexusai.reload` | Reload config + locale; rebuild cache/pool/prewarm |
 | `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI, last error, provider pause |
-| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. This command does not apply `limits.max-prompt-length` and does not clear a provider pause |
+| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. This command does not apply `limits.max-prompt-length` and does not clear, start, or extend a provider pause |
 
 Alias: `/nexusai`. Defaults: OP. `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`.
 
@@ -97,7 +97,7 @@ Alias: `/nexusai`. Defaults: OP. `/nai help`, `/nai version`, `/nai reload`, and
 %ainexus_generate_<prompt>%
 ```
 
-Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. The same text is stored only once per prompt, and handing it out does not make it eligible again until `/nai reload` or a restart. Repeated model output does not fill `size` and is not returned a second time; later reads get `fallback` until a different answer is stored. After the error backoff the pool asks again until it has enough different answers or it logs that it stopped. A short pool also asks again after a provider error or pause ends, without waiting for a placeholder read. Refills, prewarm, and cache misses all spend the shared server rate limit. A player request also spends `player-requests-per-minute` and `player-requests-per-day`. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider except `/nai test`. A numeric `Retry-After` on HTTP 429 is used only when it is longer than `provider-pause-seconds`. `/nai test` does not shorten that pause.
+Takes and **removes** one answer from that prompt's pool. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. Finished text, with none of this entry's `{token}` markers left, is stored only once per prompt, and handing it out does not make it eligible again until `/nai reload` or a restart. Repeated model output of that kind does not fill `size` and is not returned a second time; later reads get `fallback` until a different answer is stored. An answer that still contains a configured token such as `{player_name}` is a template: the same template may occupy every slot up to `size`, because each player receives their own substitution. After the error backoff the pool asks again until it has enough answers or it logs that it stopped. A short pool also asks again after a provider error or pause ends, without waiting for a placeholder read. Refills, prewarm, and cache misses all spend the shared server rate limit. A player request also spends `player-requests-per-minute` and `player-requests-per-day`. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider except `/nai test`. A numeric `Retry-After` on HTTP 429 is used only when it is longer than `provider-pause-seconds`. `/nai test` does not shorten or extend that pause.
 
 With `pool.persist: true` (default), answers are written to `plugins/NexusAI/pool.yml` on shutdown and, while the server is running, after `pool.save-delay-seconds` of quiet. They are loaded again on startup and `/nai reload`, so a restart does not buy a full pool if it was already filled.
 
@@ -118,7 +118,7 @@ pool:
 How `vars` work:
 
 1. On refill, NexusAI tells the model to leave brace tokens like `{player_name}` in the answer (no real name invented).
-2. Answers are stored in the shared unique pool with those tokens.
+2. Answers are stored with those tokens still in place. The same template can fill `size` (the welcome example with `size: 3` can serve three players). Text that no longer contains a configured token is stored only once.
 3. On `%ainexus_generate_<same prompt>%`, tokens are replaced via PlaceholderAPI for the viewing player → e.g. `Hello, Steve!`.
 
 The placeholder prompt string must match `entries[].prompt` exactly for `vars` to apply.
