@@ -194,6 +194,20 @@ class AiHttpClientTest {
     }
 
     @Test
+    void failedTestDoesNotExtendProviderPause() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AiProvider provider = prompt -> CompletableFuture.failedFuture(
+                new AiRequestException(AiErrorKind.BAD_KEY, 401, "HTTP 401", null));
+        AiHttpClient client = client(configWithKey, new RateLimiter(100, 100), clock, provider);
+        assertTrue(client.generateFreshAsync("live").isCompletedExceptionally());
+        clock.addAndGet(5_000L);
+        long remaining = client.pauseRemainingSeconds();
+        assertTrue(client.testAsync("probe").isCompletedExceptionally());
+        assertEquals(remaining, client.pauseRemainingSeconds());
+        assertTrue(client.isProviderPaused());
+    }
+
+    @Test
     void localhostWithoutKeyStillCallsProvider() {
         if (System.getenv("NEXUSAI_API_KEY") != null && !System.getenv("NEXUSAI_API_KEY").isBlank()) {
             return;

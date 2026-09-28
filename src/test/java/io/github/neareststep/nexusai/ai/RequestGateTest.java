@@ -125,6 +125,21 @@ class RequestGateTest {
     }
 
     @Test
+    void adminProbeFailureDoesNotExtendPause() {
+        RequestGate gate = gate(100, 1_000, 8_000, 6_000, 12_000);
+        gate.recordFailure("tip", AiErrorKind.BAD_KEY);
+        clock.addAndGet(5_000L);
+        assertEquals(7_000L, gate.pauseRemainingMillis());
+        gate.recordFailure("probe", AiErrorKind.BAD_KEY, 0L, false);
+        gate.recordFailure("probe", AiErrorKind.RATE_LIMIT, 30L, false);
+        gate.recordFailure("probe", AiErrorKind.QUOTA, 0L, false);
+        assertEquals(7_000L, gate.pauseRemainingMillis());
+        assertEquals(AiErrorKind.BAD_KEY, gate.pauseKind());
+        gate.recordFailure("live", AiErrorKind.BAD_KEY);
+        assertEquals(12_000L, gate.pauseRemainingMillis());
+    }
+
+    @Test
     void retryAfterCannotShortenTheConfiguredPause() {
         RequestGate gate = gate(100, 1_000, 8_000, 6_000, 8_000);
         gate.recordFailure("tip", AiErrorKind.RATE_LIMIT, 1L);

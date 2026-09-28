@@ -360,6 +360,9 @@ public final class PluginConfig {
             String host = uri.getHost();
             if (host != null) {
                 String normalized = host.toLowerCase(Locale.ROOT);
+                if (normalized.startsWith("[") && normalized.endsWith("]") && normalized.length() > 2) {
+                    normalized = normalized.substring(1, normalized.length() - 1);
+                }
                 if (normalized.equals("localhost")
                         || normalized.equals("127.0.0.1")
                         || normalized.equals("0.0.0.0")

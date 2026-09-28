@@ -146,13 +146,20 @@ public final class RequestGate {
     }
 
     public void recordFailure(String admissionKey, AiErrorKind kind) {
-        recordFailure(admissionKey, kind, 0L);
+        recordFailure(admissionKey, kind, 0L, true);
     }
 
     /**
      * @param retryAfterSeconds {@code Retry-After} delta-seconds; the provider pause is at least the configured length
      */
     public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds) {
+        recordFailure(admissionKey, kind, retryAfterSeconds, true);
+    }
+
+    /**
+     * @param armPause {@code false} for {@code /nai test}: a probe may observe 401/402/429 but must not start or extend the provider pause
+     */
+    public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds, boolean armPause) {
         Objects.requireNonNull(admissionKey, "admissionKey");
         if (kind == null || kind == AiErrorKind.LOCAL_LIMIT) {
             return;
@@ -167,7 +174,7 @@ public final class RequestGate {
                     : Math.min(backoffMaxMillis, backoffInitialMillis * multiplier);
             return new Backoff(now + delay, attempt);
         });
-        if (kind.pausesProvider()) {
+        if (armPause && kind.pausesProvider()) {
             long pause = kind == AiErrorKind.RATE_LIMIT ? rateLimitPauseMillis : authPauseMillis;
             if (kind == AiErrorKind.RATE_LIMIT && retryAfterSeconds > 0L) {
                 pause = Math.max(pause, retryAfterSeconds * 1000L);

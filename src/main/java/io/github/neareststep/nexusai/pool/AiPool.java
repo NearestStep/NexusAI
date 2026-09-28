@@ -27,15 +27,24 @@ public final class AiPool {
     }
 
     /**
-     * @return {@code false} when this prompt has already accepted the same text, including after it was polled
+     * @return {@code false} when this prompt has already accepted the same finished text, including after it was polled
      */
     public boolean add(String prompt, String answer) {
+        return add(prompt, answer, false);
+    }
+
+    /**
+     * @param allowRepeat {@code true} for a personalized template that still contains a configured {@code {token}}.
+     *                     Each copy is one delivery; substitution happens when a player reads it.
+     * @return {@code false} when a finished answer was already accepted for this prompt
+     */
+    public boolean add(String prompt, String answer, boolean allowRepeat) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(answer, "answer");
         ConcurrentLinkedDeque<String> queue = pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>());
         Set<String> seen = remembered.computeIfAbsent(prompt, ignored -> ConcurrentHashMap.newKeySet());
         synchronized (queue) {
-            if (!seen.add(answer)) {
+            if (!allowRepeat && !seen.add(answer)) {
                 return false;
             }
             queue.addLast(answer);
@@ -68,7 +77,8 @@ public final class AiPool {
         Set<String> seen = ConcurrentHashMap.newKeySet();
         if (answers != null) {
             for (String answer : answers) {
-                if (answer != null && !answer.isBlank() && seen.add(answer)) {
+                if (answer != null && !answer.isBlank()) {
+                    seen.add(answer);
                     queue.addLast(answer);
                 }
             }
