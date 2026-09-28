@@ -146,11 +146,71 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void blankContentIsAnErrorAndReasoningTextIsUsed() throws Exception {
+        assertKind(200, "{\"choices\":[{\"message\":{\"content\":\"\"}}]}", AiErrorKind.OTHER);
+        assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"The visible reasoning text.\"}}]}",
+                "The visible reasoning text.");
+        assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":null,\"reasoning\":\"Only reasoning was produced.\"}}]}",
+                "Only reasoning was produced.");
+        assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"final-answer\",\"reasoning_content\":\"hidden\"}}]}",
+                "final-answer");
+    }
+
+    @Test
+    void retryAfterHeaderIsCarriedOnTheException() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = "{\"error\":{\"message\":\"rate limit\"}}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Retry-After", "30");
+            exchange.sendResponseHeaders(429, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            yaml.set("api.base-url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-retry"));
+            CompletionException error = assertThrows(CompletionException.class, () -> provider.complete("ping").join());
+            assertEquals(30L, AiErrors.find(error).retryAfterSeconds());
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void rateLimitAndUnknownModelAreClassified() throws Exception {
         assertKind(429, "{\"error\":{\"message\":\"rate limit\"}}", AiErrorKind.RATE_LIMIT);
         assertKind(402, "{\"error\":{\"message\":\"insufficient balance\"}}", AiErrorKind.QUOTA);
         assertKind(401, "{\"error\":{\"message\":\"invalid api key\"}}", AiErrorKind.BAD_KEY);
         assertKind(404, "{\"error\":{\"code\":\"model_not_found\",\"message\":\"no such model\"}}", AiErrorKind.UNKNOWN_MODEL);
+    }
+
+    private void assertAnswer(int status, String responseBody, String expected) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("o1-mini", "", -1, 0, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            yaml.set("api.base-url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-text"));
+            assertEquals(expected, provider.complete("ping").join());
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
     }
 
     private void assertKind(int status, String responseBody, AiErrorKind expected) throws Exception {

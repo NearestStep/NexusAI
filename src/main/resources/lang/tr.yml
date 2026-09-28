@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&cYetkiniz yok."
   unknown: "{prefix}&cBilinmeyen alt komut. &e/nai help&c kullanın."
+  extra-args: "{prefix}&cFazla argüman. &e/nai help&c kullanın."
   help-header: "{prefix}&eNexusAI komutları:"
   help-help: "&7/nai help &8- &fBu yardımı göster"
   help-version: "&7/nai version &8- &fEklenti sürümünü göster"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7Sağlayıcı duraklaması: &f{provider_pause}"
 
 common:
-  yes: "evet"
-  no: "hayır"
+  "yes": "evet"
+  "no": "hayır"
   enabled: "açık"
   disabled: "kapalı"
   none: "yok"

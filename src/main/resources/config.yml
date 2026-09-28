@@ -36,10 +36,15 @@ cache:
   max-size: 1000
 
 limits:
+  # Server-wide caps. Console commands, the pool, and prewarm spend only these.
   requests-per-minute: 30
   requests-per-day: 1000
+  # A player also spends a personal cap, so one player cannot use the whole server budget.
+  player-requests-per-minute: 10
+  player-requests-per-day: 200
   max-prompt-length: 128
   # After HTTP 429, pause every request to this provider (seconds).
+  # A numeric Retry-After header cannot make this shorter; a larger value is used instead.
   provider-pause-seconds: 60
   # After HTTP 401 or 402, pause for longer (seconds).
   auth-pause-seconds: 300

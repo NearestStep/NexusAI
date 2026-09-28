@@ -49,6 +49,10 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
 
         String sub = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
+        if (args.length > 1 && !"test".equals(sub)) {
+            messages.send(sender, "command.extra-args");
+            return true;
+        }
         switch (sub) {
             case "help" -> sendHelp(sender, messages);
             case "version" -> messages.send(sender, "command.version", Map.of(

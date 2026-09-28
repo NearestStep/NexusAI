@@ -173,7 +173,7 @@ class AiHttpClientTest {
     }
 
     @Test
-    void testAsyncBypassesPauseAndClearsItOnSuccess() {
+    void testAsyncBypassesPauseWithoutClearingIt() {
         AtomicInteger calls = new AtomicInteger();
         AtomicLong clock = new AtomicLong(5_000L);
         AiProvider provider = prompt -> {
@@ -187,8 +187,24 @@ class AiHttpClientTest {
         assertTrue(client.generateFreshAsync("pool").isCompletedExceptionally());
         assertTrue(client.isProviderPaused());
         assertEquals("pong", client.testAsync("probe").join());
-        assertFalse(client.isProviderPaused());
+        assertTrue(client.isProviderPaused());
         assertTrue(client.lastErrorText().contains("API key"));
+        clock.addAndGet(300_000L);
+        assertFalse(client.isProviderPaused());
+    }
+
+    @Test
+    void failedTestDoesNotExtendProviderPause() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AiProvider provider = prompt -> CompletableFuture.failedFuture(
+                new AiRequestException(AiErrorKind.BAD_KEY, 401, "HTTP 401", null));
+        AiHttpClient client = client(configWithKey, new RateLimiter(100, 100), clock, provider);
+        assertTrue(client.generateFreshAsync("live").isCompletedExceptionally());
+        clock.addAndGet(5_000L);
+        long remaining = client.pauseRemainingSeconds();
+        assertTrue(client.testAsync("probe").isCompletedExceptionally());
+        assertEquals(remaining, client.pauseRemainingSeconds());
+        assertTrue(client.isProviderPaused());
     }
 
     @Test

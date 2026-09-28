@@ -14,6 +14,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -27,7 +29,11 @@ public final class PoolService {
     private final AiHttpClient httpClient;
     private final Logger logger;
     private final PoolStore store;
+    private final BiConsumer<Long, Runnable> retry;
     private final ConcurrentHashMap<String, AtomicBoolean> replenishing = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicBoolean> retryPending = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> duplicateStrikes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> duplicateLimitLogged = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PoolEntry> entriesByPrompt = new ConcurrentHashMap<>();
     private volatile boolean running;
 
@@ -36,11 +42,26 @@ public final class PoolService {
     }
 
     public PoolService(PluginConfig config, AiPool pool, AiHttpClient httpClient, Logger logger, PoolStore store) {
+        this(config, pool, httpClient, logger, store, null);
+    }
+
+    /**
+     * @param retry schedules another refill after backoff or a duplicate answer; {@code null} disables it
+     */
+    public PoolService(
+            PluginConfig config,
+            AiPool pool,
+            AiHttpClient httpClient,
+            Logger logger,
+            PoolStore store,
+            BiConsumer<Long, Runnable> retry
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.pool = Objects.requireNonNull(pool, "pool");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.store = store == null ? PoolStore.disabled() : store;
+        this.retry = retry;
         for (PoolEntry entry : config.getPoolEntries()) {
             entriesByPrompt.put(entry.prompt(), entry);
         }
@@ -68,7 +89,13 @@ public final class PoolService {
         if (entry == null) {
             return;
         }
+        int duplicateLimit = Math.max(8, entry.size() * 4);
+        AtomicInteger strikes = duplicateStrikes.get(prompt);
+        if (strikes != null && strikes.get() >= duplicateLimit) {
+            return;
+        }
         if (httpClient.isAdmissionBlocked(prompt)) {
+            scheduleRetry(prompt, httpClient.admissionDelayMillis(prompt) + 25L);
             return;
         }
 
@@ -83,6 +110,8 @@ public final class PoolService {
             return;
         }
 
+        AtomicInteger duplicates = new AtomicInteger();
+        AtomicBoolean storedUnique = new AtomicBoolean();
         List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
         String httpPrompt = VarSubstitutor.appendVarsRules(prompt, entry.vars());
         for (int i = 0; i < needed; i++) {
@@ -90,15 +119,81 @@ public final class PoolService {
                 if (error != null) {
                     logger.log(Level.FINE, "Pool replenish failed for prompt", error);
                 } else if (answer != null && !answer.isBlank()) {
-                    pool.add(prompt, answer);
-                    store.markDirty(pool, limits());
+                    if (pool.add(prompt, answer, isPersonalizedTemplate(answer, entry))) {
+                        storedUnique.set(true);
+                        duplicateStrikes.remove(prompt);
+                        duplicateLimitLogged.remove(prompt);
+                        store.markDirty(pool, limits());
+                    } else {
+                        duplicates.incrementAndGet();
+                    }
                 }
                 return null;
             }));
         }
 
         CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new))
-                .whenComplete((ignored, error) -> flag.set(false));
+                .whenComplete((ignored, error) -> {
+                    flag.set(false);
+                    if (!running || pool.size(prompt) >= entry.size()) {
+                        return;
+                    }
+                    if (httpClient.isAdmissionBlocked(prompt)) {
+                        scheduleRetry(prompt, httpClient.admissionDelayMillis(prompt) + 25L);
+                        return;
+                    }
+                    int repeated = duplicates.get();
+                    if (repeated <= 0) {
+                        return;
+                    }
+                    if (storedUnique.get()) {
+                        scheduleRetry(prompt, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+                        return;
+                    }
+                    int strikeCount = duplicateStrikes.computeIfAbsent(prompt, key -> new AtomicInteger()).addAndGet(repeated);
+                    int limit = Math.max(8, entry.size() * 4);
+                    if (strikeCount >= limit) {
+                        if (duplicateLimitLogged.putIfAbsent(prompt, Boolean.TRUE) == null) {
+                            logger.warning("Stopped refilling pool for \"" + prompt + "\" after " + strikeCount
+                                    + " duplicate answers. A different answer or /nai reload will try again.");
+                        }
+                        return;
+                    }
+                    scheduleRetry(prompt, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+                });
+    }
+
+    /**
+     * A repeated template such as {@code Hello {player_name}!} is one delivery per player, so it may fill {@code size}.
+     * Finished text with none of this entry's tokens stays unique.
+     */
+    private static boolean isPersonalizedTemplate(String answer, PoolEntry entry) {
+        Map<String, String> vars = entry.vars();
+        if (vars.isEmpty()) {
+            return false;
+        }
+        for (String key : vars.keySet()) {
+            if (key != null && !key.isBlank() && answer.contains('{' + key + '}')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void scheduleRetry(String prompt, long delayMillis) {
+        if (retry == null || !running) {
+            return;
+        }
+        AtomicBoolean pending = retryPending.computeIfAbsent(prompt, ignored -> new AtomicBoolean());
+        if (!pending.compareAndSet(false, true)) {
+            return;
+        }
+        retry.accept(Math.max(50L, delayMillis), () -> {
+            pending.set(false);
+            if (running) {
+                replenish(prompt);
+            }
+        });
     }
 
     public void onConsume(String prompt) {

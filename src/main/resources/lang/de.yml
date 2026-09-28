@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&cKeine Berechtigung."
   unknown: "{prefix}&cUnbekannter Unterbefehl. Nutze &e/nai help&c."
+  extra-args: "{prefix}&cUnerwartete zusätzliche Argumente. Nutzen Sie &e/nai help&c."
   help-header: "{prefix}&eNexusAI-Befehle:"
   help-help: "&7/nai help &8- &fDiese Hilfe anzeigen"
   help-version: "&7/nai version &8- &fPlugin-Version anzeigen"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7Anbieter-Pause: &f{provider_pause}"
 
 common:
-  yes: "ja"
-  no: "nein"
+  "yes": "ja"
+  "no": "nein"
   enabled: "aktiviert"
   disabled: "deaktiviert"
   none: "keine"

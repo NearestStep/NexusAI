@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.config;
 
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 
+import java.io.IOException;
 import java.io.StringReader;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -24,15 +26,27 @@ public final class ConfigMerger {
     private ConfigMerger() {
     }
 
-    public record Result(String yaml, List<String> addedKeys) {
+    public record Result(String yaml, List<String> addedKeys, boolean valid) {
+        public Result(String yaml, List<String> addedKeys) {
+            this(yaml, addedKeys, true);
+        }
     }
 
     public static Result mergeMissing(String existingYaml, String defaultYaml) {
         String existing = existingYaml == null ? "" : existingYaml;
         String defaultsText = defaultYaml == null ? "" : defaultYaml;
+        if (!parses(existing)) {
+            return new Result(existing, List.of(), false);
+        }
         String newline = existing.contains("\r\n") ? "\r\n" : "\n";
-        YamlConfiguration existingConfig = YamlConfiguration.loadConfiguration(new StringReader(existing));
-        YamlConfiguration defaults = YamlConfiguration.loadConfiguration(new StringReader(defaultsText));
+        YamlConfiguration existingConfig = new YamlConfiguration();
+        YamlConfiguration defaults = new YamlConfiguration();
+        try {
+            existingConfig.load(new StringReader(existing));
+            defaults.load(new StringReader(defaultsText));
+        } catch (IOException | InvalidConfigurationException e) {
+            return new Result(existing, List.of(), false);
+        }
 
         List<String> missing = new ArrayList<>();
         for (String key : defaults.getKeys(true)) {
@@ -187,6 +201,16 @@ public final class ConfigMerger {
             formatted.add(pad + leaf + ":");
         }
         return formatted;
+    }
+
+    private static boolean parses(String yaml) {
+        YamlConfiguration configuration = new YamlConfiguration();
+        try {
+            configuration.load(new StringReader(yaml == null ? "" : yaml));
+            return true;
+        } catch (IOException | InvalidConfigurationException e) {
+            return false;
+        }
     }
 
     private static boolean isComment(String line) {

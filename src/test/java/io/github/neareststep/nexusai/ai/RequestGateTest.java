@@ -111,6 +111,48 @@ class RequestGateTest {
     }
 
     @Test
+    void adminProbeSuccessDoesNotClearPause() {
+        RequestGate gate = gate(100, 5_000, 30_000, 6_000, 8_000);
+        gate.recordFailure("tip", AiErrorKind.BAD_KEY);
+        long pauseStamp = gate.pauseStamp();
+        long epoch = gate.failureEpoch("probe");
+        gate.recordSuccess("probe", pauseStamp, epoch, false);
+        assertTrue(gate.isPaused());
+        clock.addAndGet(6_000);
+        assertTrue(gate.isPaused());
+        clock.addAndGet(2_000);
+        assertFalse(gate.isPaused());
+    }
+
+    @Test
+    void adminProbeFailureDoesNotExtendPause() {
+        RequestGate gate = gate(100, 1_000, 8_000, 6_000, 12_000);
+        gate.recordFailure("tip", AiErrorKind.BAD_KEY);
+        clock.addAndGet(5_000L);
+        assertEquals(7_000L, gate.pauseRemainingMillis());
+        gate.recordFailure("probe", AiErrorKind.BAD_KEY, 0L, false);
+        gate.recordFailure("probe", AiErrorKind.RATE_LIMIT, 30L, false);
+        gate.recordFailure("probe", AiErrorKind.QUOTA, 0L, false);
+        assertEquals(7_000L, gate.pauseRemainingMillis());
+        assertEquals(AiErrorKind.BAD_KEY, gate.pauseKind());
+        gate.recordFailure("live", AiErrorKind.BAD_KEY);
+        assertEquals(12_000L, gate.pauseRemainingMillis());
+    }
+
+    @Test
+    void retryAfterCannotShortenTheConfiguredPause() {
+        RequestGate gate = gate(100, 1_000, 8_000, 6_000, 8_000);
+        gate.recordFailure("tip", AiErrorKind.RATE_LIMIT, 1L);
+        clock.addAndGet(1_300);
+        assertTrue(gate.isPaused());
+        gate.recordFailure("other", AiErrorKind.RATE_LIMIT, 30L);
+        clock.addAndGet(6_000);
+        assertTrue(gate.isPaused());
+        clock.addAndGet(24_000);
+        assertFalse(gate.isPaused());
+    }
+
+    @Test
     void bypassSkipsPauseButNotTheRateLimit() {
         RequestGate gate = gate(1, 1_000, 8_000, 60_000, 300_000);
         gate.recordFailure("tip", AiErrorKind.BAD_KEY);

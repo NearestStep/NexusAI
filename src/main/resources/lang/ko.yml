@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&c권한이 없습니다."
   unknown: "{prefix}&c알 수 없는 하위 명령입니다. &e/nai help&c를 사용하세요."
+  extra-args: "{prefix}&c불필요한 인자가 있습니다. &e/nai help&c 를 사용하세요."
   help-header: "{prefix}&eNexusAI 명령어:"
   help-help: "&7/nai help &8- &f이 도움말 표시"
   help-version: "&7/nai version &8- &f플러그인 버전 표시"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
 
 common:
-  yes: "예"
-  no: "아니오"
+  "yes": "예"
+  "no": "아니오"
   enabled: "사용"
   disabled: "사용 안 함"
   none: "없음"
