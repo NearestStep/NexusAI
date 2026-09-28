@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
@@ -240,9 +241,11 @@ class PoolServiceTest {
         await(() -> pending.get() != null, 2, TimeUnit.SECONDS);
         assertEquals(1, pool.size("tip"));
         assertEquals(3, calls.get());
+        assertEquals(Optional.of("DUPLICATE-ANSWER"), pool.poll("tip"));
         pending.get().run();
         await(() -> calls.get() > 3, 2, TimeUnit.SECONDS);
-        assertEquals(1, pool.size("tip"));
+        assertEquals(0, pool.size("tip"));
+        assertTrue(pool.poll("tip").isEmpty());
         service.shutdown();
     }
 
