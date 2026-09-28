@@ -81,6 +81,18 @@ class AiPoolTest {
     }
 
     @Test
+    void polledTextIsNotAcceptedAgain() {
+        AiPool pool = new AiPool();
+        assertTrue(pool.add("p", "DUPLICATE-ANSWER"));
+        assertEquals(Optional.of("DUPLICATE-ANSWER"), pool.poll("p"));
+        assertEquals(0, pool.size("p"));
+        assertFalse(pool.add("p", "DUPLICATE-ANSWER"));
+        assertEquals(0, pool.size("p"));
+        assertTrue(pool.add("p", "other"));
+        assertEquals(List.of("other"), pool.copy("p"));
+    }
+
+    @Test
     void concurrentAddIsVisible() throws Exception {
         AiPool pool = new AiPool();
         CountDownLatch start = new CountDownLatch(1);

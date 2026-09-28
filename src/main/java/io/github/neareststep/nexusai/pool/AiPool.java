@@ -14,6 +14,8 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 public final class AiPool {
 
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<String>> pools = new ConcurrentHashMap<>();
+    /** Answers already accepted for a prompt. Survives {@link #poll(String)} until {@link #replace}. */
+    private final ConcurrentHashMap<String, Set<String>> remembered = new ConcurrentHashMap<>();
 
     public Optional<String> poll(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
@@ -25,14 +27,15 @@ public final class AiPool {
     }
 
     /**
-     * @return {@code false} when this prompt already holds the same text
+     * @return {@code false} when this prompt has already accepted the same text, including after it was polled
      */
     public boolean add(String prompt, String answer) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(answer, "answer");
         ConcurrentLinkedDeque<String> queue = pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>());
+        Set<String> seen = remembered.computeIfAbsent(prompt, ignored -> ConcurrentHashMap.newKeySet());
         synchronized (queue) {
-            if (contains(queue, answer)) {
+            if (!seen.add(answer)) {
                 return false;
             }
             queue.addLast(answer);
@@ -59,29 +62,23 @@ public final class AiPool {
         return new ArrayList<>(queue);
     }
 
-    private static boolean contains(ConcurrentLinkedDeque<String> queue, String answer) {
-        for (String existing : queue) {
-            if (answer.equals(existing)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public void replace(String prompt, List<String> answers) {
         Objects.requireNonNull(prompt, "prompt");
         ConcurrentLinkedDeque<String> queue = new ConcurrentLinkedDeque<>();
+        Set<String> seen = ConcurrentHashMap.newKeySet();
         if (answers != null) {
             for (String answer : answers) {
-                if (answer != null && !answer.isBlank() && !contains(queue, answer)) {
+                if (answer != null && !answer.isBlank() && seen.add(answer)) {
                     queue.addLast(answer);
                 }
             }
         }
         if (queue.isEmpty()) {
             pools.remove(prompt);
+            remembered.remove(prompt);
         } else {
             pools.put(prompt, queue);
+            remembered.put(prompt, seen);
         }
     }
 }
