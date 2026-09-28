@@ -33,6 +33,11 @@ public final class OpenAiProvider implements AiProvider {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
 
+    public OpenAiProvider(PluginConfig config, ExecutorService executor, Logger logger, HttpClient httpClient) {
+        this(config, executor, logger, Objects.requireNonNull(httpClient, "httpClient"),
+                new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL));
+    }
+
     public OpenAiProvider(PluginConfig config, ExecutorService executor, Logger logger) {
         this.config = Objects.requireNonNull(config, "config");
         this.executor = Objects.requireNonNull(executor, "executor");
@@ -117,7 +122,13 @@ public final class OpenAiProvider implements AiProvider {
             boolean htmlBody = looksLikeHtml(responseBody);
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw httpError(response.statusCode(), responseBody, htmlBody, parsedUri);
+                throw httpError(
+                        response.statusCode(),
+                        responseBody,
+                        htmlBody,
+                        parsedUri,
+                        retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null))
+                );
             }
             if (htmlBody) {
                 throw new AiRequestException(
@@ -130,11 +141,13 @@ public final class OpenAiProvider implements AiProvider {
 
             ChatCompletionResponse parsed = objectMapper.readValue(responseBody, ChatCompletionResponse.class);
             if (parsed.getChoices() == null || parsed.getChoices().isEmpty()
-                    || parsed.getChoices().getFirst().getMessage() == null
-                    || parsed.getChoices().getFirst().getMessage().getContent() == null) {
+                    || parsed.getChoices().getFirst().getMessage() == null) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            String text = parsed.getChoices().getFirst().getMessage().getContent();
+            String text = parsed.getChoices().getFirst().getMessage().visibleText();
+            if (text == null || text.isBlank()) {
+                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
+            }
             return AnswerFormatter.format(
                     text,
                     config.isStripMarkdown(),
@@ -160,7 +173,18 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private static AiRequestException httpError(int status, String body, boolean html, URI uri) {
+    static long retryAfterSeconds(String header) {
+        if (header == null || header.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Math.max(0L, Long.parseLong(header.trim()));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private static AiRequestException httpError(int status, String body, boolean html, URI uri, long retryAfterSeconds) {
         String truncated = truncate(body);
         AiErrorKind kind = AiErrors.classifyHttp(status, body, html);
         String host = uri.getHost() == null ? uri.toString() : uri.getHost();
@@ -177,7 +201,7 @@ public final class OpenAiProvider implements AiProvider {
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;
         };
-        return new AiRequestException(kind, status, message, null);
+        return new AiRequestException(kind, status, message, null, retryAfterSeconds);
     }
 
     private static boolean looksLikeHtml(String body) {

@@ -40,6 +40,9 @@ class MessageServiceTest {
     @Test
     void normalizeLocaleAcceptsHyphen() {
         assertEquals("pt_BR", MessageService.normalizeLocale("pt-BR"));
+        assertEquals("pt_BR", MessageService.normalizeLocale("PT-br"));
+        assertEquals("ru", MessageService.normalizeLocale("RU"));
+        assertEquals("ru", MessageService.normalizeLocale("ru"));
         assertEquals("en", MessageService.normalizeLocale(""));
     }
 }

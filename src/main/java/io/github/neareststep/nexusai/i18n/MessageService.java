@@ -12,6 +12,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -99,7 +100,12 @@ public final class MessageService {
         if (requested == null || requested.isBlank()) {
             return DEFAULT_LOCALE;
         }
-        return requested.trim().replace('-', '_');
+        String[] parts = requested.trim().replace('-', '_').split("_", 2);
+        String language = parts[0].toLowerCase(Locale.ROOT);
+        if (parts.length == 1 || parts[1].isBlank()) {
+            return language;
+        }
+        return language + "_" + parts[1].toUpperCase(Locale.ROOT);
     }
 
     private FileConfiguration loadBundle(String localeCode) {

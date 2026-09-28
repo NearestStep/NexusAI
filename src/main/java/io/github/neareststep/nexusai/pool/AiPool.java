@@ -14,6 +14,8 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 public final class AiPool {
 
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<String>> pools = new ConcurrentHashMap<>();
+    /** Answers already accepted for a prompt. Survives {@link #poll(String)} until {@link #replace}. */
+    private final ConcurrentHashMap<String, Set<String>> remembered = new ConcurrentHashMap<>();
 
     public Optional<String> poll(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
@@ -24,10 +26,30 @@ public final class AiPool {
         return Optional.ofNullable(queue.pollFirst());
     }
 
-    public void add(String prompt, String answer) {
+    /**
+     * @return {@code false} when this prompt has already accepted the same finished text, including after it was polled
+     */
+    public boolean add(String prompt, String answer) {
+        return add(prompt, answer, false);
+    }
+
+    /**
+     * @param allowRepeat {@code true} for a personalized template that still contains a configured {@code {token}}.
+     *                     Each copy is one delivery; substitution happens when a player reads it.
+     * @return {@code false} when a finished answer was already accepted for this prompt
+     */
+    public boolean add(String prompt, String answer, boolean allowRepeat) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(answer, "answer");
-        pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>()).addLast(answer);
+        ConcurrentLinkedDeque<String> queue = pools.computeIfAbsent(prompt, ignored -> new ConcurrentLinkedDeque<>());
+        Set<String> seen = remembered.computeIfAbsent(prompt, ignored -> ConcurrentHashMap.newKeySet());
+        synchronized (queue) {
+            if (!allowRepeat && !seen.add(answer)) {
+                return false;
+            }
+            queue.addLast(answer);
+            return true;
+        }
     }
 
     public int size(String prompt) {
@@ -52,17 +74,21 @@ public final class AiPool {
     public void replace(String prompt, List<String> answers) {
         Objects.requireNonNull(prompt, "prompt");
         ConcurrentLinkedDeque<String> queue = new ConcurrentLinkedDeque<>();
+        Set<String> seen = ConcurrentHashMap.newKeySet();
         if (answers != null) {
             for (String answer : answers) {
                 if (answer != null && !answer.isBlank()) {
+                    seen.add(answer);
                     queue.addLast(answer);
                 }
             }
         }
         if (queue.isEmpty()) {
             pools.remove(prompt);
+            remembered.remove(prompt);
         } else {
             pools.put(prompt, queue);
+            remembered.put(prompt, seen);
         }
     }
 }

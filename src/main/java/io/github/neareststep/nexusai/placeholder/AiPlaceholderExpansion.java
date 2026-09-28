@@ -26,11 +26,11 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private static final String CACHED_PREFIX = "cached_";
 
     private final NexusAI plugin;
-    private final PluginConfig config;
-    private final AiCache cache;
-    private final AiHttpClient httpClient;
-    private final AiPool pool;
-    private final PoolService poolService;
+    private PluginConfig config;
+    private AiCache cache;
+    private AiHttpClient httpClient;
+    private AiPool pool;
+    private PoolService poolService;
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -41,6 +41,18 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             PoolService poolService
     ) {
         this.plugin = plugin;
+        this.config = config;
+        this.cache = cache;
+        this.httpClient = httpClient;
+        this.pool = pool;
+        this.poolService = poolService;
+    }
+
+    /**
+     * Points an already registered expansion at the services created by {@code /nai reload}
+     * without asking PlaceholderAPI to register it again.
+     */
+    public void bind(PluginConfig config, AiCache cache, AiHttpClient httpClient, AiPool pool, PoolService poolService) {
         this.config = config;
         this.cache = cache;
         this.httpClient = httpClient;

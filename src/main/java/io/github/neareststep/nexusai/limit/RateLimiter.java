@@ -13,14 +13,29 @@ public final class RateLimiter {
 
     private final int requestsPerMinute;
     private final int requestsPerDay;
+    private final int playerRequestsPerMinute;
+    private final int playerRequestsPerDay;
     private final ConcurrentHashMap<UUID, WindowCounter> minuteWindows = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, WindowCounter> dayWindows = new ConcurrentHashMap<>();
     private final WindowCounter serverMinute;
     private final WindowCounter serverDay;
 
+    /**
+     * Server and per-player windows share the same limits.
+     */
     public RateLimiter(int requestsPerMinute, int requestsPerDay) {
+        this(requestsPerMinute, requestsPerDay, requestsPerMinute, requestsPerDay);
+    }
+
+    /**
+     * @param requestsPerMinute server-wide minute cap, used by console and background tasks
+     * @param playerRequestsPerMinute tighter cap applied only when a player id is present
+     */
+    public RateLimiter(int requestsPerMinute, int requestsPerDay, int playerRequestsPerMinute, int playerRequestsPerDay) {
         this.requestsPerMinute = Math.max(1, requestsPerMinute);
         this.requestsPerDay = Math.max(1, requestsPerDay);
+        this.playerRequestsPerMinute = Math.max(1, playerRequestsPerMinute);
+        this.playerRequestsPerDay = Math.max(1, playerRequestsPerDay);
         this.serverMinute = new WindowCounter(60_000L);
         this.serverDay = new WindowCounter(86_400_000L);
     }
@@ -33,21 +48,15 @@ public final class RateLimiter {
         UUID id = playerId == null ? SERVER_SENTINEL : playerId;
         long now = System.currentTimeMillis();
 
-        if (!serverMinute.tryAcquire(now, requestsPerMinute) || !serverDay.tryAcquire(now, requestsPerDay)) {
-            return false;
+        if (!SERVER_SENTINEL.equals(id)) {
+            WindowCounter minute = minuteWindows.computeIfAbsent(id, ignored -> new WindowCounter(60_000L));
+            WindowCounter day = dayWindows.computeIfAbsent(id, ignored -> new WindowCounter(86_400_000L));
+            if (!minute.tryAcquire(now, playerRequestsPerMinute) || !day.tryAcquire(now, playerRequestsPerDay)) {
+                return false;
+            }
         }
 
-        if (SERVER_SENTINEL.equals(id)) {
-            return true;
-        }
-
-        WindowCounter minute = minuteWindows.computeIfAbsent(id, ignored -> new WindowCounter(60_000L));
-        WindowCounter day = dayWindows.computeIfAbsent(id, ignored -> new WindowCounter(86_400_000L));
-        if (!minute.tryAcquire(now, requestsPerMinute) || !day.tryAcquire(now, requestsPerDay)) {
-            // Best-effort: server counters already incremented; acceptable for soft limits.
-            return false;
-        }
-        return true;
+        return serverMinute.tryAcquire(now, requestsPerMinute) && serverDay.tryAcquire(now, requestsPerDay);
     }
 
     private static final class WindowCounter {

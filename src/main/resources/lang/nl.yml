@@ -4,6 +4,7 @@ prefix: "&8[&bNexusAI&8]&r "
 command:
   no-permission: "{prefix}&cGeen toestemming."
   unknown: "{prefix}&cOnbekende subopdracht. Gebruik &e/nai help&c."
+  extra-args: "{prefix}&cOnverwachte extra argumenten. Gebruik &e/nai help&c."
   help-header: "{prefix}&eNexusAI-opdrachten:"
   help-help: "&7/nai help &8- &fDeze hulp tonen"
   help-version: "&7/nai version &8- &fPluginversie tonen"
@@ -29,8 +30,8 @@ command:
   status-provider-pause: "&7Providerpauze: &f{provider_pause}"
 
 common:
-  yes: "ja"
-  no: "nee"
+  "yes": "ja"
+  "no": "nee"
   enabled: "ingeschakeld"
   disabled: "uitgeschakeld"
   none: "geen"

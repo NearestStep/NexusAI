@@ -20,9 +20,13 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import org.bukkit.configuration.file.YamlConfiguration;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
@@ -51,21 +55,23 @@ public final class NexusAI extends JavaPlugin {
     private PrewarmService prewarmService;
     private ExecutorService httpExecutor;
     private ScheduledExecutorService scheduler;
+    private HttpClient sharedHttpClient;
     private AiPlaceholderExpansion placeholderExpansion;
+    private boolean loggedMissingKey;
+    private boolean loggedMissingPapi;
 
     @Override
     public void onEnable() {
-        mergeMissingConfig();
-        this.pluginConfig = new PluginConfig(getConfig());
+        if (!mergeMissingConfig()) {
+            getLogger().warning("config.yml has a syntax error. The file was left unchanged, "
+                    + "and AI requests stay off until a valid /nai reload.");
+            this.pluginConfig = heldDefaults();
+        } else {
+            this.pluginConfig = new PluginConfig(getConfig());
+        }
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
-
-        if (!pluginConfig.canSendRequests()) {
-            getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
-                    + "Plugin will load, but AI requests will not be sent.");
-        } else if (!pluginConfig.hasApiKey()) {
-            getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
-        }
+        logCredentialState();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -84,6 +90,7 @@ public final class NexusAI extends JavaPlugin {
     public void onDisable() {
         unregisterPlaceholderExpansion();
         stopRuntimeServices(true);
+        closeSharedHttpClient();
         shutdownExecutor(scheduler);
         shutdownExecutor(httpExecutor);
         getLogger().info("NexusAI disabled.");
@@ -93,21 +100,29 @@ public final class NexusAI extends JavaPlugin {
      * Reloads config.yml + locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
      */
     public void reloadPlugin() {
-        mergeMissingConfig();
+        if (!mergeMissingConfig()) {
+            throw new IllegalStateException(
+                    "config.yml has a syntax error. The file and the loaded configuration were left unchanged.");
+        }
         reloadConfig();
         pluginConfig.reload(getConfig());
         messageService.reload(pluginConfig.getLocale());
 
         stopRuntimeServices(true);
         startRuntimeServices();
-        registerPlaceholderExpansion();
+        refreshPlaceholder();
+        logCredentialState();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale() + ").");
     }
 
     private void startRuntimeServices() {
         this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize());
-        this.rateLimiter = new RateLimiter(pluginConfig.getRequestsPerMinute(), pluginConfig.getRequestsPerDay());
+        this.rateLimiter = new RateLimiter(
+                pluginConfig.getRequestsPerMinute(),
+                pluginConfig.getRequestsPerDay(),
+                pluginConfig.getPlayerRequestsPerMinute(),
+                pluginConfig.getPlayerRequestsPerDay());
 
         AiProvider provider = createProvider(pluginConfig);
         RequestGate gate = RequestGate.fromConfig(rateLimiter, pluginConfig);
@@ -122,7 +137,9 @@ public final class NexusAI extends JavaPlugin {
                 getLogger(),
                 pluginConfig.isPoolPersist()
         );
-        this.poolService = new PoolService(pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore);
+        this.poolService = new PoolService(
+                pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
+                (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS));
         this.prewarmService = new PrewarmService(
                 pluginConfig, aiCache, aiHttpClient, scheduler, getLogger());
 
@@ -132,7 +149,6 @@ public final class NexusAI extends JavaPlugin {
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
-        unregisterPlaceholderExpansion();
         if (prewarmService != null) {
             prewarmService.shutdown();
             prewarmService = null;
@@ -146,19 +162,30 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    private void refreshPlaceholder() {
+        if (placeholderExpansion != null) {
+            placeholderExpansion.bind(pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
+            return;
+        }
+        registerPlaceholderExpansion();
+    }
+
     private void registerPlaceholderExpansion() {
-        unregisterPlaceholderExpansion();
-        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
-            this.placeholderExpansion = new AiPlaceholderExpansion(
-                    this, pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
-            if (placeholderExpansion.register()) {
-                getLogger().info("Registered PlaceholderAPI expansion "
-                        + "%ainexus_generate_<prompt>% / %ainexus_cached_<prompt>%");
-            } else {
-                getLogger().warning("Failed to register PlaceholderAPI expansion.");
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") == null) {
+            if (!loggedMissingPapi) {
+                getLogger().warning("PlaceholderAPI not found. Placeholders will be unavailable.");
+                loggedMissingPapi = true;
             }
+            return;
+        }
+        loggedMissingPapi = false;
+        this.placeholderExpansion = new AiPlaceholderExpansion(
+                this, pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
+        if (placeholderExpansion.register()) {
+            getLogger().info("Registered PlaceholderAPI expansion "
+                    + "%ainexus_generate_<prompt>% / %ainexus_cached_<prompt>%");
         } else {
-            getLogger().warning("PlaceholderAPI not found. Placeholders will be unavailable.");
+            getLogger().warning("Failed to register PlaceholderAPI expansion.");
         }
     }
 
@@ -180,24 +207,64 @@ public final class NexusAI extends JavaPlugin {
         command.setTabCompleter(executor);
     }
 
-    private void mergeMissingConfig() {
+    /**
+     * @return {@code false} when {@code config.yml} is not valid YAML and was left untouched
+     */
+    private boolean mergeMissingConfig() {
         saveDefaultConfig();
         File file = new File(getDataFolder(), "config.yml");
         try (InputStream in = getResource("config.yml")) {
             if (in == null || !file.isFile()) {
-                return;
+                return true;
             }
             String defaults = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             String existing = Files.readString(file.toPath(), StandardCharsets.UTF_8);
             ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+            if (!result.valid()) {
+                return false;
+            }
             if (result.addedKeys().isEmpty()) {
-                return;
+                return true;
             }
             Files.writeString(file.toPath(), result.yaml(), StandardCharsets.UTF_8);
             getLogger().info("Added missing config keys: " + String.join(", ", result.addedKeys()));
             reloadConfig();
+            return true;
         } catch (IOException e) {
             getLogger().log(Level.WARNING, "Failed to merge missing config keys", e);
+            return true;
+        }
+    }
+
+    private PluginConfig heldDefaults() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        try (InputStream in = getResource("config.yml")) {
+            if (in != null) {
+                yaml.load(new InputStreamReader(in, StandardCharsets.UTF_8));
+            }
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING, "Failed to read the default config from the jar", e);
+        }
+        PluginConfig config = new PluginConfig(yaml);
+        config.holdRequests();
+        return config;
+    }
+
+    private void logCredentialState() {
+        if (pluginConfig.requestsHeld()) {
+            return;
+        }
+        if (!pluginConfig.canSendRequests()) {
+            if (!loggedMissingKey) {
+                getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
+                        + "Plugin will load, but AI requests will not be sent.");
+                loggedMissingKey = true;
+            }
+            return;
+        }
+        loggedMissingKey = false;
+        if (!pluginConfig.hasApiKey()) {
+            getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
         }
     }
 
@@ -206,7 +273,34 @@ public final class NexusAI extends JavaPlugin {
         if (!KNOWN_PROVIDERS.contains(provider)) {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
-        return new OpenAiProvider(config, httpExecutor, getLogger());
+        return new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+    }
+
+    private HttpClient sharedClient(PluginConfig config) {
+        Duration timeout = config.getConnectTimeout();
+        if (sharedHttpClient != null && timeout.equals(sharedHttpClient.connectTimeout().orElse(null))) {
+            return sharedHttpClient;
+        }
+        HttpClient previous = sharedHttpClient;
+        sharedHttpClient = HttpClient.newBuilder().connectTimeout(timeout).build();
+        closeHttpClient(previous);
+        return sharedHttpClient;
+    }
+
+    private void closeSharedHttpClient() {
+        closeHttpClient(sharedHttpClient);
+        sharedHttpClient = null;
+    }
+
+    private static void closeHttpClient(HttpClient client) {
+        if (client == null) {
+            return;
+        }
+        try {
+            client.shutdownNow();
+        } catch (RuntimeException ignored) {
+            // A closed client must not fail reload or shutdown.
+        }
     }
 
     private static ExecutorService createHttpExecutor() {

@@ -46,6 +46,9 @@ public final class PluginConfig {
     private long cacheMaxSize;
     private int requestsPerMinute;
     private int requestsPerDay;
+    private int playerRequestsPerMinute;
+    private int playerRequestsPerDay;
+    private boolean requestsHeld;
     private int providerPauseSeconds;
     private int authPauseSeconds;
     private int errorBackoffInitialSeconds;
@@ -86,8 +89,11 @@ public final class PluginConfig {
         this.readTimeout = Duration.ofSeconds(Math.max(1, config.getInt("api.read-timeout", 30)));
         this.cacheTtl = Duration.ofSeconds(Math.max(1, config.getInt("cache.ttl", 300)));
         this.cacheMaxSize = Math.max(1L, config.getLong("cache.max-size", 1000L));
+        this.requestsHeld = false;
         this.requestsPerMinute = Math.max(1, config.getInt("limits.requests-per-minute", 30));
         this.requestsPerDay = Math.max(1, config.getInt("limits.requests-per-day", 1000));
+        this.playerRequestsPerMinute = Math.max(1, config.getInt("limits.player-requests-per-minute", 10));
+        this.playerRequestsPerDay = Math.max(1, config.getInt("limits.player-requests-per-day", 200));
         this.providerPauseSeconds = clamp(config.getInt("limits.provider-pause-seconds", 60), 1, 86_400);
         this.authPauseSeconds = clamp(config.getInt("limits.auth-pause-seconds", 300), 1, 86_400);
         this.errorBackoffInitialSeconds = clamp(config.getInt("limits.error-backoff-initial-seconds", 2), 0, 86_400);
@@ -260,7 +266,7 @@ public final class PluginConfig {
         if (requested == null || requested.isBlank()) {
             return "en";
         }
-        return requested.trim().replace('-', '_');
+        return io.github.neareststep.nexusai.i18n.MessageService.normalizeLocale(requested);
     }
 
     private static String trimTrailingSlash(String url) {
@@ -327,7 +333,18 @@ public final class PluginConfig {
      * (Ollama preset, or a localhost / port 11434 base URL).
      */
     public boolean canSendRequests() {
-        return hasApiKey() || allowsKeylessRequests();
+        return !requestsHeld && (hasApiKey() || allowsKeylessRequests());
+    }
+
+    /**
+     * A syntax error in {@code config.yml} must not fall through to the jar defaults and a live API key.
+     */
+    public void holdRequests() {
+        this.requestsHeld = true;
+    }
+
+    public boolean requestsHeld() {
+        return requestsHeld;
     }
 
     public boolean allowsKeylessRequests() {
@@ -343,6 +360,9 @@ public final class PluginConfig {
             String host = uri.getHost();
             if (host != null) {
                 String normalized = host.toLowerCase(Locale.ROOT);
+                if (normalized.startsWith("[") && normalized.endsWith("]") && normalized.length() > 2) {
+                    normalized = normalized.substring(1, normalized.length() - 1);
+                }
                 if (normalized.equals("localhost")
                         || normalized.equals("127.0.0.1")
                         || normalized.equals("0.0.0.0")
@@ -379,6 +399,14 @@ public final class PluginConfig {
 
     public int getRequestsPerDay() {
         return requestsPerDay;
+    }
+
+    public int getPlayerRequestsPerMinute() {
+        return playerRequestsPerMinute;
+    }
+
+    public int getPlayerRequestsPerDay() {
+        return playerRequestsPerDay;
     }
 
     public int getProviderPauseSeconds() {

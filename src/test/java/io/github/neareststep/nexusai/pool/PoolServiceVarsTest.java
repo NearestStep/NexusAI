@@ -13,9 +13,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -79,6 +81,59 @@ class PoolServiceVarsTest {
                 "Short welcome", Map.of("player_name", "%player_name%"));
         assertTrue(expected.equals(seenPrompt.get()), "HTTP prompt should include vars rules");
         assertTrue(pool.poll("Short welcome").orElseThrow().contains("{player_name}"));
+        service.shutdown();
+    }
+
+    @Test
+    void repeatedVarTemplateFillsEverySlot() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("Hello {player_name}, tip {tip}!");
+        };
+
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("api.provider", "openai");
+        yaml.set("api.model", "gpt-4o-mini");
+        yaml.set("api.base-url", "https://api.openai.com/v1");
+        yaml.set("api.key", "test-key");
+        yaml.set("api.connect-timeout", 5);
+        yaml.set("api.read-timeout", 30);
+        yaml.set("cache.ttl", 300);
+        yaml.set("cache.max-size", 1000);
+        yaml.set("limits.requests-per-minute", 30);
+        yaml.set("limits.requests-per-day", 1000);
+        yaml.set("limits.max-prompt-length", 200);
+        yaml.set("fallback", "FB");
+        yaml.set("pool.enabled", true);
+        yaml.set("pool.max-total-prompts", 10);
+        yaml.set("pool.entries", List.of(
+                Map.of(
+                        "prompt", "Short warm welcome for the joining player",
+                        "size", 3,
+                        "min-threshold", 1,
+                        "vars", Map.of("player_name", "%player_name%", "tip", "green")
+                )
+        ));
+        yaml.set("prewarm.enabled", false);
+        yaml.set("prewarm.prompts", List.of());
+
+        PluginConfig config = new PluginConfig(yaml);
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        AiPool pool = new AiPool();
+        AiHttpClient client = new AiHttpClient(cache, provider, config, Logger.getLogger("test"));
+        PoolService service = new PoolService(config, pool, client, Logger.getLogger("test"));
+        service.start();
+
+        long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (System.nanoTime() < deadline && pool.size("Short warm welcome for the joining player") < 3) {
+            Thread.sleep(20);
+        }
+
+        assertEquals(3, pool.size("Short warm welcome for the joining player"));
+        assertEquals(3, calls.get());
+        assertEquals("Hello {player_name}, tip {tip}!", pool.poll("Short warm welcome for the joining player").orElseThrow());
+        assertEquals("Hello {player_name}, tip {tip}!", pool.poll("Short warm welcome for the joining player").orElseThrow());
         service.shutdown();
     }
 }

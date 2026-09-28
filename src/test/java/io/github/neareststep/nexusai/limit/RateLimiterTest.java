@@ -33,6 +33,21 @@ class RateLimiterTest {
     }
 
     @Test
+    void playerCapIsSeparateFromTheServerCap() {
+        RateLimiter limiter = new RateLimiter(10, 1000, 2, 1000);
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+
+        assertTrue(limiter.tryAcquire(first));
+        assertTrue(limiter.tryAcquire(first));
+        assertFalse(limiter.tryAcquire(first));
+        assertTrue(limiter.tryAcquire(second));
+        assertTrue(limiter.tryAcquire(second));
+        assertFalse(limiter.tryAcquire(second));
+        assertTrue(limiter.tryAcquire(null));
+    }
+
+    @Test
     void nullPlayerUsesServerSentinel() {
         RateLimiter limiter = new RateLimiter(1, 1000);
         assertTrue(limiter.tryAcquire(null));

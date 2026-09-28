@@ -37,6 +37,7 @@ public final class ChatCompletionResponse {
     public static final class Message {
         private String role;
         private String content;
+        private String reasoning;
 
         public String getRole() {
             return role;
@@ -54,6 +55,42 @@ public final class ChatCompletionResponse {
         @JsonProperty("content")
         public void setContent(JsonNode node) {
             this.content = ContentTexts.read(node);
+        }
+
+        @JsonProperty("reasoning_content")
+        public void setReasoningContent(JsonNode node) {
+            rememberReasoning(node);
+        }
+
+        @JsonProperty("reasoning")
+        public void setReasoning(JsonNode node) {
+            rememberReasoning(node);
+        }
+
+        @JsonProperty("reasoning_text")
+        public void setReasoningText(JsonNode node) {
+            rememberReasoning(node);
+        }
+
+        @JsonIgnore
+        public String visibleText() {
+            if (content != null && !content.isBlank()) {
+                return content;
+            }
+            if (reasoning != null && !reasoning.isBlank()) {
+                return reasoning;
+            }
+            return content;
+        }
+
+        private void rememberReasoning(JsonNode node) {
+            if (reasoning != null && !reasoning.isBlank()) {
+                return;
+            }
+            String text = ContentTexts.read(node);
+            if (text != null && !text.isBlank()) {
+                this.reasoning = text;
+            }
         }
     }
 }
