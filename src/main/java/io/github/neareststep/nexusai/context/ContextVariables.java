@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.context;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import org.bukkit.Bukkit;
 import org.bukkit.block.Biome;
 import org.bukkit.entity.Player;
@@ -65,7 +66,7 @@ public final class ContextVariables {
             if (value == null) {
                 continue;
             }
-            result = result.replace('{' + name + '}', value);
+            result = result.replace('{' + name + '}', PlayerInput.wrap(value));
         }
         return result;
     }
