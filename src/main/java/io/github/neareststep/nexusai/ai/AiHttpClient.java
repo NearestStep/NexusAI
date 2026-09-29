@@ -73,7 +73,7 @@ public final class AiHttpClient {
     ) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        String key = cacheKey(effective.model(config.getModel()), prompt);
+        String key = cacheKey(effective.model(config.getModel()), prompt, effective.formatOr(config.defaultFormatId()));
         Optional<String> cached = cache.get(key);
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
@@ -268,7 +268,7 @@ public final class AiHttpClient {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
-                    diagnostics.report(kind, AiErrors.detail(failure));
+                    diagnostics.report(kind, AiErrors.detail(failure), gate.isPaused());
                 }
                 logger.log(Level.FINE, "AI request failed", failure);
                 created.completeExceptionally(AiErrors.unwrap(failure));
@@ -292,7 +292,12 @@ public final class AiHttpClient {
     }
 
     public String cacheKey(String model, String prompt) {
+        return cacheKey(model, prompt, config.defaultFormatId());
+    }
+
+    public String cacheKey(String model, String prompt, String format) {
         String effectiveModel = model == null || model.isBlank() ? config.getModel() : model;
-        return effectiveModel + '\u0000' + prompt;
+        String effectiveFormat = config.normalizeFormat(format);
+        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + prompt;
     }
 }

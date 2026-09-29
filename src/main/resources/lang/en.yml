@@ -33,6 +33,8 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Last error: &f{last_error}"
   status-provider-pause: "&7Provider pause: &f{provider_pause}"
+  status-queue-header: "&7Model queue:"
+  status-queue-line: "&7- &f{entry}"
 
 common:
   "yes": "yes"
