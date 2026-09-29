@@ -104,11 +104,13 @@ Daily counters for each provider and each queue entry are stored in `plugins/Nex
 
 ### Formats
 
-`format:` on a prompt (or `formats.default`, which is `simple`) appends that preset's `instruction` at the end of the system prompt. After the answer arrives, NexusAI strips markdown when the preset says so, wraps hologram lines, and cuts line count, characters, words, and sentences on a word boundary. Limits and instruction text are editable under `formats:` in `config.yml`. `simple` has no limits, so existing prompts stay unchanged. The format id is part of the cache key. It is part of the pool key for every format except `simple`, so a 0.6.0 `pool.yml` still matches.
+`format:` on a prompt (or `formats.default`, which is `simple`) appends that preset's `instruction` after the admin system prompt. A hardcoded player-input guard is then appended after the instruction. That guard is not a config key and is not removed when `system-prompt` or the format instruction is empty. After the answer arrives, NexusAI strips markdown when the preset says so, wraps hologram lines, and cuts line count, characters, words, and sentences on a word boundary. Limits and instruction text are editable under `formats:` in `config.yml`. `simple` has no limits, so existing prompts stay unchanged. The format id and the guard version `player-input-guard-v1` are part of the cache key. The format id is part of the pool key for every format except `simple`, so a 0.6.0 `pool.yml` still matches prompts that contain no player span.
 
 ### Built-in prompt tokens
 
 `{player}`, `{world}`, `{biome}`, `{time}`, and `{weather}` are filled without PlaceholderAPI. `{time}` looks like `day 14:00` or `night 00:00`. `{weather}` is `clear`, `rain`, or `thunder`. They are read on the player's region thread (Folia entity scheduler for `/nai test` when the command is not already there). A `vars:` entry of the same name wins. PlaceholderAPI is still used for `%placeholders%` inside `vars:`.
+
+Every value that comes from `vars:`, PlaceholderAPI, or those built-ins is sanitized before it is sent: legacy `§` and `&` color codes are removed, then every remaining `§` is removed, then the value is wrapped as `§§§ PLAYER INPUT §§§` … `§§§ END §§§`. Because the section sign is gone from the value first, a player cannot type the closing marker. The admin template stays outside the markers. The system message is only the admin system prompt, the format instruction, and the guard, in that order. The prompt, including wrapped player values, is the user message and is not copied into the system message. The same chat-completions body is used for `openai-compatible` and `gemini`. The cache key includes `player-input-guard-v1`, so an answer cached before that guard is not reused. The pool key is the resolved prompt: wrapped player values change the key, and a prompt with no player span keeps the historical key.
 
 ### Migration
 
@@ -118,7 +120,7 @@ On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usag
 
 Optional request fields, all omitted when left at the defaults (`system-prompt` empty, `temperature` negative, `max-tokens` 0):
 
-- `api.system-prompt` — sent as a system message before the user prompt
+- `api.system-prompt` — sent as the system message before the user prompt. The format instruction and the player-input guard are appended after it. The guard is still sent when this field is empty
 - `api.temperature` and `api.max-tokens` — copied onto the JSON body
 - each `pool.entries[]` item may override those three for pool refills only
 - `api.strip-markdown`, `api.max-answer-chars`, `api.max-answer-lines` — applied to every answer (`0` means no limit)

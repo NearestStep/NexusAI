@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -69,12 +70,11 @@ class PromptCatalogTest {
         NamedPrompt welcome = catalog.find("welcome").orElseThrow();
         assertEquals("Write a one-line welcome for {biome}.\nDo not use markdown.", welcome.template());
         assertTrue(welcome.playerDependent());
+        String rendered = welcome.render(template -> "plains");
         assertEquals(
-                "Write a one-line welcome for plains.\nDo not use markdown.",
-                welcome.render(template -> "plains"));
-        assertEquals(
-                "Write a one-line welcome for plains.\nDo not use markdown.",
-                welcome.matchesResolved("Write a one-line welcome for plains.\nDo not use markdown.") ? welcome.render(template -> "plains") : "");
+                "Write a one-line welcome for " + PlayerInput.wrap("plains") + ".\nDo not use markdown.",
+                rendered);
+        assertTrue(welcome.matchesResolved(rendered));
         assertTrue(welcome.matchesResolved("Write a one-line welcome for desert.\nDo not use markdown."));
         assertFalse(welcome.matchesResolved("Something else"));
     }
@@ -89,7 +89,7 @@ class PromptCatalogTest {
                 """).catalog().find("motd").orElseThrow();
 
         assertFalse(prompt.playerDependent());
-        assertEquals("Welcome to Nexus", prompt.render(template -> {
+        assertEquals("Welcome to " + PlayerInput.wrap("Nexus"), prompt.render(template -> {
             throw new AssertionError(template);
         }));
     }
@@ -207,8 +207,8 @@ class PromptCatalogTest {
         });
         ResolvedPrompt desert = catalog.resolve("biome_tip", config, template -> "desert");
         assertTrue(plains.named());
-        assertEquals("Tip for plains", plains.text());
-        assertEquals("Tip for desert", desert.text());
+        assertEquals("Tip for " + PlayerInput.wrap("plains"), plains.text());
+        assertEquals("Tip for " + PlayerInput.wrap("desert"), desert.text());
         assertNotEquals(client.cacheKey(plains.text()), client.cacheKey(desert.text()));
         ResolvedPrompt plainsAgain = catalog.resolve("biome_tip", config, template -> "plains");
         assertEquals(client.cacheKey(plains.model(), plains.text()), client.cacheKey(plainsAgain.model(), plainsAgain.text()));
@@ -257,7 +257,7 @@ class PromptCatalogTest {
                     name: "{biome}"
                     biome: "plains"
                 """).catalog().find("nested").orElseThrow();
-        assertEquals("{biome} in plains", prompt.render(template -> template));
+        assertEquals(PlayerInput.wrap("{biome}") + " in " + PlayerInput.wrap("plains"), prompt.render(template -> template));
     }
 
     @Test

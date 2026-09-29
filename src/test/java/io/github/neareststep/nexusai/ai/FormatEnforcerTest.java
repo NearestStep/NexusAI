@@ -57,9 +57,12 @@ class FormatEnforcerTest {
         PluginConfig config = new PluginConfig(yaml);
         var body = OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none().withFormat("hologram"));
         String system = body.getMessages().getFirst().getContent();
+        String instruction = FormatPresets.builtin("hologram").instruction();
         assertTrue(system.startsWith("Be brief"));
-        assertTrue(system.endsWith(FormatPresets.builtin("hologram").instruction()));
-        assertTrue(system.indexOf("Be brief") < system.lastIndexOf("40"));
+        assertTrue(system.contains(instruction));
+        assertTrue(system.endsWith(PlayerInput.GUARD));
+        assertTrue(system.indexOf("Be brief") < system.indexOf(instruction));
+        assertTrue(system.indexOf(instruction) < system.lastIndexOf(PlayerInput.GUARD));
     }
 
     @Test
