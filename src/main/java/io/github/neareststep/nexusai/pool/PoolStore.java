@@ -37,6 +37,8 @@ public final class PoolStore {
     private ScheduledFuture<?> pending;
     /** Set when pool.yml cannot be parsed, so a later save does not destroy the original bytes. */
     private volatile boolean refuseOverwrite;
+    /** The invalid-file warning is logged once until a later read succeeds. */
+    private volatile boolean invalidNoted;
 
     public PoolStore(File file, ScheduledExecutorService scheduler, Duration delay, Logger logger, boolean enabled) {
         this.file = file;
@@ -66,17 +68,11 @@ public final class PoolStore {
         if (!enabled || file == null || !file.isFile()) {
             return;
         }
+        YamlConfiguration yaml = readYaml();
+        if (yaml == null) {
+            return;
+        }
         try {
-            String raw = Files.readString(file.toPath());
-            YamlConfiguration yaml = new YamlConfiguration();
-            try {
-                yaml.loadFromString(raw);
-            } catch (InvalidConfigurationException e) {
-                refuseOverwrite = true;
-                logger.log(Level.WARNING, "pool.yml is not valid YAML. It was left unchanged and will not be overwritten.", e);
-                return;
-            }
-            refuseOverwrite = false;
             List<Map<?, ?>> rows = yaml.getMapList("pools");
             for (Map<?, ?> row : rows) {
                 Object promptValue = row.get("prompt");
@@ -100,10 +96,8 @@ public final class PoolStore {
                 }
                 pool.replace(memory, answers);
             }
-        } catch (IOException | RuntimeException e) {
-            refuseOverwrite = true;
-            logger.log(Level.WARNING, "Failed to load answer pool from " + file.getName()
-                    + ". The file will not be overwritten.", e);
+        } catch (RuntimeException e) {
+            noteUnreadable(e);
         }
     }
 
@@ -137,8 +131,11 @@ public final class PoolStore {
         if (!enabled || file == null || !file.isFile()) {
             return List.of();
         }
+        YamlConfiguration yaml = readYaml();
+        if (yaml == null) {
+            return List.of();
+        }
         try {
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
             List<Map<?, ?>> rows = yaml.getMapList("pools");
             List<String> prompts = new ArrayList<>();
             for (Map<?, ?> row : rows) {
@@ -149,9 +146,49 @@ public final class PoolStore {
             }
             return prompts;
         } catch (RuntimeException e) {
-            logger.log(Level.WARNING, "Failed to read answer pool from " + file.getName(), e);
+            noteUnreadable(e);
             return List.of();
         }
+    }
+
+    /**
+     * Parses {@code pool.yml} without {@link YamlConfiguration#loadConfiguration(File)}, which logs a
+     * severe stack trace on invalid YAML. A parse failure is one warning and leaves the file alone.
+     */
+    private YamlConfiguration readYaml() {
+        if (!enabled || file == null || !file.isFile()) {
+            return null;
+        }
+        try {
+            String raw = Files.readString(file.toPath());
+            YamlConfiguration yaml = new YamlConfiguration();
+            try {
+                yaml.loadFromString(raw);
+            } catch (InvalidConfigurationException e) {
+                noteUnreadable(e);
+                return null;
+            }
+            refuseOverwrite = false;
+            invalidNoted = false;
+            return yaml;
+        } catch (IOException | RuntimeException e) {
+            noteUnreadable(e);
+            return null;
+        }
+    }
+
+    private void noteUnreadable(Exception error) {
+        refuseOverwrite = true;
+        logger.log(Level.FINE, "Answer pool file could not be parsed: " + file.getAbsolutePath(), error);
+        if (invalidNoted) {
+            return;
+        }
+        invalidNoted = true;
+        String detail = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        detail = detail.replace('\r', ' ').replace('\n', ' ').replaceAll(" +", " ").strip();
+        logger.warning("pool.yml at " + file.getAbsolutePath()
+                + " could not be parsed (" + detail
+                + "). The file was left untouched and the answer pool is empty until the file is fixed and reloaded.");
     }
 
     public void saveNow(AiPool pool, Map<String, Integer> limits) {
@@ -160,7 +197,6 @@ public final class PoolStore {
         }
         synchronized (ioLock) {
             if (refuseOverwrite) {
-                logger.warning("Refusing to overwrite invalid pool.yml. Fix or replace the file, then reload.");
                 return;
             }
             try {
