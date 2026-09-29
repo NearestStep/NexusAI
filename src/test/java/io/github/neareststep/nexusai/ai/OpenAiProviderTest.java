@@ -41,6 +41,14 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void modelOverrideReplacesTheGlobalModel() {
+        PluginConfig config = config("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
+        GenerationOverrides overrides = GenerationOverrides.of(false, null, false, null, false, null, true, "custom-model");
+        JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", overrides));
+        assertEquals("custom-model", json.get("model").asText());
+    }
+
+    @Test
     void globalAndPoolOverridesShapeTheBody() throws Exception {
         PluginConfig config = config("gpt-4o-mini", "Be brief.", 0.7, 256, "low", false, 0, 0, "low");
         GenerationOverrides overrides = GenerationOverrides.of(true, "Pool system", true, 0.0, true, 32);

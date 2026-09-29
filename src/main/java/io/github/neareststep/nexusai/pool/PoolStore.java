@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Function;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -50,6 +51,13 @@ public final class PoolStore {
     }
 
     public void load(AiPool pool, Map<String, Integer> limits) {
+        load(pool, limits, ignored -> null);
+    }
+
+    /**
+     * @param dynamicLimits size for a saved prompt that is not in {@code limits}, or {@code null} to skip it
+     */
+    public void load(AiPool pool, Map<String, Integer> limits, Function<String, Integer> dynamicLimits) {
         Objects.requireNonNull(pool, "pool");
         if (!enabled || file == null || !file.isFile()) {
             return;
@@ -64,6 +72,9 @@ public final class PoolStore {
                 }
                 String prompt = String.valueOf(promptValue);
                 Integer limit = limits.get(prompt);
+                if (limit == null && dynamicLimits != null) {
+                    limit = dynamicLimits.apply(prompt);
+                }
                 if (limit == null) {
                     continue;
                 }
@@ -102,6 +113,27 @@ public final class PoolStore {
             }
         }
         saveNow(pool, limits);
+    }
+
+    public List<String> savedPrompts() {
+        if (!enabled || file == null || !file.isFile()) {
+            return List.of();
+        }
+        try {
+            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+            List<Map<?, ?>> rows = yaml.getMapList("pools");
+            List<String> prompts = new ArrayList<>();
+            for (Map<?, ?> row : rows) {
+                Object promptValue = row.get("prompt");
+                if (promptValue != null) {
+                    prompts.add(String.valueOf(promptValue));
+                }
+            }
+            return prompts;
+        } catch (RuntimeException e) {
+            logger.log(Level.WARNING, "Failed to read answer pool from " + file.getName(), e);
+            return List.of();
+        }
     }
 
     public void saveNow(AiPool pool, Map<String, Integer> limits) {

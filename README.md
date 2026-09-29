@@ -6,14 +6,14 @@ Other plugins (menus, chat, holograms) can request AI text through placeholders 
 
 ## Requirements
 
-- Paper **26.2** (Java **25**)
+- Paper, Purpur, or Folia **26.2+** (Java **25**). The plugin's `api-version` is `26.2`; there is no 26.1 build. Folia loads it because `folia-supported` is set.
 - [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6+ (soft-depend)
 - API key for an OpenAI-compatible provider, unless you use a local endpoint such as Ollama
 
 ## Installation
 
 1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-0.5.1-SNAPSHOT.jar` into `plugins/`
+2. Copy `build/libs/NexusAI-0.6.0-SNAPSHOT.jar` into `plugins/`
 3. Install PlaceholderAPI
 4. Set the API key (prefer environment):
 
@@ -83,13 +83,60 @@ Answers whose `content` is an array of parts are joined into one string.
 |---------|------------|-------------|
 | `/nai help` | `nexusai.command` | Show command help |
 | `/nai version` | `nexusai.command` | Show plugin version |
-| `/nai reload` | `nexusai.reload` | Reload config + locale; rebuild cache/pool/prewarm |
-| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, PlaceholderAPI, last error, provider pause |
-| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. This command does not apply `limits.max-prompt-length` and does not clear, start, or extend a provider pause |
+| `/nai reload` | `nexusai.reload` | Reload config, `prompts.yml`, and locale; rebuild cache/pool/prewarm |
+| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, named prompts, PlaceholderAPI, last error, provider pause |
+| `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
+| `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text and does not clear, start, or extend a provider pause |
 
 Alias: `/nexusai`. Defaults: OP. `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`.
 
 ## Placeholders
+
+### Named prompts
+
+Long prompt text does not belong inside a placeholder name. Put it in `plugins/NexusAI/prompts.yml` and use the id:
+
+```
+%ainexus_cached_survival_tips%
+%ainexus_generate_survival_tips%
+```
+
+```yaml
+survival_tips:
+  prompt: |
+    Give one short Minecraft survival tip.
+    One sentence, no markdown.
+  ttl: 600
+  fallback: "..."
+
+welcome:
+  prompt:
+    - "Write a one-line welcome for a player in the {biome} biome."
+    - "Do not use markdown."
+  vars:
+    biome: "%player_biome%"
+```
+
+`prompt` may be a string, a block scalar (`|`), or a list of lines. A list is joined with newlines. `{biome}` is replaced before the request. `%player_biome%` is resolved for the player who is looking. The cache and the pool use that finished text, so a player in a plains biome never sees a desert player's answer. `welcome` is not prewarmed and is not filled on startup, because the value depends on the player. `survival_tips` has no player-specific vars, so every viewer shares one cache entry.
+
+If the id is missing from `prompts.yml`, the placeholder text is sent as a literal prompt, same as before.
+
+`pool.entries[].prompt` and `prewarm.prompts` accept the same id:
+
+```yaml
+pool:
+  entries:
+    - prompt: survival_tips
+      size: 3
+      min-threshold: 1
+prewarm:
+  prompts:
+    - survival_tips
+```
+
+Optional keys on a prompt: `ttl` (cache seconds), `fallback`, `max-prompt-length`, `model`, `system-prompt`, `temperature`, `max-tokens`. Anything omitted uses `config.yml`. `limits.max-prompt-length` still limits literal placeholder text. It does not limit a body stored in `prompts.yml` unless that prompt sets `max-prompt-length`.
+
+`/nai reload` reads `prompts.yml` again. `/nai prompts` prints the ids. The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded.
 
 ### Unique answers (pool)
 
@@ -121,7 +168,7 @@ How `vars` work:
 2. Answers are stored with those tokens still in place. The same template can fill `size` (the welcome example with `size: 3` can serve three players). On refill, text that no longer contains a configured token is stored only once. Copies already saved in `pool.yml`, including duplicate finished lines from 0.5.0-SNAPSHOT, are loaded as they are and handed out once each.
 3. On `%ainexus_generate_<same prompt>%`, tokens are replaced via PlaceholderAPI for the viewing player → e.g. `Hello, Steve!`.
 
-The placeholder prompt string must match `entries[].prompt` exactly for `vars` to apply.
+The placeholder prompt string must match `entries[].prompt` exactly for `vars` to apply. When that string is a prompt id, answers are stored under the resolved prompt text, not under the id.
 
 CustomWelcome-style join message (prompt text must match the entry):
 
@@ -160,6 +207,8 @@ On startup and `/nai reload`, NexusAI inserts keys that exist in the default `co
 
 If `config.yml` is not valid YAML, startup and `/nai reload` leave the file byte for byte as it is. Reload reports the failure and keeps the configuration already in memory. It does not append default keys and it does not print `Configuration reloaded`. A broken file on startup does not enable requests, so an `NEXUSAI_API_KEY` in the environment is not sent to the default OpenAI URL. A reload onto a remote provider with no key logs the missing-key warning once; reloading that same state again does not repeat it. A local endpoint such as Ollama does not log that warning.
 
+`prompts.yml` is separate. It is created from the jar default only when the file is missing, and `/nai reload` never rewrites a valid file. A syntax error on startup turns named prompts off and leaves literal placeholders working. A syntax error on reload keeps the prompts already in memory.
+
 ### What is prewarm?
 
 Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so holograms (and similar) can show a ready answer instead of the first-hit `fallback`. It is not the unique-answer pool (`generate_` / `pool`).
@@ -183,6 +232,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 compatibility).
 ## Architecture (short)
 
 - `PluginConfig` — config.yml + env + provider defaults + locale
+- `PromptCatalog` — prompts.yml ids, vars, and per-prompt overrides
 - `ConfigMerger` — adds missing config keys without overwriting user values
 - `MessageService` — `lang/*.yml` with English fallback
 - `AiCache` — Caffeine (TTL + max-size + `isFresh`)
@@ -194,7 +244,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 compatibility).
 - `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
 - `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
-- `NaiCommand` — `/nai` admin commands, including `/nai test`
+- `NaiCommand` — `/nai` admin commands, including `/nai test` and `/nai prompts`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise), which is the same API on Paper, Purpur, and Folia.
 
 ## License
 

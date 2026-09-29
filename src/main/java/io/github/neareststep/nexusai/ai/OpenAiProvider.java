@@ -75,7 +75,7 @@ public final class OpenAiProvider implements AiProvider {
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
         Double temperature = effective.temperature(config.getTemperature());
         Integer maxTokens = effective.maxTokens(config.getMaxTokens());
-        String model = config.getModel();
+        String model = effective.model(config.getModel());
         Integer maxCompletionTokens = null;
         String reasoningEffort = null;
         if (ReasoningModels.isReasoning(model)) {

@@ -166,7 +166,16 @@ public final class PluginConfig {
             int parsed = toInt(map.get("max-tokens"), 0);
             maxTokens = parsed <= 0 ? null : parsed;
         }
-        return GenerationOverrides.of(systemSet, system, temperatureSet, temperature, maxTokensSet, maxTokens);
+        boolean modelSet = map.containsKey("model");
+        String model = null;
+        if (modelSet && map.get("model") != null) {
+            model = String.valueOf(map.get("model")).trim();
+            if (model.isEmpty()) {
+                modelSet = false;
+            }
+        }
+        return GenerationOverrides.of(
+                systemSet, system, temperatureSet, temperature, maxTokensSet, maxTokens, modelSet, model);
     }
 
     private static Double toDouble(Object value) {
