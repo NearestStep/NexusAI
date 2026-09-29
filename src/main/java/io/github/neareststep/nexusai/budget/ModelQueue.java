@@ -102,10 +102,18 @@ public final class ModelQueue {
     }
 
     public synchronized List<Choice> selectable(long nowMillis) {
+        return selectable(nowMillis, false);
+    }
+
+    /**
+     * @param ignoreCooldown when true, entries in a temporary error or header cooldown are included.
+     *                        A daily cap is never ignored.
+     */
+    public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
         roll(nowMillis);
         List<Choice> ready = new ArrayList<>();
         for (Slot slot : slots) {
-            if (isSelectable(slot, nowMillis)) {
+            if (isSelectable(slot, nowMillis, ignoreCooldown)) {
                 ready.add(slot.choice());
             }
         }
@@ -167,11 +175,69 @@ public final class ModelQueue {
         if (snapshot.exhausted(remainingThreshold)) {
             Long until = RateLimitHeaders.resetForExhausted(headers, nowMillis, remainingThreshold);
             long deadline = until == null ? nowMillis + errorCooldownMillis : until;
+            long previous = slot.unavailableUntil;
             cooldown(index, deadline, Hold.HEADER);
+            if (slot.unavailableUntil != previous && slot.hold == Hold.HEADER) {
+                slot.lastError = null;
+            }
         }
     }
 
+    /**
+     * Why {@link #selectable(long)} is empty. The kind and text are the last provider failure
+     * when one was recorded. Daily exhaustion stays a local limit. Every message names the
+     * soonest time a retry is possible.
+     */
+    public synchronized AiRequestException explain(AiRequestException last, long nowMillis) {
+        roll(nowMillis);
+        long soonest = Long.MAX_VALUE;
+        AiRequestException stored = null;
+        long storedAt = Long.MIN_VALUE;
+        boolean sawBlocked = false;
+        boolean dailyOnly = true;
+        boolean sawHeader = false;
+        for (Slot slot : slots) {
+            if (isSelectable(slot, nowMillis, false)) {
+                continue;
+            }
+            sawBlocked = true;
+            if (slot.unavailableUntil > nowMillis) {
+                soonest = Math.min(soonest, slot.unavailableUntil);
+            }
+            boolean daily = slot.hold == Hold.DAILY
+                    || (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit);
+            if (!daily) {
+                dailyOnly = false;
+            }
+            if (slot.hold == Hold.HEADER) {
+                sawHeader = true;
+            }
+            if (slot.lastError != null && slot.lastFailedAt >= storedAt) {
+                stored = slot.lastError;
+                storedAt = slot.lastFailedAt;
+            }
+        }
+        String retry = soonest == Long.MAX_VALUE ? "" : " Retry after " + formatTime(soonest) + ".";
+        AiRequestException cause = last != null ? last : stored;
+        if (cause != null && !(last == null && dailyOnly)) {
+            return withRetry(cause, retry);
+        }
+        if (sawBlocked && dailyOnly) {
+            return new AiRequestException(
+                    AiErrorKind.LOCAL_LIMIT, 0, "All model-queue entries are exhausted." + retry, null);
+        }
+        if (sawHeader) {
+            return new AiRequestException(AiErrorKind.RATE_LIMIT, 0, "AI provider rate limit." + retry, null);
+        }
+        return new AiRequestException(AiErrorKind.OTHER, 0, "Model queue entry is cooling down." + retry, null);
+    }
+
     public synchronized void markFailure(int index, AiRequestException error, long nowMillis) {
+        Slot failed = slot(index);
+        if (failed != null) {
+            failed.lastError = error;
+            failed.lastFailedAt = nowMillis;
+        }
         if (error == null) {
             cooldown(index, nowMillis + errorCooldownMillis, Hold.ERROR);
             return;
@@ -328,11 +394,32 @@ public final class ModelQueue {
         save();
     }
 
-    private boolean isSelectable(Slot slot, long nowMillis) {
+    private boolean isSelectable(Slot slot, long nowMillis, boolean ignoreCooldown) {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
             return false;
         }
+        if (ignoreCooldown && slot.hold != Hold.DAILY) {
+            return true;
+        }
         return nowMillis >= slot.unavailableUntil;
+    }
+
+    private String formatTime(long epochMillis) {
+        return Instant.ofEpochMilli(epochMillis).atZone(zone).format(CLOCK);
+    }
+
+    private static AiRequestException withRetry(AiRequestException cause, String retry) {
+        String message = cause.getMessage() == null ? "" : cause.getMessage().strip();
+        if (!retry.isEmpty() && !message.contains("Retry after")) {
+            message = message.isEmpty() ? retry.strip() : message + retry;
+        }
+        return new AiRequestException(
+                cause.kind(),
+                cause.status(),
+                message,
+                cause,
+                cause.retryAfterSeconds(),
+                cause.headers());
     }
 
     private void holdUntilMidnight(Slot slot, long nowMillis) {
@@ -396,6 +483,8 @@ public final class ModelQueue {
         private volatile Long remainingRequests;
         private volatile Long remainingTokens;
         private volatile boolean warned;
+        private volatile AiRequestException lastError;
+        private volatile long lastFailedAt;
 
         private Slot(int index, String provider, String model, int dailyLimit) {
             this.index = index;

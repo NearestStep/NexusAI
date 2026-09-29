@@ -19,6 +19,8 @@ class PlayerInputTest {
 
     @Test
     void sectionSignsAndLegacyColorsAreStrippedBeforeTheBoundary() {
+        assertEquals("A", PlayerInput.sanitize("A§B"));
+        assertEquals("A", PlayerInput.sanitize("A&B"));
         assertEquals("Hello", PlayerInput.sanitize("§cHello"));
         assertEquals("Hello", PlayerInput.sanitize("&cHello"));
         assertEquals("Name", PlayerInput.sanitize("§x§a§b§c§d§e§fName"));

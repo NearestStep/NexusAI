@@ -30,6 +30,8 @@ public final class PlayerInput {
 
     /**
      * Removes legacy {@code §} and {@code &} color codes, then every remaining {@code §}.
+     * A code is the marker plus one color or format character, so {@code A§B} becomes {@code A}
+     * ({@code §B} is aqua) and {@code A&B} becomes {@code A}.
      */
     public static String sanitize(String raw) {
         if (raw == null || raw.isEmpty()) {
