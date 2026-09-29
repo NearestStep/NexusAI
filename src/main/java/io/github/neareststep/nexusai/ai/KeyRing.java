@@ -33,11 +33,22 @@ public final class KeyRing {
      * @return the next usable key, {@code ""} when this provider has no keys, or {@code null} when every key is skipped
      */
     public String acquire(long nowMillis) {
+        return acquire(nowMillis, false);
+    }
+
+    /**
+     * @param ignoreSkip when true, return the next key even if it is inside a skip window.
+     *                   Probes use this so a test still reaches the provider.
+     */
+    public String acquire(long nowMillis, boolean ignoreSkip) {
         if (keys.isEmpty()) {
             return "";
         }
         int size = keys.size();
         int start = Math.floorMod(cursor.getAndIncrement(), size);
+        if (ignoreSkip) {
+            return keys.get(Math.floorMod(start, size));
+        }
         for (int i = 0; i < size; i++) {
             String key = keys.get(Math.floorMod(start + i, size));
             if (nowMillis >= skipUntil.getOrDefault(key, 0L)) {

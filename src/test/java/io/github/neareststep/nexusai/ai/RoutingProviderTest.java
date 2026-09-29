@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -11,11 +12,15 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RoutingProviderTest {
@@ -84,6 +89,218 @@ class RoutingProviderTest {
                 () -> provider.complete("ping").join());
         assertEquals(AiErrorKind.LOCAL_LIMIT, AiErrors.classify(error));
         assertEquals(0, calls.get());
+        assertTrue(error.getCause().getMessage().contains("Retry after"));
+    }
+
+    @Test
+    void rateLimitThenRetryNamesTheCauseUntilCooldownEnds() {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            if (calls.incrementAndGet() == 1) {
+                throw new AiRequestException(AiErrorKind.RATE_LIMIT, 429, "HTTP 429 rate limit from api.openai.com", null);
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(List.of(entry("openai", "gpt-4o-mini", 0)), clock, http);
+        AiRequestException first = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.RATE_LIMIT, first.kind());
+        assertTrue(first.getMessage().contains("HTTP 429 rate limit"));
+        assertTrue(first.getMessage().contains("Retry after 1970-01-01 00:17:40"));
+        assertEquals(1, calls.get());
+
+        AiRequestException second = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.RATE_LIMIT, second.kind());
+        assertTrue(second.getMessage().contains("HTTP 429 rate limit"));
+        assertTrue(second.getMessage().contains("Retry after 1970-01-01 00:17:40"));
+        assertEquals(1, calls.get());
+
+        clock.set(1_060_000L);
+        assertEquals("ok", harness.provider().complete("ping").join());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void unauthorizedKeyFallsOverToTheNextModel() {
+        AtomicInteger calls = new AtomicInteger();
+        List<String> models = new ArrayList<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            models.add(model);
+            if ("gpt-4o-mini".equals(model)) {
+                throw new AiRequestException(AiErrorKind.BAD_KEY, 401, "HTTP 401 unauthorized", null);
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                new AtomicLong(5_000L),
+                http);
+        assertEquals("ok", harness.provider().complete("ping").join());
+        assertEquals(List.of("gpt-4o-mini", "gpt-4o-mini", "llama"), models);
+        assertTrue(harness.queue().status(5_000L).getFirst().state().startsWith("COOLDOWN"));
+        assertEquals(3, calls.get());
+    }
+
+    @Test
+    void serverErrorAndTimeoutFallOverToTheNextModel() {
+        assertEquals("ok", failover(new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500 from api.openai.com: down", null)));
+        assertEquals("ok", failover(new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling api.openai.com", null)));
+    }
+
+    @Test
+    void allFailedEntriesNameTheLastCauseAndRetryTime() {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        List<String> models = new ArrayList<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            models.add(model);
+            if ("gpt-4o-mini".equals(model)) {
+                throw new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500 from api.openai.com: down", null);
+            }
+            throw new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling api.groq.com", null);
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                clock,
+                http);
+        AiRequestException error = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.TIMEOUT, error.kind());
+        assertTrue(error.getMessage().contains("Request timed out"));
+        assertTrue(error.getMessage().contains("Retry after 1970-01-01 00:17:40"));
+        assertEquals(List.of("gpt-4o-mini", "llama"), models);
+    }
+
+    @Test
+    void entryRecoversAfterCooldown() {
+        AtomicLong clock = new AtomicLong(2_000_000L);
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            if (calls.incrementAndGet() == 1) {
+                throw new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500 from api.openai.com: down", null);
+            }
+            return new ChatExchange("back", Map.of());
+        };
+        Harness harness = harness(List.of(entry("openai", "gpt-4o-mini", 0)), clock, http);
+        AiRequestException error = failure(harness.provider(), false);
+        assertTrue(error.getMessage().contains("HTTP 500"));
+        assertTrue(error.getMessage().contains("Retry after"));
+        assertEquals(1, calls.get());
+
+        clock.set(2_030_000L);
+        AiRequestException still = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.OTHER, still.kind());
+        assertEquals(1, calls.get());
+
+        clock.set(2_060_000L);
+        assertEquals("back", harness.provider().complete("ping").join());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void probeReachesHttpDuringCooldownWithoutExtendingIt() {
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            int n = calls.incrementAndGet();
+            if (n == 1 || n == 3) {
+                throw new AiRequestException(AiErrorKind.RATE_LIMIT, 429, "HTTP 429 rate limit from api.openai.com", null);
+            }
+            return new ChatExchange("pong", Map.of("x-ratelimit-remaining-requests", List.of("0")));
+        };
+        Harness harness = harness(List.of(entry("openai", "gpt-4o-mini", 0)), clock, http);
+        failure(harness.provider(), false);
+        String cooled = harness.queue().status(clock.get()).getFirst().state();
+        assertTrue(cooled.startsWith("COOLDOWN until "));
+
+        assertEquals("pong", harness.provider().complete("ping", GenerationOverrides.none(), true).join());
+        assertEquals(cooled, harness.queue().status(clock.get()).getFirst().state());
+
+        AiRequestException probeError = failure(harness.provider(), true);
+        assertEquals(AiErrorKind.RATE_LIMIT, probeError.kind());
+        assertTrue(probeError.getMessage().contains("HTTP 429 rate limit"));
+        assertEquals(cooled, harness.queue().status(clock.get()).getFirst().state());
+        assertEquals(3, calls.get());
+    }
+
+    @Test
+    void probeStillStopsAtTheDailyCap() {
+        AtomicLong clock = new AtomicLong(1_000L);
+        ModelQueue queue = new ModelQueue(
+                List.of(entry("openai", "gpt-4o-mini", 1)),
+                0,
+                60_000L,
+                300_000L,
+                null,
+                clock::get,
+                () -> LocalDate.of(2026, 1, 1),
+                ZoneId.of("UTC"),
+                Logger.getLogger("route-probe-cap"));
+        assertTrue(queue.tryConsume(0, clock.get()));
+        AtomicInteger calls = new AtomicInteger();
+        RoutingProvider provider = new RoutingProvider(
+                config(),
+                queue,
+                (prompt, overrides, baseUrl, apiKey, model) -> {
+                    calls.incrementAndGet();
+                    return new ChatExchange("nope", Map.of());
+                },
+                Executors.newSingleThreadExecutor(),
+                Logger.getLogger("route-probe-cap"),
+                clock::get);
+        AiRequestException error = failure(provider, true);
+        assertEquals(AiErrorKind.LOCAL_LIMIT, error.kind());
+        assertTrue(error.getMessage().contains("exhausted"));
+        assertTrue(error.getMessage().contains("Retry after 2026-01-02 00:00:00"));
+        assertEquals(0, calls.get());
+    }
+
+    private static String failover(AiRequestException firstError) {
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            if (calls.incrementAndGet() == 1) {
+                throw firstError;
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                new AtomicLong(8_000L),
+                http);
+        String answer = harness.provider().complete("ping").join();
+        assertEquals(2, calls.get());
+        assertTrue(harness.queue().status(8_000L).getFirst().state().startsWith("COOLDOWN"));
+        return answer;
+    }
+
+    private static AiRequestException failure(RoutingProvider provider, boolean probe) {
+        CompletionException error = assertThrows(CompletionException.class,
+                () -> provider.complete("ping", GenerationOverrides.none(), probe).join());
+        AiRequestException typed = AiErrors.find(error);
+        assertNotNull(typed);
+        return typed;
+    }
+
+    private static QueueEntryConfig entry(String provider, String model, int limit) {
+        return new QueueEntryConfig(provider, model, limit);
+    }
+
+    private static Harness harness(List<QueueEntryConfig> entries, AtomicLong clock, ChatCaller http) {
+        ModelQueue queue = new ModelQueue(
+                entries,
+                0,
+                60_000L,
+                300_000L,
+                null,
+                clock::get,
+                () -> LocalDate.of(2026, 1, 1),
+                ZoneId.of("UTC"),
+                Logger.getLogger("route-harness"));
+        RoutingProvider provider = new RoutingProvider(
+                config(), queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("route-harness"), clock::get);
+        return new Harness(queue, provider);
+    }
+
+    private record Harness(ModelQueue queue, RoutingProvider provider) {
     }
 
     private static PluginConfig config() {
