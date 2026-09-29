@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -58,13 +59,26 @@ public final class AiHttpClient {
      * @param playerId player UUID for per-player limits, or {@code null} for server counters only
      */
     public CompletableFuture<String> requestAsync(String prompt, UUID playerId) {
+        return requestAsync(prompt, playerId, GenerationOverrides.none(), null);
+    }
+
+    /**
+     * @param cacheTtl per-entry TTL, or {@code null} to use the cache default
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl
+    ) {
         Objects.requireNonNull(prompt, "prompt");
-        String key = cacheKey(prompt);
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        String key = cacheKey(effective.model(config.getModel()), prompt);
         Optional<String> cached = cache.get(key);
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
         }
-        return startShared(key, prompt, prompt, playerId, false, true, GenerationOverrides.none());
+        return startShared(key, prompt, prompt, playerId, false, true, effective, cacheTtl);
     }
 
     /**
@@ -100,7 +114,7 @@ public final class AiHttpClient {
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
         CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, true);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true);
         return created;
     }
 
@@ -110,6 +124,10 @@ public final class AiHttpClient {
      * A probe does not clear, start, or extend a provider pause.
      */
     public CompletableFuture<String> testAsync(String prompt) {
+        return testAsync(prompt, GenerationOverrides.none());
+    }
+
+    public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides) {
         Objects.requireNonNull(prompt, "prompt");
         if (!config.canSendRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
@@ -121,7 +139,8 @@ public final class AiHttpClient {
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(prompt);
         CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, GenerationOverrides.none(), false);
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false);
         return created;
     }
 
@@ -160,7 +179,8 @@ public final class AiHttpClient {
             UUID playerId,
             boolean bypassBackoffAndPause,
             boolean writeCache,
-            GenerationOverrides overrides
+            GenerationOverrides overrides,
+            Duration cacheTtl
     ) {
         CompletableFuture<String> existing = inFlight.get(cacheKey);
         if (existing != null) {
@@ -182,7 +202,7 @@ public final class AiHttpClient {
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, true);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, cacheTtl, true);
         return created;
     }
 
@@ -195,6 +215,7 @@ public final class AiHttpClient {
             boolean writeCache,
             String cacheKey,
             GenerationOverrides overrides,
+            Duration cacheTtl,
             boolean clearPause
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
@@ -202,11 +223,17 @@ public final class AiHttpClient {
         try {
             upstream = provider.complete(prompt, effective);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, clearPause);
+            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
             return;
         }
-        upstream.whenComplete((value, error) ->
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache, clearPause));
+        upstream.whenComplete((value, error) -> {
+            try {
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache, cacheTtl, clearPause);
+            } catch (Throwable thrown) {
+                logger.log(Level.WARNING, "AI completion handler failed", thrown);
+                created.completeExceptionally(thrown);
+            }
+        });
     }
 
     private void finish(
@@ -218,12 +245,17 @@ public final class AiHttpClient {
             String value,
             Throwable error,
             boolean writeCache,
+            Duration cacheTtl,
             boolean clearPause
     ) {
         try {
             if (error == null && value != null && !value.isBlank()) {
                 if (writeCache && cacheKey != null) {
-                    cache.put(cacheKey, value);
+                    if (cacheTtl != null) {
+                        cache.put(cacheKey, value, cacheTtl);
+                    } else {
+                        cache.put(cacheKey, value);
+                    }
                 }
                 gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);
                 created.complete(value);
@@ -242,6 +274,7 @@ public final class AiHttpClient {
                 created.completeExceptionally(AiErrors.unwrap(failure));
             }
         } catch (RuntimeException e) {
+            logger.log(Level.WARNING, "AI completion handler failed", e);
             created.completeExceptionally(e);
         } finally {
             if (cacheKey != null) {
@@ -255,6 +288,11 @@ public final class AiHttpClient {
     }
 
     public String cacheKey(String prompt) {
-        return config.getModel() + '\u0000' + prompt;
+        return cacheKey(config.getModel(), prompt);
+    }
+
+    public String cacheKey(String model, String prompt) {
+        String effectiveModel = model == null || model.isBlank() ? config.getModel() : model;
+        return effectiveModel + '\u0000' + prompt;
     }
 }

@@ -15,6 +15,11 @@ class LocaleFilesTest {
 
     private static final List<String> REQUIRED = List.of(
             "command.help-test",
+            "command.help-prompts",
+            "command.prompts-header",
+            "command.prompts-line",
+            "command.prompts-empty",
+            "command.status-prompts",
             "command.test-sending",
             "command.test-ok",
             "command.test-fail",

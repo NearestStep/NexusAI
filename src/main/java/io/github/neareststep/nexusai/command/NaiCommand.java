@@ -3,13 +3,18 @@ package io.github.neareststep.nexusai.command;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
+import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
+import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -26,7 +31,8 @@ import java.util.Objects;
  */
 public final class NaiCommand implements CommandExecutor, TabCompleter {
 
-    private static final List<String> SUBCOMMANDS = List.of("help", "version", "reload", "status", "test");
+    private static final List<String> SUBCOMMANDS = List.of(
+            "help", "version", "reload", "status", "test", "prompts");
     private static final String DEFAULT_TEST_PROMPT = "Reply with exactly the word pong.";
 
     private final NexusAI plugin;
@@ -61,6 +67,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             case "reload" -> handleReload(sender, messages);
             case "status" -> handleStatus(sender, messages);
             case "test" -> handleTest(sender, messages, args);
+            case "prompts" -> handlePrompts(sender, messages);
             default -> messages.send(sender, "command.unknown");
         }
         return true;
@@ -79,6 +86,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         if (sender.hasPermission("nexusai.test")) {
             messages.send(sender, "command.help-test");
         }
+        messages.send(sender, "command.help-prompts");
     }
 
     private void handleReload(CommandSender sender, MessageService messages) {
@@ -123,6 +131,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-cache", Map.of(
                 "cache_size", String.valueOf(plugin.getAiCache().size())
         ));
+        messages.send(sender, "command.status-prompts", Map.of(
+                "prompts", String.valueOf(plugin.getPromptCatalog().ids().size())
+        ));
         boolean papi = Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null;
         messages.send(sender, "command.status-papi", Map.of("papi", papi ? yes : no));
         String lastError = plugin.getAiHttpClient().lastErrorText();
@@ -155,28 +166,54 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "command.test-fail", testPlaceholders(0L, "empty prompt"));
             return;
         }
+        GenerationOverrides overrides = GenerationOverrides.none();
+        if (plugin.getPromptCatalog().find(prompt).isPresent()) {
+            Player player = sender instanceof Player online ? online : null;
+            ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
+                    prompt,
+                    plugin.getPluginConfig(),
+                    template -> VarSubstitutor.resolve(player, template));
+            if (!resolved.usable()) {
+                String detail = resolved.text().isBlank() ? "empty prompt" : "prompt is longer than max-prompt-length";
+                messages.send(sender, "command.test-fail", testPlaceholders(0L, detail));
+                return;
+            }
+            prompt = resolved.text();
+            overrides = resolved.overrides();
+        }
         messages.send(sender, "command.test-sending");
         long started = System.nanoTime();
-        plugin.getAiHttpClient().testAsync(prompt).whenComplete((answer, error) -> {
-            long latencyMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
-            Runnable deliver = () -> {
-                MessageService current = plugin.getMessageService();
-                if (error != null) {
-                    String detail = AiErrors.detail(error);
-                    if (detail.isBlank()) {
-                        detail = error.getClass().getSimpleName();
+        String requestPrompt = prompt;
+        GenerationOverrides requestOverrides = overrides;
+        CompletionSupport.onComplete(
+                plugin.getAiHttpClient().testAsync(requestPrompt, requestOverrides),
+                plugin.getLogger(),
+                "Failed to deliver /nai test result",
+                (answer, error) -> SenderTasks.run(plugin, sender, () -> {
+                    long latencyMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+                    MessageService current = plugin.getMessageService();
+                    if (error != null) {
+                        String detail = AiErrors.detail(error);
+                        if (detail.isBlank()) {
+                            detail = error.getClass().getSimpleName();
+                        }
+                        current.send(sender, "command.test-fail", testPlaceholders(latencyMs, detail));
+                    } else {
+                        current.send(sender, "command.test-ok", testPlaceholders(latencyMs, answer == null ? "" : answer));
                     }
-                    current.send(sender, "command.test-fail", testPlaceholders(latencyMs, detail));
-                } else {
-                    current.send(sender, "command.test-ok", testPlaceholders(latencyMs, answer == null ? "" : answer));
-                }
-            };
-            if (Bukkit.isPrimaryThread()) {
-                deliver.run();
-            } else {
-                Bukkit.getScheduler().runTask(plugin, deliver);
-            }
-        });
+                }, plugin.getLogger()));
+    }
+
+    private void handlePrompts(CommandSender sender, MessageService messages) {
+        List<String> ids = plugin.getPromptCatalog().ids();
+        if (ids.isEmpty()) {
+            messages.send(sender, "command.prompts-empty");
+            return;
+        }
+        messages.send(sender, "command.prompts-header", Map.of("count", Integer.toString(ids.size())));
+        for (String id : ids) {
+            messages.send(sender, "command.prompts-line", Map.of("id", id));
+        }
     }
 
     private static Map<String, String> testPlaceholders(long latencyMs, String text) {
@@ -194,7 +231,20 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             @NotNull String alias,
             @NotNull String[] args
     ) {
-        if (!sender.hasPermission("nexusai.command") || args.length != 1) {
+        if (!sender.hasPermission("nexusai.command")) {
+            return List.of();
+        }
+        if (args.length == 2 && "test".equals(args[0].toLowerCase(Locale.ROOT)) && sender.hasPermission("nexusai.test")) {
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            List<String> ids = new ArrayList<>();
+            for (String id : plugin.getPromptCatalog().ids()) {
+                if (id.startsWith(prefix)) {
+                    ids.add(id);
+                }
+            }
+            return ids;
+        }
+        if (args.length != 1) {
             return List.of();
         }
         String prefix = args[0].toLowerCase(Locale.ROOT);

@@ -2,6 +2,11 @@
 #
 # Prefer setting the API key via environment variable NEXUSAI_API_KEY.
 # Do not commit real keys. api.key below is only a fallback for local testing.
+#
+# Long prompts belong in prompts.yml under a short id, for example survival_tips:
+#   %ainexus_cached_survival_tips%
+#   %ainexus_generate_survival_tips%
+# Text that is not an id is still sent to the model exactly as written.
 
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
@@ -62,8 +67,11 @@ pool:
   persist: true
   save-delay-seconds: 2
   entries: []
-  # Example:
+  # Example (prompt may be literal text or an id from prompts.yml):
   # entries:
+  #   - prompt: survival_tips
+  #     size: 3
+  #     min-threshold: 1
   #   - prompt: "Short warm welcome for the joining player"
   #     size: 3
   #     min-threshold: 1
@@ -83,8 +91,9 @@ prewarm:
   # Seconds between freshness checks (refresh when not isFresh / ~80% TTL)
   refresh-before-ttl: 60
   prompts: []
-  # Example:
+  # Example (a line may be literal text, "{player}", or an id from prompts.yml):
   # prompts:
+  #   - survival_tips
   #   - "Welcome, {player}"
   #   - "Server tip of the day"
 

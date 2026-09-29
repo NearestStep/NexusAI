@@ -40,4 +40,14 @@ class AiCacheTest {
         Thread.sleep(90);
         assertFalse(cache.isFresh("k"));
     }
+
+    @Test
+    void perEntryTtlOverridesTheCacheDefault() throws InterruptedException {
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        cache.put("short", "v", Duration.ofMillis(50));
+        cache.put("long", "v");
+        Thread.sleep(80);
+        assertTrue(cache.get("short").isEmpty());
+        assertEquals("v", cache.get("long").orElseThrow());
+    }
 }
