@@ -71,6 +71,33 @@ class ProviderParsingTest {
         assertEquals("http://localhost:9/v1", EnvSubstitutor.apply("http://${HOST}/v1", Map.of("HOST", "localhost:9")::get));
     }
 
+    @Test
+    void unsetEnvVarBecomesEmptyAndIsNotKeptAsTheKey() {
+        Function<String, String> previous = PluginConfig.environment;
+        PluginConfig.environment = name -> null;
+        try {
+            YamlConfiguration yaml = base();
+            yaml.set("providers.openai.type", "openai-compatible");
+            yaml.set("providers.openai.url", "https://api.openai.com/v1");
+            yaml.set("providers.openai.api-key", "${NXAI_FIXTURE_KEY}");
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.provider("openai").apiKeys().isEmpty());
+            assertEquals(List.of("NXAI_FIXTURE_KEY"), config.missingEnvVars());
+            assertFalse(config.maskedApiKeys().contains("NXAI_FIXTURE_KEY"));
+            assertFalse(config.maskedApiKeys().contains("${"));
+        } finally {
+            PluginConfig.environment = previous;
+        }
+    }
+
+    @Test
+    void redactReplacesSecretsLongerThanFourCharacters() {
+        assertEquals("token ****9999", SecretMask.redact("token sk-secret-9999", List.of("sk-secret-9999")));
+        assertEquals("ab stays", SecretMask.redact("ab stays", List.of("ab")));
+        assertEquals("****", SecretMask.mask("ab"));
+        assertEquals("****", SecretMask.mask("key4"));
+    }
+
     private static YamlConfiguration base() {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("api.provider", "openai");

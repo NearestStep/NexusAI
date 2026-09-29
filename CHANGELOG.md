@@ -26,6 +26,8 @@ Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `
 
 - `pool.yml` answers are saved as double-quoted strings with no line wrapping. Older unquoted or wrapped files still load.
 - HTTP 401/403 are described as an invalid or unauthorized key. HTTP 429 is a provider rate limit. "Paused" is logged only when the provider is actually paused.
+- An unset `${ENV_VAR}` becomes an empty value and is logged by variable name. It is not sent as the API key and is not written back into `config.yml`.
+- Provider error bodies and `/nai test` replies redact any configured key longer than four characters. A bare `x-ratelimit-remaining` header counts as remaining requests when `x-ratelimit-remaining-requests` is absent. Invalid `pool.yml` is not loaded and is not overwritten.
 
 ## 0.6.0-SNAPSHOT
 

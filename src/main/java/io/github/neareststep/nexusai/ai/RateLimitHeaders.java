@@ -7,8 +7,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Reads {@code x-ratelimit-remaining-*} and {@code x-ratelimit-reset-*} the way OpenAI and Groq send them,
- * plus {@code Retry-After} as delta seconds.
+ * Reads {@code x-ratelimit-remaining-requests}, {@code x-ratelimit-remaining-tokens},
+ * a bare {@code x-ratelimit-remaining} when the requests header is absent,
+ * {@code x-ratelimit-reset-*}, and {@code Retry-After} as delta seconds.
  */
 public final class RateLimitHeaders {
 
@@ -29,7 +30,7 @@ public final class RateLimitHeaders {
         if (headers == null || headers.isEmpty()) {
             return new Snapshot(null, null, null);
         }
-        Long remainingRequests = firstLong(headers, "x-ratelimit-remaining-requests");
+        Long remainingRequests = remainingRequests(headers);
         Long remainingTokens = firstLong(headers, "x-ratelimit-remaining-tokens");
         Long resetRequests = parseReset(first(headers, "x-ratelimit-reset-requests"), nowMillis);
         Long resetTokens = parseReset(first(headers, "x-ratelimit-reset-tokens"), nowMillis);
@@ -45,7 +46,7 @@ public final class RateLimitHeaders {
         if (headers == null) {
             return null;
         }
-        Long remainingRequests = firstLong(headers, "x-ratelimit-remaining-requests");
+        Long remainingRequests = remainingRequests(headers);
         Long remainingTokens = firstLong(headers, "x-ratelimit-remaining-tokens");
         Long resetRequests = parseReset(first(headers, "x-ratelimit-reset-requests"), nowMillis);
         Long resetTokens = parseReset(first(headers, "x-ratelimit-reset-tokens"), nowMillis);
@@ -144,6 +145,18 @@ public final class RateLimitHeaders {
             }
         }
         return null;
+    }
+
+    /**
+     * OpenAI and Groq send {@code x-ratelimit-remaining-requests}. A bare {@code x-ratelimit-remaining}
+     * is the same bucket when the specific header is absent.
+     */
+    private static Long remainingRequests(Map<String, List<String>> headers) {
+        Long specific = firstLong(headers, "x-ratelimit-remaining-requests");
+        if (specific != null) {
+            return specific;
+        }
+        return firstLong(headers, "x-ratelimit-remaining");
     }
 
     private static Long firstLong(Map<String, List<String>> headers, String name) {

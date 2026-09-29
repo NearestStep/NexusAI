@@ -8,10 +8,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -24,9 +26,7 @@ public final class PluginConfig {
     /** Test seam. Production reads the process environment. */
     static Function<String, String> environment = System::getenv;
 
-    private static String substitute(String value) {
-        return EnvSubstitutor.apply(value, environment);
-    }
+    private final Set<String> missingEnvVars = new LinkedHashSet<>();
 
     private static final Map<String, String> PROVIDER_BASE_URLS = Map.of(
             "openai", "https://api.openai.com/v1",
@@ -86,6 +86,7 @@ public final class PluginConfig {
 
     public void reload(FileConfiguration config) {
         Objects.requireNonNull(config, "config");
+        missingEnvVars.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -262,7 +263,7 @@ public final class PluginConfig {
         return FormatPresets.known(id) ? id : FormatPresets.SIMPLE;
     }
 
-    private static List<String> resolveKeys(Object raw, boolean active, String legacyKey, String envKey) {
+    private List<String> resolveKeys(Object raw, boolean active, String legacyKey, String envKey) {
         boolean multi = raw instanceof List<?> list && list.size() > 1;
         boolean explicit = referencesEnv(raw);
         List<String> configured = readKeyList(raw);
@@ -299,7 +300,7 @@ public final class PluginConfig {
         return raw != null && EnvSubstitutor.referencesEnv(String.valueOf(raw));
     }
 
-    private static List<String> readKeyList(Object raw) {
+    private List<String> readKeyList(Object raw) {
         if (raw instanceof List<?> list) {
             List<String> keys = new ArrayList<>();
             for (Object item : list) {
@@ -719,6 +720,38 @@ public final class PluginConfig {
         String normalized = normalizeFormat(id);
         FormatPreset configured = formats.get(normalized);
         return configured == null ? FormatPresets.builtin(normalized) : configured;
+    }
+
+    /**
+     * Names of {@code ${ENV_VAR}} placeholders whose variable was unset at the last reload.
+     * The placeholder text itself is not a key and is not returned.
+     */
+    public List<String> missingEnvVars() {
+        return List.copyOf(missingEnvVars);
+    }
+
+    /**
+     * Resolved secrets longer than four characters. Used only to strip them from command text.
+     */
+    public List<String> configuredSecrets() {
+        List<String> secrets = new ArrayList<>();
+        if (providers != null) {
+            for (ProviderSettings settings : providers.values()) {
+                for (String key : settings.apiKeys()) {
+                    if (key != null && key.trim().length() > 4) {
+                        secrets.add(key.trim());
+                    }
+                }
+            }
+        }
+        if (apiKey != null && apiKey.trim().length() > 4 && !secrets.contains(apiKey.trim())) {
+            secrets.add(apiKey.trim());
+        }
+        return secrets;
+    }
+
+    private String substitute(String value) {
+        return EnvSubstitutor.apply(value, environment, missingEnvVars);
     }
 
     public String maskedApiKeys() {
