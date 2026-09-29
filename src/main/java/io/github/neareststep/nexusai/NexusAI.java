@@ -90,6 +90,7 @@ public final class NexusAI extends JavaPlugin {
         this.messageService.reload(pluginConfig.getLocale());
         loadPrompts();
         logCredentialState();
+        logMissingEnvVars();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -142,6 +143,7 @@ public final class NexusAI extends JavaPlugin {
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
+        logMissingEnvVars();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -283,6 +285,13 @@ public final class NexusAI extends JavaPlugin {
         PluginConfig config = new PluginConfig(yaml);
         config.holdRequests();
         return config;
+    }
+
+    private void logMissingEnvVars() {
+        for (String name : pluginConfig.missingEnvVars()) {
+            getLogger().warning("Environment variable " + name
+                    + " is not set. Its placeholder was replaced with an empty value and is not used as an API key.");
+        }
     }
 
     private void logCredentialState() {

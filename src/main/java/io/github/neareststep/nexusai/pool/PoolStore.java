@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.YamlStrings;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -34,6 +35,8 @@ public final class PoolStore {
     private final Object scheduleLock = new Object();
     private final Object ioLock = new Object();
     private ScheduledFuture<?> pending;
+    /** Set when pool.yml cannot be parsed, so a later save does not destroy the original bytes. */
+    private volatile boolean refuseOverwrite;
 
     public PoolStore(File file, ScheduledExecutorService scheduler, Duration delay, Logger logger, boolean enabled) {
         this.file = file;
@@ -64,7 +67,16 @@ public final class PoolStore {
             return;
         }
         try {
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+            String raw = Files.readString(file.toPath());
+            YamlConfiguration yaml = new YamlConfiguration();
+            try {
+                yaml.loadFromString(raw);
+            } catch (InvalidConfigurationException e) {
+                refuseOverwrite = true;
+                logger.log(Level.WARNING, "pool.yml is not valid YAML. It was left unchanged and will not be overwritten.", e);
+                return;
+            }
+            refuseOverwrite = false;
             List<Map<?, ?>> rows = yaml.getMapList("pools");
             for (Map<?, ?> row : rows) {
                 Object promptValue = row.get("prompt");
@@ -88,8 +100,10 @@ public final class PoolStore {
                 }
                 pool.replace(memory, answers);
             }
-        } catch (RuntimeException e) {
-            logger.log(Level.WARNING, "Failed to load answer pool from " + file.getName(), e);
+        } catch (IOException | RuntimeException e) {
+            refuseOverwrite = true;
+            logger.log(Level.WARNING, "Failed to load answer pool from " + file.getName()
+                    + ". The file will not be overwritten.", e);
         }
     }
 
@@ -145,6 +159,10 @@ public final class PoolStore {
             return;
         }
         synchronized (ioLock) {
+            if (refuseOverwrite) {
+                logger.warning("Refusing to overwrite invalid pool.yml. Fix or replace the file, then reload.");
+                return;
+            }
             try {
                 StringBuilder yaml = new StringBuilder();
                 yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');

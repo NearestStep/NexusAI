@@ -141,7 +141,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-papi", Map.of("papi", papi ? yes : no));
         String lastError = plugin.getAiHttpClient().lastErrorText();
         messages.send(sender, "command.status-last-error", Map.of(
-                "last_error", lastError == null || lastError.isBlank() ? messages.raw("common.none") : lastError
+                "last_error", lastError == null || lastError.isBlank()
+                        ? messages.raw("common.none")
+                        : redact(lastError)
         ));
         messages.send(sender, "command.status-provider-pause", Map.of(
                 "provider_pause", pauseText(messages)
@@ -234,9 +236,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                         if (detail.isBlank()) {
                             detail = error.getClass().getSimpleName();
                         }
-                        current.send(sender, "command.test-fail", testPlaceholders(latencyMs, detail));
+                        current.send(sender, "command.test-fail", testPlaceholders(latencyMs, redact(detail)));
                     } else {
-                        current.send(sender, "command.test-ok", testPlaceholders(latencyMs, answer == null ? "" : answer));
+                        current.send(sender, "command.test-ok", testPlaceholders(latencyMs, redact(answer == null ? "" : answer)));
                     }
                 }, plugin.getLogger()));
     }
@@ -262,6 +264,10 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         } catch (Throwable ignored) {
             return true;
         }
+    }
+
+    private String redact(String text) {
+        return io.github.neareststep.nexusai.config.SecretMask.redact(text, plugin.getPluginConfig().configuredSecrets());
     }
 
     private static Map<String, String> testPlaceholders(long latencyMs, String text) {
