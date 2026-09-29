@@ -67,6 +67,25 @@ class PoolStoreTest {
     }
 
     @Test
+    void invalidPoolFileIsNotOverwritten() throws Exception {
+        File file = Files.createTempDirectory("nexusai-pool-broken").resolve("pool.yml").toFile();
+        Files.writeString(file.toPath(), "pools: [\n  this is not yaml");
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        try {
+            PoolStore store = new PoolStore(file, scheduler, Duration.ofMillis(200), Logger.getLogger("pool-store"), true);
+            AiPool loaded = new AiPool();
+            store.load(loaded, Map.of("tip", 3));
+            assertEquals(0, loaded.size("tip"));
+            AiPool replacement = new AiPool();
+            replacement.add("tip", "should-not-land");
+            store.saveNow(replacement, Map.of("tip", 3));
+            assertEquals("pools: [\n  this is not yaml", Files.readString(file.toPath()));
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
     void multilinePromptRoundTrips() throws Exception {
         File file = Files.createTempDirectory("nexusai-pool-lines").resolve("pool.yml").toFile();
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();

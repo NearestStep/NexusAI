@@ -111,7 +111,12 @@ public final class RoutingProvider implements AiProvider {
                                 ? config.getAuthPauseSeconds() * 1000L
                                 : Math.max(config.getProviderPauseSeconds() * 1000L, error.retryAfterSeconds() * 1000L);
                         ring.skip(key, now + skipFor);
-                        logger.warning("Skipping API key " + SecretMask.mask(key) + " after HTTP " + error.status() + ".");
+                        String lead = error.kind() == AiErrorKind.BAD_KEY
+                                ? "AI provider rejected the API key (invalid or unauthorized)."
+                                : "AI provider rate limit.";
+                        logger.warning(lead + " Skipping key " + SecretMask.mask(key)
+                                + " on " + choice.provider() + " after HTTP " + error.status()
+                                + " and trying the next key or model-queue entry.");
                     }
                     if (error.kind() == AiErrorKind.BAD_KEY && !key.isEmpty() && ring.hasAvailable(now)) {
                         continue;

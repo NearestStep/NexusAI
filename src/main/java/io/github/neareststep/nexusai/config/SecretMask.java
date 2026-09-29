@@ -19,4 +19,26 @@ public final class SecretMask {
         }
         return "****" + trimmed.substring(trimmed.length() - 4);
     }
+
+    /**
+     * Replaces each secret longer than four characters with {@link #mask(String)}.
+     * Shorter secrets are left alone so unrelated words are not rewritten.
+     */
+    public static String redact(String text, Iterable<String> secrets) {
+        if (text == null || text.isEmpty() || secrets == null) {
+            return text == null ? "" : text;
+        }
+        String result = text;
+        for (String secret : secrets) {
+            if (secret == null) {
+                continue;
+            }
+            String trimmed = secret.trim();
+            if (trimmed.length() <= 4 || !result.contains(trimmed)) {
+                continue;
+            }
+            result = result.replace(trimmed, mask(trimmed));
+        }
+        return result;
+    }
 }

@@ -6,6 +6,7 @@ import io.github.neareststep.nexusai.ai.dto.ChatCompletionRequest;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionResponse;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -145,7 +146,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw httpError(
                         response.statusCode(),
-                        responseBody,
+                        SecretMask.redact(responseBody, List.of(apiKey)),
                         htmlBody,
                         parsedUri,
                         retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null)),
@@ -177,6 +178,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                     config.getMaxAnswerLines()
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
+            formatted = SecretMask.redact(formatted, List.of(apiKey));
             return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
             throw e;
@@ -193,7 +195,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         } catch (Exception e) {
             AiErrorKind kind = AiErrors.classify(e);
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            throw new AiRequestException(kind, 0, message, e);
+            throw new AiRequestException(kind, 0, SecretMask.redact(message, List.of(apiKey)), e);
         }
     }
 
