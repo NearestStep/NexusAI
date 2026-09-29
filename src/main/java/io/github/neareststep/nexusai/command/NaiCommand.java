@@ -4,7 +4,9 @@ import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
@@ -121,8 +123,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-provider", Map.of("provider", config.getProvider()));
         messages.send(sender, "command.status-base-url", Map.of("base_url", config.getBaseUrl()));
         messages.send(sender, "command.status-model", Map.of("model", config.getModel()));
+        String masked = config.maskedApiKeys();
         messages.send(sender, "command.status-api-key", Map.of(
-                "api_key", config.hasApiKey() ? yes : no
+                "api_key", masked.isBlank() ? no : masked
         ));
         messages.send(sender, "command.status-pool", Map.of(
                 "pool_state", config.isPoolEnabled() ? enabled : disabled,
@@ -143,6 +146,34 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-provider-pause", Map.of(
                 "provider_pause", pauseText(messages)
         ));
+        ModelQueue queue = plugin.getModelQueue();
+        if (queue != null && queue.size() > 0) {
+            messages.send(sender, "command.status-queue-header");
+            for (ModelQueue.Status row : queue.status(System.currentTimeMillis())) {
+                messages.send(sender, "command.status-queue-line", Map.of("entry", queueLine(row)));
+            }
+        }
+    }
+
+    private static String queueLine(ModelQueue.Status row) {
+        String limit = row.dailyLimit() > 0 ? Integer.toString(row.dailyLimit()) : "-";
+        StringBuilder line = new StringBuilder();
+        line.append(row.provider()).append(" / ").append(row.model())
+                .append(": ").append(row.requestsToday()).append('/').append(limit).append(" today");
+        if (row.remainingRequests() != null || row.remainingTokens() != null) {
+            line.append(", remaining");
+            if (row.remainingRequests() != null) {
+                line.append(' ').append(row.remainingRequests()).append(" requests");
+            }
+            if (row.remainingTokens() != null) {
+                if (row.remainingRequests() != null) {
+                    line.append(" /");
+                }
+                line.append(' ').append(row.remainingTokens()).append(" tokens");
+            }
+        }
+        line.append(", ").append(row.state());
+        return line.toString();
     }
 
     private String pauseText(MessageService messages) {
@@ -155,6 +186,11 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleTest(CommandSender sender, MessageService messages, String[] args) {
+        if (sender instanceof Player player && !ownsRegion(player)) {
+            player.getScheduler().run(plugin, scheduled -> handleTest(sender, plugin.getMessageService(), args), () ->
+                    plugin.getLogger().fine("Skipped /nai test because the player is no longer valid"));
+            return;
+        }
         if (!sender.hasPermission("nexusai.test")) {
             messages.send(sender, "command.no-permission");
             return;
@@ -172,7 +208,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
                     prompt,
                     plugin.getPluginConfig(),
-                    template -> VarSubstitutor.resolve(player, template));
+                    template -> VarSubstitutor.resolve(player, template),
+                    ContextVariables.capture(player));
             if (!resolved.usable()) {
                 String detail = resolved.text().isBlank() ? "empty prompt" : "prompt is longer than max-prompt-length";
                 messages.send(sender, "command.test-fail", testPlaceholders(0L, detail));
@@ -213,6 +250,17 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.prompts-header", Map.of("count", Integer.toString(ids.size())));
         for (String id : ids) {
             messages.send(sender, "command.prompts-line", Map.of("id", id));
+        }
+    }
+
+    private static boolean ownsRegion(Player player) {
+        try {
+            if (Bukkit.getServer() == null) {
+                return true;
+            }
+            return Bukkit.isOwnedByCurrentRegion(player);
+        } catch (Throwable ignored) {
+            return true;
         }
     }
 

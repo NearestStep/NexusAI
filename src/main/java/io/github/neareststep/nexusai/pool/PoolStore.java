@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.config.ConfigVersions;
+import io.github.neareststep.nexusai.config.YamlStrings;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -9,7 +11,6 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -71,9 +72,12 @@ public final class PoolStore {
                     continue;
                 }
                 String prompt = String.valueOf(promptValue);
-                Integer limit = limits.get(prompt);
+                Object formatValue = row.get("format");
+                String format = formatValue == null ? null : String.valueOf(formatValue);
+                String memory = PoolKeys.memory(format, prompt);
+                Integer limit = limits.get(memory);
                 if (limit == null && dynamicLimits != null) {
-                    limit = dynamicLimits.apply(prompt);
+                    limit = dynamicLimits.apply(memory);
                 }
                 if (limit == null) {
                     continue;
@@ -82,7 +86,7 @@ public final class PoolStore {
                 if (answers.size() > limit) {
                     answers = new ArrayList<>(answers.subList(0, limit));
                 }
-                pool.replace(prompt, answers);
+                pool.replace(memory, answers);
             }
         } catch (RuntimeException e) {
             logger.log(Level.WARNING, "Failed to load answer pool from " + file.getName(), e);
@@ -142,8 +146,10 @@ public final class PoolStore {
         }
         synchronized (ioLock) {
             try {
-                YamlConfiguration yaml = new YamlConfiguration();
-                List<Map<String, Object>> rows = new ArrayList<>();
+                StringBuilder yaml = new StringBuilder();
+                yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
+                yaml.append("pools:\n");
+                boolean any = false;
                 for (Map.Entry<String, Integer> entry : limits.entrySet()) {
                     List<String> answers = pool.copy(entry.getKey());
                     int limit = Math.max(0, entry.getValue());
@@ -153,18 +159,28 @@ public final class PoolStore {
                     if (answers.isEmpty()) {
                         continue;
                     }
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("prompt", entry.getKey());
-                    row.put("answers", answers);
-                    rows.add(row);
+                    any = true;
+                    PoolKeys.Parsed parsed = PoolKeys.parse(entry.getKey());
+                    yaml.append("  - prompt: ").append(YamlStrings.quote(parsed.prompt())).append('\n');
+                    if (!io.github.neareststep.nexusai.config.FormatPresets.SIMPLE.equals(parsed.format())) {
+                        yaml.append("    format: ").append(YamlStrings.quote(parsed.format())).append('\n');
+                    }
+                    yaml.append("    answers:\n");
+                    for (String answer : answers) {
+                        yaml.append("      - ").append(YamlStrings.quote(answer)).append('\n');
+                    }
                 }
-                yaml.set("pools", rows);
+                if (!any) {
+                    yaml.setLength(0);
+                    yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
+                    yaml.append("pools: []\n");
+                }
                 File parent = file.getParentFile();
                 if (parent != null) {
                     parent.mkdirs();
                 }
                 File temporary = new File(parent == null ? new File(".") : parent, file.getName() + ".tmp");
-                yaml.save(temporary);
+                java.nio.file.Files.writeString(temporary.toPath(), yaml.toString(), java.nio.charset.StandardCharsets.UTF_8);
                 moveIntoPlace(temporary);
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Failed to save answer pool to " + file.getName(), e);

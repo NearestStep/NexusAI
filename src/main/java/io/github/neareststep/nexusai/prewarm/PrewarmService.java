@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
@@ -98,7 +99,10 @@ public final class PrewarmService {
                 continue;
             }
             String prompt = template.replace("{player}", playerName);
-            warmText(new Prepared(prompt, GenerationOverrides.none(), null));
+            if (ContextVariables.usesBuiltIn(prompt, java.util.Set.of())) {
+                continue;
+            }
+            warmText(new Prepared(prompt, GenerationOverrides.none().withFormat(config.defaultFormatId()), null));
         }
     }
 
@@ -120,7 +124,10 @@ public final class PrewarmService {
             if (prepared == null) {
                 continue;
             }
-            String key = httpClient.cacheKey(prepared.overrides().model(config.getModel()), prepared.text());
+            String key = httpClient.cacheKey(
+                    prepared.overrides().model(config.getModel()),
+                    prepared.text(),
+                    prepared.overrides().formatOr(config.defaultFormatId()));
             if (cache.isFresh(key)) {
                 continue;
             }
@@ -139,12 +146,14 @@ public final class PrewarmService {
                 return null;
             }
             text = prompt.render(value -> value);
-            overrides = prompt.overrides();
+            String format = prompt.format() == null ? config.defaultFormatId() : config.normalizeFormat(prompt.format());
+            overrides = prompt.overrides().withFormat(format);
             ttl = prompt.ttl();
         } else {
             text = configured;
+            overrides = GenerationOverrides.none().withFormat(config.defaultFormatId());
         }
-        if (text == null || text.isBlank() || text.contains("{player}")) {
+        if (text == null || text.isBlank() || ContextVariables.usesBuiltIn(text, java.util.Set.of())) {
             return null;
         }
         return new Prepared(text, overrides, ttl);

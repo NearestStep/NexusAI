@@ -120,6 +120,7 @@ public final class PoolService {
     private void replenish(String configuredPrompt, String poolKey) {
         Objects.requireNonNull(configuredPrompt, "configuredPrompt");
         Objects.requireNonNull(poolKey, "poolKey");
+        String memory = memoryKey(configuredPrompt, poolKey);
         if (!running || !config.isPoolEnabled() || !config.canSendRequests()) {
             return;
         }
@@ -128,7 +129,7 @@ public final class PoolService {
             return;
         }
         int duplicateLimit = Math.max(8, entry.size() * 4);
-        AtomicInteger strikes = duplicateStrikes.get(poolKey);
+        AtomicInteger strikes = duplicateStrikes.get(memory);
         if (strikes != null && strikes.get() >= duplicateLimit) {
             return;
         }
@@ -137,12 +138,12 @@ public final class PoolService {
             return;
         }
 
-        AtomicBoolean flag = replenishing.computeIfAbsent(poolKey, ignored -> new AtomicBoolean(false));
+        AtomicBoolean flag = replenishing.computeIfAbsent(memory, ignored -> new AtomicBoolean(false));
         if (!flag.compareAndSet(false, true)) {
             return;
         }
 
-        int needed = entry.size() - pool.size(poolKey);
+        int needed = entry.size() - pool.size(memory);
         if (needed <= 0) {
             flag.set(false);
             return;
@@ -159,10 +160,10 @@ public final class PoolService {
                     if (error != null) {
                         logger.log(Level.FINE, "Pool replenish failed for prompt", error);
                     } else if (answer != null && !answer.isBlank()) {
-                        if (pool.add(poolKey, answer, isPersonalizedTemplate(answer, entry))) {
+                        if (pool.add(memory, answer, isPersonalizedTemplate(answer, entry))) {
                             storedUnique.set(true);
-                            duplicateStrikes.remove(poolKey);
-                            duplicateLimitLogged.remove(poolKey);
+                            duplicateStrikes.remove(memory);
+                            duplicateLimitLogged.remove(memory);
                             store.markDirty(pool, limits());
                         } else {
                             duplicates.incrementAndGet();
@@ -184,7 +185,7 @@ public final class PoolService {
                         logger.log(Level.WARNING, "Pool replenish completion failed", error);
                     }
                     flag.set(false);
-                    if (!running || pool.size(poolKey) >= entry.size()) {
+                    if (!running || pool.size(memory) >= entry.size()) {
                         return;
                     }
                     if (httpClient.isAdmissionBlocked(poolKey)) {
@@ -199,10 +200,10 @@ public final class PoolService {
                         scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
                         return;
                     }
-                    int strikeCount = duplicateStrikes.computeIfAbsent(poolKey, key -> new AtomicInteger()).addAndGet(repeated);
+                    int strikeCount = duplicateStrikes.computeIfAbsent(memory, key -> new AtomicInteger()).addAndGet(repeated);
                     int limit = Math.max(8, entry.size() * 4);
                     if (strikeCount >= limit) {
-                        if (duplicateLimitLogged.putIfAbsent(poolKey, Boolean.TRUE) == null) {
+                        if (duplicateLimitLogged.putIfAbsent(memory, Boolean.TRUE) == null) {
                             logger.warning("Stopped refilling pool for \"" + poolKey + "\" after " + strikeCount
                                     + " duplicate answers. A different answer or /nai reload will try again.");
                         }
@@ -233,10 +234,20 @@ public final class PoolService {
         PoolEntry entry = entriesByPrompt.get(configuredPrompt);
         GenerationOverrides entryOverrides = entry == null ? GenerationOverrides.none() : entry.overrides();
         NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
-        if (named == null) {
-            return entryOverrides;
+        GenerationOverrides merged = named == null ? entryOverrides : named.overrides().overlay(entryOverrides);
+        return merged.withFormat(formatId(configuredPrompt));
+    }
+
+    private String formatId(String configuredPrompt) {
+        NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
+        if (named != null && named.format() != null) {
+            return config.normalizeFormat(named.format());
         }
-        return named.overrides().overlay(entryOverrides);
+        return config.defaultFormatId();
+    }
+
+    private String memoryKey(String configuredPrompt, String text) {
+        return PoolKeys.memory(formatId(configuredPrompt), text);
     }
 
     private void scheduleRetry(String configuredPrompt, String poolKey, long delayMillis) {
@@ -271,7 +282,7 @@ public final class PoolService {
             return;
         }
         store.markDirty(pool, limits());
-        if (pool.size(poolKey) < entry.minThreshold()) {
+        if (pool.size(memoryKey(configuredPrompt, poolKey)) < entry.minThreshold()) {
             replenish(configuredPrompt, poolKey);
         }
     }
@@ -304,17 +315,22 @@ public final class PoolService {
         for (PoolEntry entry : entriesByPrompt.values()) {
             String text = catalog.staticText(entry.prompt());
             if (text != null) {
-                limits.put(text, entry.size());
+                limits.put(memoryKey(entry.prompt(), text), entry.size());
             }
         }
         return limits;
     }
 
     private Integer dynamicLimit(String saved) {
+        PoolKeys.Parsed parsed = PoolKeys.parse(saved);
         PoolEntry match = null;
         for (PoolEntry entry : entriesByPrompt.values()) {
             NamedPrompt named = catalog.find(entry.prompt()).orElse(null);
-            if (named == null || !named.playerDependent() || !named.matchesResolved(saved)) {
+            if (named == null || !named.playerDependent() || !named.matchesResolved(parsed.prompt())) {
+                continue;
+            }
+            String expected = named.format() == null ? config.defaultFormatId() : config.normalizeFormat(named.format());
+            if (!expected.equals(io.github.neareststep.nexusai.config.FormatPresets.normalize(parsed.format()))) {
                 continue;
             }
             if (match != null) {

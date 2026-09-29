@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.0-SNAPSHOT
+
+Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. On startup the plugin migrates a missing `config-version` (0.6.0) to 1 and writes `<file>.bak` first.
+
+### Config migration
+
+- `config-version` is written to `config.yml`, `prompts.yml`, `pool.yml`, and `usage.yml`.
+- Ordered migrations run from any older version. A backup is `<file>.bak`, or `<file>.bak.<timestamp>` when that file already exists. User values are not removed. The log says what moved and never prints a full key.
+
+### Providers and model queue
+
+- `providers.<id>.type`, `url`, and `api-key` replace the single `api.key` / `api.base-url` pair. `type` is `openai-compatible` or `gemini` (Gemini still uses its OpenAI-compatible URL). `api-key` is a string or a list. `${ENV_VAR}` works in `url` and `api-key`. Keys rotate round-robin; HTTP 401 tries the next key; HTTP 401/429 skip that key until the cooldown ends.
+- `model-queue` is an ordered list of `provider`, `model`, and optional `daily-request-limit`. Requests use the first available row and move on when header remaining budget hits `model-queue-remaining-threshold`, the daily cap is reached, the provider returns 429, or the call errors or times out. The row comes back at the header reset time, `Retry-After`, or server-local midnight for a daily cap. A prompt `model:` override still selects the model.
+- Migration copies `api.provider`, `api.base-url`, and `api.key` into `providers` and builds a one-entry queue from `api.provider` and `api.model`. `NEXUSAI_API_KEY` still overrides one literal active key.
+- Daily counters per provider and per queue entry persist in `usage.yml` and reset at server-local midnight. The log warns at 80%. If every entry is exhausted, placeholders and the pool serve fallback instead of calling the API.
+- `/nai status` shows each queue entry: requests today / limit, header remaining when known, and `ACTIVE`, `AVAILABLE`, `LIMIT REACHED (x/y)`, or `COOLDOWN until …`. API keys are masked to the last 4 characters.
+
+### Prompts
+
+- `{player}`, `{world}`, `{biome}`, `{time}`, and `{weather}` work without PlaceholderAPI and are read on the player's region thread. `{time}` is `day` or `night` plus `HH:MM`. `{weather}` is `clear`, `rain`, or `thunder`. A `vars:` entry of the same name wins.
+- `format:` accepts `simple`, `chat`, `gui`, `name`, `hologram`, `actionbar`, and `bossbar`. Instruction text and numeric limits live under `formats` in `config.yml`. The instruction is appended at the end of the system prompt. The server then strips markdown, wraps hologram lines, and truncates on a word boundary. The format is part of the cache key. It is part of the pool key except for `simple`, so existing pools keep their answers. `formats.default` is optional and defaults to `simple`.
+
+### Pool files and diagnostics
+
+- `pool.yml` answers are saved as double-quoted strings with no line wrapping. Older unquoted or wrapped files still load.
+- HTTP 401/403 are described as an invalid or unauthorized key. HTTP 429 is a provider rate limit. "Paused" is logged only when the provider is actually paused.
+
 ## 0.6.0-SNAPSHOT
 
 Named prompts and Folia. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml` values are kept. On first startup the plugin creates `plugins/NexusAI/prompts.yml` from the commented default and does not overwrite it later.

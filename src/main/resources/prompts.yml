@@ -1,4 +1,5 @@
 # Named prompts for NexusAI.
+config-version: 1
 #
 # Placeholders:
 #   %ainexus_cached_<id>%     shared TTL cache (holograms, TAB, scoreboards)
@@ -14,6 +15,14 @@
 # PlaceholderAPI placeholders; those are resolved for the player who is looking.
 # The cache and the pool are keyed by that resolved text, so one player's values are never
 # reused for someone else. A prompt with no player-specific vars stays shared.
+#
+# These tokens work without PlaceholderAPI. They are read on the player's region thread.
+# A vars: entry of the same name wins: {player} {world} {biome} {time} {weather}
+# {time} looks like "day 14:00" or "night 00:00". {weather} is clear, rain, or thunder.
+#
+# format: simple, chat, gui, name, hologram, actionbar, or bossbar.
+# Omit it to use formats.default from config.yml. The format is part of the cache key
+# and, except for the default simple format, part of the pool key.
 #
 # Optional keys inherit config.yml when omitted:
 #   ttl                 seconds for %ainexus_cached_<id>% and prewarm
@@ -35,7 +44,12 @@
 #
 # welcome:
 #   prompt:
-#     - "Write a one-line welcome for a player in the {biome} biome."
+#     - "Write a one-line welcome for {player} in the {biome} biome."
 #     - "Do not use markdown."
+#   format: chat
 #   vars:
 #     biome: "%player_biome%"
+#
+# sign_name:
+#   prompt: "A short shop name for {player}"
+#   format: name
