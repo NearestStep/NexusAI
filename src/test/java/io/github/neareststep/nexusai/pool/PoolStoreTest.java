@@ -62,6 +62,25 @@ class PoolStoreTest {
     }
 
     @Test
+    void multilinePromptRoundTrips() throws Exception {
+        File file = Files.createTempDirectory("nexusai-pool-lines").resolve("pool.yml").toFile();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        try {
+            PoolStore store = new PoolStore(file, scheduler, Duration.ofMillis(200), Logger.getLogger("pool-store"), true);
+            String prompt = "Stay fed\nSleep";
+            AiPool source = new AiPool();
+            source.add(prompt, "one");
+            store.saveNow(source, Map.of(prompt, 2));
+
+            AiPool loaded = new AiPool();
+            store.load(loaded, Map.of(prompt, 2));
+            assertEquals(List.of("one"), loaded.copy(prompt));
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
     void disabledStoreDoesNotCreateAFile() throws Exception {
         File file = Files.createTempDirectory("nexusai-pool-off").resolve("pool.yml").toFile();
         PoolStore store = PoolStore.disabled();

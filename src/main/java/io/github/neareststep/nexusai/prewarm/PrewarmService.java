@@ -1,9 +1,16 @@
 package io.github.neareststep.nexusai.prewarm;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
+
+import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -20,6 +27,7 @@ public final class PrewarmService {
     private final AiHttpClient httpClient;
     private final ScheduledExecutorService scheduler;
     private final Logger logger;
+    private final PromptCatalog catalog;
     private volatile ScheduledFuture<?> refreshTask;
     private volatile boolean running;
 
@@ -30,11 +38,23 @@ public final class PrewarmService {
             ScheduledExecutorService scheduler,
             Logger logger
     ) {
+        this(config, cache, httpClient, scheduler, logger, PromptCatalog.empty());
+    }
+
+    public PrewarmService(
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            ScheduledExecutorService scheduler,
+            Logger logger,
+            PromptCatalog catalog
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.catalog = catalog == null ? PromptCatalog.empty() : catalog;
     }
 
     public void start() {
@@ -42,8 +62,17 @@ public final class PrewarmService {
         if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
-        for (String prompt : config.getPrewarmPrompts()) {
-            warmPrompt(prompt);
+        for (String configured : config.getPrewarmPrompts()) {
+            Optional<NamedPrompt> named = catalog.find(configured);
+            if (named.isPresent() && named.get().playerDependent()) {
+                logger.info("Prewarm skips \"" + configured
+                        + "\" until a player opens it, because its vars use PlaceholderAPI.");
+                continue;
+            }
+            Prepared prepared = prepare(configured);
+            if (prepared != null) {
+                warmText(prepared);
+            }
         }
     }
 
@@ -61,8 +90,15 @@ public final class PrewarmService {
             return;
         }
         for (String template : config.getPrewarmPrompts()) {
+            if (catalog.find(template).isPresent()) {
+                Prepared prepared = prepare(template);
+                if (prepared != null) {
+                    warmText(prepared);
+                }
+                continue;
+            }
             String prompt = template.replace("{player}", playerName);
-            warmPrompt(prompt);
+            warmText(new Prepared(prompt, GenerationOverrides.none(), null));
         }
     }
 
@@ -79,29 +115,56 @@ public final class PrewarmService {
         if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
             return;
         }
-        for (String prompt : config.getPrewarmPrompts()) {
-            if (prompt.contains("{player}")) {
+        for (String configured : config.getPrewarmPrompts()) {
+            Prepared prepared = prepare(configured);
+            if (prepared == null) {
                 continue;
             }
-            String key = httpClient.cacheKey(prompt);
+            String key = httpClient.cacheKey(prepared.overrides().model(config.getModel()), prepared.text());
             if (cache.isFresh(key)) {
                 continue;
             }
-            warmPrompt(prompt);
+            warmText(prepared);
         }
     }
 
-    private void warmPrompt(String prompt) {
-        if (prompt == null || prompt.isBlank() || prompt.contains("{player}")) {
-            return;
-        }
-        if (httpClient.isAdmissionBlocked(prompt)) {
-            return;
-        }
-        httpClient.requestAsync(prompt).whenComplete((ignored, error) -> {
-            if (error != null) {
-                logger.log(Level.FINE, "Prewarm request failed", error);
+    private Prepared prepare(String configured) {
+        Optional<NamedPrompt> named = catalog.find(configured);
+        String text;
+        GenerationOverrides overrides = GenerationOverrides.none();
+        Duration ttl = null;
+        if (named.isPresent()) {
+            NamedPrompt prompt = named.get();
+            if (prompt.playerDependent()) {
+                return null;
             }
-        });
+            text = prompt.render(value -> value);
+            overrides = prompt.overrides();
+            ttl = prompt.ttl();
+        } else {
+            text = configured;
+        }
+        if (text == null || text.isBlank() || text.contains("{player}")) {
+            return null;
+        }
+        return new Prepared(text, overrides, ttl);
+    }
+
+    private void warmText(Prepared prepared) {
+        if (httpClient.isAdmissionBlocked(prepared.text())) {
+            return;
+        }
+        CompletionSupport.onComplete(
+                httpClient.requestAsync(prepared.text(), null, prepared.overrides(), prepared.ttl()),
+                logger,
+                "Prewarm request failed",
+                (ignored, error) -> {
+                    if (error != null) {
+                        logger.log(Level.FINE, "Prewarm request failed", error);
+                    }
+                });
+    }
+
+    private record Prepared(String text, GenerationOverrides overrides, Duration ttl) {
     }
 }

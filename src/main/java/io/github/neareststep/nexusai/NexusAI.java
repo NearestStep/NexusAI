@@ -12,10 +12,12 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
+import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -30,6 +32,8 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
@@ -57,6 +61,7 @@ public final class NexusAI extends JavaPlugin {
     private ScheduledExecutorService scheduler;
     private HttpClient sharedHttpClient;
     private AiPlaceholderExpansion placeholderExpansion;
+    private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
     private boolean loggedMissingKey;
     private boolean loggedMissingPapi;
 
@@ -71,6 +76,7 @@ public final class NexusAI extends JavaPlugin {
         }
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
+        loadPrompts();
         logCredentialState();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
@@ -97,15 +103,22 @@ public final class NexusAI extends JavaPlugin {
     }
 
     /**
-     * Reloads config.yml + locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
+     * Reloads config.yml, prompts.yml, and the locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
      */
     public void reloadPlugin() {
+        PromptCatalog.Parsed parsed = readPrompts();
+        if (!parsed.valid()) {
+            throw new IllegalStateException(
+                    "prompts.yml has a syntax error. The file and the loaded prompts were left unchanged. "
+                            + parsed.error());
+        }
         if (!mergeMissingConfig()) {
             throw new IllegalStateException(
                     "config.yml has a syntax error. The file and the loaded configuration were left unchanged.");
         }
         reloadConfig();
         pluginConfig.reload(getConfig());
+        applyPrompts(parsed);
         messageService.reload(pluginConfig.getLocale());
 
         stopRuntimeServices(true);
@@ -113,7 +126,8 @@ public final class NexusAI extends JavaPlugin {
         refreshPlaceholder();
         logCredentialState();
 
-        getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale() + ").");
+        getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
+                + ", prompts=" + promptCatalog.ids().size() + ").");
     }
 
     private void startRuntimeServices() {
@@ -139,9 +153,10 @@ public final class NexusAI extends JavaPlugin {
         );
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
-                (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS));
+                (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS),
+                promptCatalog);
         this.prewarmService = new PrewarmService(
-                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger());
+                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger(), promptCatalog);
 
         poolService.start();
         prewarmService.start();
@@ -164,7 +179,7 @@ public final class NexusAI extends JavaPlugin {
 
     private void refreshPlaceholder() {
         if (placeholderExpansion != null) {
-            placeholderExpansion.bind(pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
+            placeholderExpansion.bind(pluginConfig, aiCache, aiHttpClient, aiPool, poolService, promptCatalog);
             return;
         }
         registerPlaceholderExpansion();
@@ -180,7 +195,7 @@ public final class NexusAI extends JavaPlugin {
         }
         loggedMissingPapi = false;
         this.placeholderExpansion = new AiPlaceholderExpansion(
-                this, pluginConfig, aiCache, aiHttpClient, aiPool, poolService);
+                this, pluginConfig, aiCache, aiHttpClient, aiPool, poolService, promptCatalog);
         if (placeholderExpansion.register()) {
             getLogger().info("Registered PlaceholderAPI expansion "
                     + "%ainexus_generate_<prompt>% / %ainexus_cached_<prompt>%");
@@ -372,5 +387,53 @@ public final class NexusAI extends JavaPlugin {
 
     public ExecutorService getHttpExecutor() {
         return httpExecutor;
+    }
+
+    public PromptCatalog getPromptCatalog() {
+        return promptCatalog;
+    }
+
+    private void loadPrompts() {
+        PromptCatalog.Parsed parsed = readPrompts();
+        if (!parsed.valid()) {
+            getLogger().warning("prompts.yml has a syntax error (" + parsed.error()
+                    + "). Named prompts are disabled until the file is fixed. Literal placeholders still work.");
+            this.promptCatalog = PromptCatalog.empty();
+            return;
+        }
+        applyPrompts(parsed);
+    }
+
+    private void applyPrompts(PromptCatalog.Parsed parsed) {
+        this.promptCatalog = parsed.catalog();
+        for (String warning : parsed.warnings()) {
+            getLogger().warning(warning);
+        }
+        List<String> poolPrompts = new ArrayList<>();
+        for (PoolEntry entry : pluginConfig.getPoolEntries()) {
+            poolPrompts.add(entry.prompt());
+        }
+        for (String warning : promptCatalog.unknownIdReferences("pool.entries", poolPrompts)) {
+            getLogger().warning(warning);
+        }
+        for (String warning : promptCatalog.unknownIdReferences("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private PromptCatalog.Parsed readPrompts() {
+        File file = new File(getDataFolder(), "prompts.yml");
+        if (!file.exists()) {
+            saveResource("prompts.yml", false);
+        }
+        if (!file.isFile()) {
+            return PromptCatalog.Parsed.invalid("prompts.yml is missing");
+        }
+        try {
+            return PromptCatalog.parse(Files.readString(file.toPath(), StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Failed to read prompts.yml", e);
+            return PromptCatalog.Parsed.invalid(e.getMessage());
+        }
     }
 }

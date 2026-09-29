@@ -1,9 +1,13 @@
 package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -11,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,6 +26,7 @@ import java.util.logging.Logger;
 
 /**
  * Keeps configured {@link AiPool} queues topped up with unique AI answers.
+ * Named prompts are stored under the resolved text so player-specific vars do not share a queue.
  */
 public final class PoolService {
 
@@ -30,10 +36,12 @@ public final class PoolService {
     private final Logger logger;
     private final PoolStore store;
     private final BiConsumer<Long, Runnable> retry;
+    private final PromptCatalog catalog;
     private final ConcurrentHashMap<String, AtomicBoolean> replenishing = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> retryPending = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> duplicateStrikes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> duplicateLimitLogged = new ConcurrentHashMap<>();
+    private final Set<String> ambiguousLogged = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, PoolEntry> entriesByPrompt = new ConcurrentHashMap<>();
     private volatile boolean running;
 
@@ -56,12 +64,25 @@ public final class PoolService {
             PoolStore store,
             BiConsumer<Long, Runnable> retry
     ) {
+        this(config, pool, httpClient, logger, store, retry, PromptCatalog.empty());
+    }
+
+    public PoolService(
+            PluginConfig config,
+            AiPool pool,
+            AiHttpClient httpClient,
+            Logger logger,
+            PoolStore store,
+            BiConsumer<Long, Runnable> retry,
+            PromptCatalog catalog
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.pool = Objects.requireNonNull(pool, "pool");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.store = store == null ? PoolStore.disabled() : store;
         this.retry = retry;
+        this.catalog = catalog == null ? PromptCatalog.empty() : catalog;
         for (PoolEntry entry : config.getPoolEntries()) {
             entriesByPrompt.put(entry.prompt(), entry);
         }
@@ -70,41 +91,58 @@ public final class PoolService {
     public void start() {
         running = true;
         if (config.isPoolEnabled()) {
-            store.load(pool, limits());
+            warnStaleNamedRows();
+            store.load(pool, staticLimits(), this::dynamicLimit);
         }
         if (!config.isPoolEnabled() || !config.canSendRequests()) {
             return;
         }
         for (PoolEntry entry : config.getPoolEntries()) {
-            replenish(entry.prompt());
+            String text = catalog.staticText(entry.prompt());
+            if (text == null) {
+                logger.info("Pool entry \"" + entry.prompt()
+                        + "\" uses player-specific prompt vars and refills when a player reads it.");
+                continue;
+            }
+            replenish(entry.prompt(), text);
         }
     }
 
     public void replenish(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
+        String text = catalog.staticText(prompt);
+        if (text == null) {
+            return;
+        }
+        replenish(prompt, text);
+    }
+
+    private void replenish(String configuredPrompt, String poolKey) {
+        Objects.requireNonNull(configuredPrompt, "configuredPrompt");
+        Objects.requireNonNull(poolKey, "poolKey");
         if (!running || !config.isPoolEnabled() || !config.canSendRequests()) {
             return;
         }
-        PoolEntry entry = entriesByPrompt.get(prompt);
+        PoolEntry entry = entriesByPrompt.get(configuredPrompt);
         if (entry == null) {
             return;
         }
         int duplicateLimit = Math.max(8, entry.size() * 4);
-        AtomicInteger strikes = duplicateStrikes.get(prompt);
+        AtomicInteger strikes = duplicateStrikes.get(poolKey);
         if (strikes != null && strikes.get() >= duplicateLimit) {
             return;
         }
-        if (httpClient.isAdmissionBlocked(prompt)) {
-            scheduleRetry(prompt, httpClient.admissionDelayMillis(prompt) + 25L);
+        if (httpClient.isAdmissionBlocked(poolKey)) {
+            scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
             return;
         }
 
-        AtomicBoolean flag = replenishing.computeIfAbsent(prompt, ignored -> new AtomicBoolean(false));
+        AtomicBoolean flag = replenishing.computeIfAbsent(poolKey, ignored -> new AtomicBoolean(false));
         if (!flag.compareAndSet(false, true)) {
             return;
         }
 
-        int needed = entry.size() - pool.size(prompt);
+        int needed = entry.size() - pool.size(poolKey);
         if (needed <= 0) {
             flag.set(false);
             return;
@@ -113,33 +151,44 @@ public final class PoolService {
         AtomicInteger duplicates = new AtomicInteger();
         AtomicBoolean storedUnique = new AtomicBoolean();
         List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
-        String httpPrompt = VarSubstitutor.appendVarsRules(prompt, entry.vars());
+        String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
+        GenerationOverrides overrides = overridesFor(configuredPrompt);
         for (int i = 0; i < needed; i++) {
-            jobs.add(httpClient.generateFreshAsync(httpPrompt, prompt, entry.overrides()).handle((answer, error) -> {
-                if (error != null) {
-                    logger.log(Level.FINE, "Pool replenish failed for prompt", error);
-                } else if (answer != null && !answer.isBlank()) {
-                    if (pool.add(prompt, answer, isPersonalizedTemplate(answer, entry))) {
-                        storedUnique.set(true);
-                        duplicateStrikes.remove(prompt);
-                        duplicateLimitLogged.remove(prompt);
-                        store.markDirty(pool, limits());
-                    } else {
-                        duplicates.incrementAndGet();
+            jobs.add(httpClient.generateFreshAsync(httpPrompt, poolKey, overrides).handle((answer, error) -> {
+                try {
+                    if (error != null) {
+                        logger.log(Level.FINE, "Pool replenish failed for prompt", error);
+                    } else if (answer != null && !answer.isBlank()) {
+                        if (pool.add(poolKey, answer, isPersonalizedTemplate(answer, entry))) {
+                            storedUnique.set(true);
+                            duplicateStrikes.remove(poolKey);
+                            duplicateLimitLogged.remove(poolKey);
+                            store.markDirty(pool, limits());
+                        } else {
+                            duplicates.incrementAndGet();
+                        }
                     }
+                } catch (Throwable thrown) {
+                    logger.log(Level.WARNING, "Pool replenish handler failed", thrown);
                 }
                 return null;
             }));
         }
 
-        CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new))
-                .whenComplete((ignored, error) -> {
+        CompletionSupport.onComplete(
+                CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new)),
+                logger,
+                "Pool replenish completion failed",
+                (ignored, error) -> {
+                    if (error != null) {
+                        logger.log(Level.WARNING, "Pool replenish completion failed", error);
+                    }
                     flag.set(false);
-                    if (!running || pool.size(prompt) >= entry.size()) {
+                    if (!running || pool.size(poolKey) >= entry.size()) {
                         return;
                     }
-                    if (httpClient.isAdmissionBlocked(prompt)) {
-                        scheduleRetry(prompt, httpClient.admissionDelayMillis(prompt) + 25L);
+                    if (httpClient.isAdmissionBlocked(poolKey)) {
+                        scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
                         return;
                     }
                     int repeated = duplicates.get();
@@ -147,19 +196,19 @@ public final class PoolService {
                         return;
                     }
                     if (storedUnique.get()) {
-                        scheduleRetry(prompt, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+                        scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
                         return;
                     }
-                    int strikeCount = duplicateStrikes.computeIfAbsent(prompt, key -> new AtomicInteger()).addAndGet(repeated);
+                    int strikeCount = duplicateStrikes.computeIfAbsent(poolKey, key -> new AtomicInteger()).addAndGet(repeated);
                     int limit = Math.max(8, entry.size() * 4);
                     if (strikeCount >= limit) {
-                        if (duplicateLimitLogged.putIfAbsent(prompt, Boolean.TRUE) == null) {
-                            logger.warning("Stopped refilling pool for \"" + prompt + "\" after " + strikeCount
+                        if (duplicateLimitLogged.putIfAbsent(poolKey, Boolean.TRUE) == null) {
+                            logger.warning("Stopped refilling pool for \"" + poolKey + "\" after " + strikeCount
                                     + " duplicate answers. A different answer or /nai reload will try again.");
                         }
                         return;
                     }
-                    scheduleRetry(prompt, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+                    scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
                 });
     }
 
@@ -180,31 +229,50 @@ public final class PoolService {
         return false;
     }
 
-    private void scheduleRetry(String prompt, long delayMillis) {
+    private GenerationOverrides overridesFor(String configuredPrompt) {
+        PoolEntry entry = entriesByPrompt.get(configuredPrompt);
+        GenerationOverrides entryOverrides = entry == null ? GenerationOverrides.none() : entry.overrides();
+        NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
+        if (named == null) {
+            return entryOverrides;
+        }
+        return named.overrides().overlay(entryOverrides);
+    }
+
+    private void scheduleRetry(String configuredPrompt, String poolKey, long delayMillis) {
         if (retry == null || !running) {
             return;
         }
-        AtomicBoolean pending = retryPending.computeIfAbsent(prompt, ignored -> new AtomicBoolean());
+        AtomicBoolean pending = retryPending.computeIfAbsent(poolKey, ignored -> new AtomicBoolean());
         if (!pending.compareAndSet(false, true)) {
             return;
         }
         retry.accept(Math.max(50L, delayMillis), () -> {
             pending.set(false);
             if (running) {
-                replenish(prompt);
+                replenish(configuredPrompt, poolKey);
             }
         });
     }
 
     public void onConsume(String prompt) {
-        Objects.requireNonNull(prompt, "prompt");
-        PoolEntry entry = entriesByPrompt.get(prompt);
+        onConsume(prompt, prompt);
+    }
+
+    /**
+     * @param configuredPrompt pool entry prompt, which may be a named-prompt id
+     * @param poolKey          resolved text actually stored in the pool
+     */
+    public void onConsume(String configuredPrompt, String poolKey) {
+        Objects.requireNonNull(configuredPrompt, "configuredPrompt");
+        Objects.requireNonNull(poolKey, "poolKey");
+        PoolEntry entry = entriesByPrompt.get(configuredPrompt);
         if (entry == null) {
             return;
         }
         store.markDirty(pool, limits());
-        if (pool.size(prompt) < entry.minThreshold()) {
-            replenish(prompt);
+        if (pool.size(poolKey) < entry.minThreshold()) {
+            replenish(configuredPrompt, poolKey);
         }
     }
 
@@ -218,10 +286,60 @@ public final class PoolService {
         store.flush(pool, limits());
     }
 
-    private Map<String, Integer> limits() {
+    private void warnStaleNamedRows() {
+        for (String saved : store.savedPrompts()) {
+            if (catalog.find(saved).isEmpty()) {
+                continue;
+            }
+            String resolved = catalog.staticText(saved);
+            if (resolved == null || !saved.equals(resolved)) {
+                logger.warning("pool.yml saved answers under the prompt id \"" + saved
+                        + "\". Named prompts are stored under the resolved text, so those rows were not loaded.");
+            }
+        }
+    }
+
+    private Map<String, Integer> staticLimits() {
         Map<String, Integer> limits = new LinkedHashMap<>();
         for (PoolEntry entry : entriesByPrompt.values()) {
-            limits.put(entry.prompt(), entry.size());
+            String text = catalog.staticText(entry.prompt());
+            if (text != null) {
+                limits.put(text, entry.size());
+            }
+        }
+        return limits;
+    }
+
+    private Integer dynamicLimit(String saved) {
+        PoolEntry match = null;
+        for (PoolEntry entry : entriesByPrompt.values()) {
+            NamedPrompt named = catalog.find(entry.prompt()).orElse(null);
+            if (named == null || !named.playerDependent() || !named.matchesResolved(saved)) {
+                continue;
+            }
+            if (match != null) {
+                String key = match.prompt() + "\n" + entry.prompt();
+                if (ambiguousLogged.add(key)) {
+                    logger.warning("Saved pool prompt matches both \"" + match.prompt() + "\" and \""
+                            + entry.prompt() + "\". It was kept for \"" + match.prompt() + "\".");
+                }
+                break;
+            }
+            match = entry;
+        }
+        return match == null ? null : match.size();
+    }
+
+    private Map<String, Integer> limits() {
+        Map<String, Integer> limits = new LinkedHashMap<>(staticLimits());
+        for (String live : pool.prompts()) {
+            if (limits.containsKey(live)) {
+                continue;
+            }
+            Integer dynamic = dynamicLimit(live);
+            if (dynamic != null) {
+                limits.put(live, dynamic);
+            }
         }
         return limits;
     }

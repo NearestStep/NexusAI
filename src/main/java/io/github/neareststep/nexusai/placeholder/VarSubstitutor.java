@@ -45,7 +45,7 @@ public final class VarSubstitutor {
         return sb.toString();
     }
 
-    static String resolve(Player player, String template) {
+    public static String resolve(Player player, String template) {
         if (template == null || template.isBlank()) {
             return "";
         }

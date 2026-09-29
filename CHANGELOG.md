@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0-SNAPSHOT
+
+Named prompts and Folia. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml` values are kept. On first startup the plugin creates `plugins/NexusAI/prompts.yml` from the commented default and does not overwrite it later.
+
+### Named prompts
+
+- `prompts.yml` maps a short id (`[a-z0-9_-]`) to prompt text. The text may be a string, a YAML block scalar, or a list of lines. A list is joined with newlines.
+- `%ainexus_cached_<id>%` and `%ainexus_generate_<id>%` use that text. If the id is not defined, the placeholder is still sent as a literal prompt.
+- `{token}` in the prompt is filled from that prompt's `vars`. A value may contain PlaceholderAPI placeholders for the viewing player. The cache key and the pool key are the resolved text (and the model), so two players with different values never share an answer. A prompt with no player-specific vars stays shared.
+- Optional per-prompt `ttl`, `fallback`, `max-prompt-length`, `model`, `system-prompt`, `temperature`, and `max-tokens` override the matching `config.yml` settings. Omit them to inherit. A pool entry may set `model` the same way it already sets `system-prompt`, `temperature`, and `max-tokens`. `limits.max-prompt-length` still caps literal placeholder text. It does not cap a prompt stored in `prompts.yml` unless that prompt sets `max-prompt-length`.
+- `pool.entries[].prompt` and `prewarm.prompts` may be an id. A player-specific prompt is not filled until a player reads it. `/nai reload` reloads `prompts.yml`. `/nai prompts` lists ids. `/nai test` tab-completes ids and, when the whole argument is an id, sends that prompt.
+- Load warnings cover an invalid id, an empty prompt, a duplicate id, an unknown setting, an id that collides with another prompt, and an id-shaped pool or prewarm entry that is not defined. Those id-shaped entries are still sent as literal text.
+
+### Folia
+
+- `plugin.yml` sets `folia-supported: true`. Paper, Purpur, and Folia 26.2/26.3 keep one code path.
+- `/nai test` no longer calls `Bukkit.getScheduler()`. The result is delivered with the player's entity scheduler, or the global region scheduler for any other sender. A failure in that async completion is written to the server log.
+
 ## 0.5.1-SNAPSHOT
 
 Replace the published `NexusAI-0.5.0-SNAPSHOT.jar` with this build. Your existing `config.yml` is kept. On startup and `/nai reload`, two new limit keys are inserted if they are missing: `limits.player-requests-per-minute` (default 10) and `limits.player-requests-per-day` (default 200). Server limits stay `requests-per-minute` 30 and `requests-per-day` 1000.
