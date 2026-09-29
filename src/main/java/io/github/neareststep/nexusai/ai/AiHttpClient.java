@@ -298,6 +298,6 @@ public final class AiHttpClient {
     public String cacheKey(String model, String prompt, String format) {
         String effectiveModel = model == null || model.isBlank() ? config.getModel() : model;
         String effectiveFormat = config.normalizeFormat(format);
-        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + prompt;
+        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION + '\u0000' + prompt;
     }
 }

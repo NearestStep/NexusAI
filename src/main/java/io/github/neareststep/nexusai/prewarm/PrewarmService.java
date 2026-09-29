@@ -98,7 +98,7 @@ public final class PrewarmService {
                 }
                 continue;
             }
-            String prompt = template.replace("{player}", playerName);
+            String prompt = template.replace("{player}", io.github.neareststep.nexusai.ai.PlayerInput.wrap(playerName));
             if (ContextVariables.usesBuiltIn(prompt, java.util.Set.of())) {
                 continue;
             }

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.context;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.junit.jupiter.api.Test;
 
@@ -34,12 +35,12 @@ class ContextVariableTest {
         String rendered = prompt.render(template -> {
             throw new AssertionError(template);
         }, Map.of("player", "Steve", "biome", "plains", "weather", "rain"));
-        assertEquals("Hello Steve in hub", rendered);
+        assertEquals("Hello " + PlayerInput.wrap("Steve") + " in " + PlayerInput.wrap("hub"), rendered);
         assertTrue(PromptCatalog.parse("""
                 where:
                   prompt: "You are in {world} during {time} with {weather}"
                 """).catalog().find("where").orElseThrow().playerDependent());
         assertEquals("You are in {world}", ContextVariables.apply("You are in {world}", Set.of(), Map.of()));
-        assertEquals("You are in lobby", ContextVariables.apply("You are in {world}", Set.of("player"), Map.of("world", "lobby")));
+        assertEquals("You are in " + PlayerInput.wrap("lobby"), ContextVariables.apply("You are in {world}", Set.of("player"), Map.of("world", "lobby")));
     }
 }

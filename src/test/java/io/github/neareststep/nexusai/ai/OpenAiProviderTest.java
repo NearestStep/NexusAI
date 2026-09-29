@@ -31,9 +31,11 @@ class OpenAiProviderTest {
         PluginConfig config = config("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
         assertEquals("gpt-4o-mini", json.get("model").asText());
-        assertEquals(1, json.get("messages").size());
-        assertEquals("user", json.get("messages").get(0).get("role").asText());
-        assertEquals("hi", json.get("messages").get(0).get("content").asText());
+        assertEquals(2, json.get("messages").size());
+        assertEquals("system", json.get("messages").get(0).get("role").asText());
+        assertEquals(PlayerInput.GUARD, json.get("messages").get(0).get("content").asText());
+        assertEquals("user", json.get("messages").get(1).get("role").asText());
+        assertEquals("hi", json.get("messages").get(1).get("content").asText());
         assertFalse(json.has("temperature"));
         assertFalse(json.has("max_tokens"));
         assertFalse(json.has("max_completion_tokens"));
@@ -54,7 +56,8 @@ class OpenAiProviderTest {
         GenerationOverrides overrides = GenerationOverrides.of(true, "Pool system", true, 0.0, true, 32);
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", overrides));
         assertEquals("system", json.get("messages").get(0).get("role").asText());
-        assertEquals("Pool system", json.get("messages").get(0).get("content").asText());
+        assertTrue(json.get("messages").get(0).get("content").asText().startsWith("Pool system"));
+        assertTrue(json.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
         assertEquals("user", json.get("messages").get(1).get("role").asText());
         assertEquals(0.0, json.get("temperature").asDouble());
         assertEquals(32, json.get("max_tokens").asInt());
@@ -76,7 +79,8 @@ class OpenAiProviderTest {
         assertTrue(oJson.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR);
         assertFalse(oJson.has("max_tokens"));
         assertFalse(oJson.has("temperature"));
-        assertEquals("system", oJson.get("messages").get(0).get("content").asText());
+        assertTrue(oJson.get("messages").get(0).get("content").asText().startsWith("system"));
+        assertTrue(oJson.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 
@@ -135,7 +136,7 @@ public final class NamedPrompt {
                     String resolved = Objects.requireNonNull(placeholderResolver, "placeholderResolver").apply(value);
                     value = resolved == null ? "" : resolved;
                 }
-                values.put(entry.getKey(), value);
+                values.put(entry.getKey(), PlayerInput.wrap(value));
             }
             rendered = substitute(template, values);
         }

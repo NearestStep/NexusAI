@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.prewarm;
 import io.github.neareststep.nexusai.ai.AiDiagnostics;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RequestGate;
@@ -129,9 +130,11 @@ class PrewarmServiceTest {
 
         service.warmForPlayer("Steve");
 
-        await(() -> "Welcome, Steve".equals(seen.get()), 2, TimeUnit.SECONDS);
-        assertEquals("Welcome, Steve", seen.get());
-        assertEquals("ok", cache.get(client.cacheKey("Welcome, Steve")).orElseThrow());
+        String expected = "Welcome, " + PlayerInput.wrap("Steve");
+        await(() -> expected.equals(seen.get()), 2, TimeUnit.SECONDS);
+        assertEquals(expected, seen.get());
+        assertEquals("ok", cache.get(client.cacheKey(expected)).orElseThrow());
+        assertTrue(client.cacheKey(expected).contains(PlayerInput.KEY_VERSION));
         service.shutdown();
     }
 
