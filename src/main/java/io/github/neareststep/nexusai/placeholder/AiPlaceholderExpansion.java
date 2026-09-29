@@ -2,11 +2,14 @@ package io.github.neareststep.nexusai.placeholder;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
+import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
@@ -31,6 +34,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private AiHttpClient httpClient;
     private AiPool pool;
     private PoolService poolService;
+    private PromptCatalog prompts;
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -38,7 +42,8 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             AiCache cache,
             AiHttpClient httpClient,
             AiPool pool,
-            PoolService poolService
+            PoolService poolService,
+            PromptCatalog prompts
     ) {
         this.plugin = plugin;
         this.config = config;
@@ -46,18 +51,27 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.httpClient = httpClient;
         this.pool = pool;
         this.poolService = poolService;
+        this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
     }
 
     /**
      * Points an already registered expansion at the services created by {@code /nai reload}
      * without asking PlaceholderAPI to register it again.
      */
-    public void bind(PluginConfig config, AiCache cache, AiHttpClient httpClient, AiPool pool, PoolService poolService) {
+    public void bind(
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            AiPool pool,
+            PoolService poolService,
+            PromptCatalog prompts
+    ) {
         this.config = config;
         this.cache = cache;
         this.httpClient = httpClient;
         this.pool = pool;
         this.poolService = poolService;
+        this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
     }
 
     @Override
@@ -91,39 +105,49 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         return null;
     }
 
-    private String resolveGenerate(Player player, String prompt) {
-        if (!PromptValidation.isUsablePrompt(prompt, config.getMaxPromptLength())) {
-            return config.getFallback();
+    private String resolveGenerate(Player player, String raw) {
+        ResolvedPrompt resolved = resolve(player, raw);
+        if (!resolved.usable()) {
+            return resolved.fallback();
         }
-        Optional<String> answer = pool.poll(prompt);
-        poolService.onConsume(prompt);
+        Optional<String> answer = pool.poll(resolved.text());
+        poolService.onConsume(raw, resolved.text());
         if (answer.isEmpty()) {
-            return config.getFallback();
+            return resolved.fallback();
         }
-        Optional<PoolEntry> entry = poolService.findEntry(prompt);
+        Optional<PoolEntry> entry = poolService.findEntry(raw);
         if (entry.isPresent() && entry.get().hasVars()) {
             return VarSubstitutor.apply(answer.get(), entry.get().vars(), player);
         }
         return answer.get();
     }
 
-    private String resolveCached(Player player, String prompt) {
-        if (!PromptValidation.isUsablePrompt(prompt, config.getMaxPromptLength())) {
-            return config.getFallback();
+    private String resolveCached(Player player, String raw) {
+        ResolvedPrompt resolved = resolve(player, raw);
+        if (!resolved.usable()) {
+            return resolved.fallback();
         }
 
-        String key = httpClient.cacheKey(prompt);
+        String key = httpClient.cacheKey(resolved.model(), resolved.text());
         return cache.get(key).orElseGet(() -> {
             if (!config.canSendRequests()) {
-                return config.getFallback();
+                return resolved.fallback();
             }
             UUID playerId = player != null ? player.getUniqueId() : null;
-            httpClient.requestAsync(prompt, playerId).whenComplete((ignored, error) -> {
-                if (error != null) {
-                    plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
-                }
-            });
-            return config.getFallback();
+            CompletionSupport.onComplete(
+                    httpClient.requestAsync(resolved.text(), playerId, resolved.overrides(), resolved.ttl()),
+                    plugin.getLogger(),
+                    "Background AI generation failed",
+                    (ignored, error) -> {
+                        if (error != null) {
+                            plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
+                        }
+                    });
+            return resolved.fallback();
         });
+    }
+
+    private ResolvedPrompt resolve(Player player, String raw) {
+        return prompts.resolve(raw, config, template -> VarSubstitutor.resolve(player, template));
     }
 }

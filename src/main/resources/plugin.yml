@@ -2,6 +2,7 @@ name: NexusAI
 version: '${version}'
 main: io.github.neareststep.nexusai.NexusAI
 api-version: '26.2'
+folia-supported: true
 authors: [ mo00Wy ]
 description: Asynchronous bridge between Minecraft and AI models via PlaceholderAPI
 softdepend: [PlaceholderAPI]
@@ -9,7 +10,7 @@ softdepend: [PlaceholderAPI]
 commands:
   nai:
     description: NexusAI admin commands
-    usage: /nai <help|version|reload|status|test>
+    usage: /nai <help|version|reload|status|test|prompts>
     aliases: [nexusai]
     permission: nexusai.command
 

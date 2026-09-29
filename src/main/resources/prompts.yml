@@ -1,0 +1,41 @@
+# Named prompts for NexusAI.
+#
+# Placeholders:
+#   %ainexus_cached_<id>%     shared TTL cache (holograms, TAB, scoreboards)
+#   %ainexus_generate_<id>%   one unique answer from the pool
+#
+# If <id> is not defined in this file, the placeholder text is sent to the model as-is.
+# That keeps existing literal prompts working.
+#
+# An id matches [a-z0-9_-]. The prompt text may be a string, a block scalar, or a list of lines.
+# A list is joined with newlines, so line breaks stay in the prompt.
+#
+# {token} in the prompt is filled from vars before the request. A var value may contain
+# PlaceholderAPI placeholders; those are resolved for the player who is looking.
+# The cache and the pool are keyed by that resolved text, so one player's values are never
+# reused for someone else. A prompt with no player-specific vars stays shared.
+#
+# Optional keys inherit config.yml when omitted:
+#   ttl                 seconds for %ainexus_cached_<id>% and prewarm
+#   fallback            text while this prompt has no answer
+#   max-prompt-length   cap on the resolved text. Omit it and limits.max-prompt-length
+#                       does not apply to text stored in this file.
+#   model, system-prompt, temperature, max-tokens
+#                       same meaning as the api section / a pool entry override
+#
+# pool.entries[].prompt and prewarm.prompts may use an id.
+# /nai reload reads this file again. /nai prompts lists the ids. /nai test <id> sends that prompt.
+
+# survival_tips:
+#   prompt: |
+#     Give one short Minecraft survival tip.
+#     One sentence, no markdown.
+#   ttl: 600
+#   fallback: "..."
+#
+# welcome:
+#   prompt:
+#     - "Write a one-line welcome for a player in the {biome} biome."
+#     - "Do not use markdown."
+#   vars:
+#     biome: "%player_biome%"
