@@ -13,7 +13,7 @@ Other plugins (menus, chat, holograms) can request AI text through placeholders 
 ## Installation
 
 1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-0.6.0-SNAPSHOT.jar` into `plugins/`
+2. Copy `build/libs/NexusAI-0.7.0-SNAPSHOT.jar` into `plugins/`
 3. Install PlaceholderAPI
 4. Set the API key (prefer environment):
 
@@ -36,7 +36,11 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | Section | Parameters |
 |---------|------------|
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
-| `api` | `provider`, `model`, `base-url` (empty = provider default), `key`, `system-prompt`, `temperature` (negative = omit), `max-tokens` (`0` = omit), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
+| `config-version` | Schema version. Missing means 0.6.0. The plugin migrates forward and writes `<file>.bak` first |
+| `api` | `provider`, `model`, `base-url` (empty = provider default), `key` (legacy), `system-prompt`, `temperature` (negative = omit), `max-tokens` (`0` = omit), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
+| `providers` | Named endpoints. Each has `type` (`openai-compatible` or `gemini`), `url`, and `api-key` (string or list). `${ENV_VAR}` is replaced in `url` and `api-key` |
+| `model-queue` | Ordered `{provider, model, daily-request-limit}`. First available entry is used. `model-queue-remaining-threshold` switches when remaining header budget is at or below that number (`0` = only at zero) |
+| `formats` | Presets `simple`, `chat`, `gui`, `name`, `hologram`, `actionbar`, `bossbar`, plus `formats.default` |
 | `cache` | `ttl` (seconds), `max-size` |
 | `limits` | `requests-per-minute`, `requests-per-day` (server), `player-requests-per-minute`, `player-requests-per-day`, `max-prompt-length` (default **128**), `provider-pause-seconds`, `auth-pause-seconds`, `error-backoff-initial-seconds`, `error-backoff-max-seconds`, `error-log-cooldown-seconds` |
 | `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
@@ -61,9 +65,54 @@ Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_B
 | `ollama` | `http://localhost:11434/v1` |
 | `openrouter` | `https://openrouter.ai/api/v1` |
 
-An explicit `api.base-url` always wins. On startup the log prints: `Using provider: …, base-url: …, model: …`.
+An explicit `api.base-url` still fills the legacy path. When `providers:` is present, that block is the endpoint and key source. On startup the log prints: `Using provider: …, base-url: …, model: …` and, when keys are set, `API keys: ****abcd`. Full keys are never printed.
 
-`ollama` does not need an API key. Any other provider pointed at localhost or port `11434` is treated the same way: if `api.key` and `NEXUSAI_API_KEY` are empty, the `Authorization` header is omitted.
+`ollama` does not need an API key. Any other provider pointed at localhost or port `11434` is treated the same way: if its `api-key` and `NEXUSAI_API_KEY` are empty, the `Authorization` header is omitted.
+
+### Providers, keys, and the model queue
+
+```yaml
+providers:
+  openai:
+    type: openai-compatible
+    url: "https://api.openai.com/v1"
+    api-key: ""
+  gemini:
+    type: gemini
+    url: "https://generativelanguage.googleapis.com/v1beta/openai"
+    api-key:
+      - "${GEMINI_KEY_A}"
+      - "${GEMINI_KEY_B}"
+model-queue-remaining-threshold: 0
+model-queue:
+  - provider: openai
+    model: gpt-4o-mini
+    daily-request-limit: 1000
+  - provider: gemini
+    model: gemini-2.0-flash
+```
+
+`type: gemini` uses Gemini's OpenAI-compatible endpoint. There is no separate native `generateContent` client. A list of keys is round-robin. HTTP 401 skips that key and tries the next key. HTTP 429 skips that key and moves the queue entry to cooldown. The next request uses the next available entry.
+
+The queue also moves on when `x-ratelimit-remaining-requests` or `x-ratelimit-remaining-tokens` is at or below `model-queue-remaining-threshold`, when the entry's `daily-request-limit` is reached, or when the call times out or returns another provider error. Reset time comes from `x-ratelimit-reset-*` or `Retry-After`. A daily cap lasts until server-local midnight. If no reset header is present, the cooldown is `limits.provider-pause-seconds` (or `limits.auth-pause-seconds` for 401/402).
+
+A per-prompt `model:` still overrides the model name. The request keeps walking providers in queue order. When every entry is exhausted, NexusAI serves `fallback` or a pooled answer and does not call the API.
+
+Daily counters for each provider and each queue entry are stored in `plugins/NexusAI/usage.yml` and reset at server-local midnight. The log warns once at 80% of an entry's daily cap. `/nai status` prints each entry as `requests/limit today`, header remaining when known, and `ACTIVE`, `AVAILABLE`, `LIMIT REACHED (x/y)`, or `COOLDOWN until yyyy-MM-dd HH:mm:ss`.
+
+`NEXUSAI_API_KEY` still replaces one literal key on the active provider, which is the 0.6.0 rule. A key list, or a value that contains `${ENV_VAR}`, is left as written. If that resolves to nothing, `NEXUSAI_API_KEY` is the fallback.
+
+### Formats
+
+`format:` on a prompt (or `formats.default`, which is `simple`) appends that preset's `instruction` at the end of the system prompt. After the answer arrives, NexusAI strips markdown when the preset says so, wraps hologram lines, and cuts line count, characters, words, and sentences on a word boundary. Limits and instruction text are editable under `formats:` in `config.yml`. `simple` has no limits, so existing prompts stay unchanged. The format id is part of the cache key. It is part of the pool key for every format except `simple`, so a 0.6.0 `pool.yml` still matches.
+
+### Built-in prompt tokens
+
+`{player}`, `{world}`, `{biome}`, `{time}`, and `{weather}` are filled without PlaceholderAPI. `{time}` looks like `day 14:00` or `night 00:00`. `{weather}` is `clear`, `rain`, or `thunder`. They are read on the player's region thread (Folia entity scheduler for `/nai test` when the command is not already there). A `vars:` entry of the same name wins. PlaceholderAPI is still used for `%placeholders%` inside `vars:`.
+
+### Migration
+
+On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usage.yml` migrate from older `config-version` values, including a missing key (0.6.0), up to the current version. The plugin copies the file to `<file>.bak` first, or `<file>.bak.<timestamp>` when that backup already exists. User values are kept. `api.provider`, `api.base-url`, and `api.key` are copied into `providers:` and a one-entry `model-queue` is created from `api.provider` and `api.model`, so a 0.6.0 server keeps the same provider and model. `pool.yml` answers are rewritten as double-quoted strings. Older unquoted or wrapped pool files still load. The log lists what changed and does not include secrets.
 
 ### Generation
 
@@ -84,7 +133,7 @@ Answers whose `content` is an array of parts are joined into one string.
 | `/nai help` | `nexusai.command` | Show command help |
 | `/nai version` | `nexusai.command` | Show plugin version |
 | `/nai reload` | `nexusai.reload` | Reload config, `prompts.yml`, and locale; rebuild cache/pool/prewarm |
-| `/nai status` | `nexusai.status` | Provider, model, key set, pool, cache, named prompts, PlaceholderAPI, last error, provider pause |
+| `/nai status` | `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, PlaceholderAPI, last error, provider pause, model queue |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text and does not clear, start, or extend a provider pause |
 
@@ -134,7 +183,9 @@ prewarm:
     - survival_tips
 ```
 
-Optional keys on a prompt: `ttl` (cache seconds), `fallback`, `max-prompt-length`, `model`, `system-prompt`, `temperature`, `max-tokens`. Anything omitted uses `config.yml`. `limits.max-prompt-length` still limits literal placeholder text. It does not limit a body stored in `prompts.yml` unless that prompt sets `max-prompt-length`.
+Optional keys on a prompt: `ttl` (cache seconds), `fallback`, `max-prompt-length`, `model`, `system-prompt`, `temperature`, `max-tokens`, `format`, `vars`. Anything omitted uses `config.yml`. `limits.max-prompt-length` still limits literal placeholder text. It does not limit a body stored in `prompts.yml` unless that prompt sets `max-prompt-length`.
+
+HTTP 401 and 403 are reported as an invalid or unauthorized key. HTTP 429 is reported as a provider rate limit. The words "provider paused" are used only when requests to that provider are actually paused. `/nai test` does not start that pause.
 
 `/nai reload` reads `prompts.yml` again. `/nai prompts` prints the ids. The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded.
 

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.config;
 
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.net.URI;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * Typed view over {@code config.yml} with environment-variable overrides for the API key.
@@ -18,6 +20,13 @@ import java.util.Objects;
 public final class PluginConfig {
 
     private static final String ENV_API_KEY = "NEXUSAI_API_KEY";
+
+    /** Test seam. Production reads the process environment. */
+    static Function<String, String> environment = System::getenv;
+
+    private static String substitute(String value) {
+        return EnvSubstitutor.apply(value, environment);
+    }
 
     private static final Map<String, String> PROVIDER_BASE_URLS = Map.of(
             "openai", "https://api.openai.com/v1",
@@ -65,6 +74,11 @@ public final class PluginConfig {
     private boolean prewarmEnabled;
     private Duration prewarmRefreshBeforeTtl;
     private List<String> prewarmPrompts;
+    private Map<String, ProviderSettings> providers = Map.of();
+    private List<QueueEntryConfig> modelQueue = List.of();
+    private int modelQueueRemainingThreshold;
+    private String defaultFormatId = FormatPresets.SIMPLE;
+    private Map<String, FormatPreset> formats = Map.of();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -75,7 +89,7 @@ public final class PluginConfig {
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
-        this.baseUrl = resolveBaseUrl(provider, config.getString("api.base-url", ""));
+        this.baseUrl = resolveBaseUrl(provider, substitute(config.getString("api.base-url", "")));
         this.systemPrompt = blankToNull(config.getString("api.system-prompt", ""));
         double temperatureRaw = config.getDouble("api.temperature", -1.0d);
         this.temperature = temperatureRaw < 0 ? null : temperatureRaw;
@@ -116,13 +130,197 @@ public final class PluginConfig {
                 Math.max(1, config.getInt("prewarm.refresh-before-ttl", 60)));
         this.prewarmPrompts = Collections.unmodifiableList(loadPrewarmPrompts(config));
 
-        String envKey = System.getenv(ENV_API_KEY);
-        if (envKey != null && !envKey.isBlank()) {
-            this.apiKey = envKey.trim();
+        String yamlKey = config.getString("api.key", "");
+        yamlKey = yamlKey == null ? "" : yamlKey.trim();
+        String envKey = environment.apply(ENV_API_KEY);
+        if (config.isConfigurationSection("providers")) {
+            this.providers = loadProviders(config, yamlKey, envKey);
+            this.modelQueue = loadModelQueue(config);
+            applyActiveProvider();
         } else {
-            String yamlKey = config.getString("api.key", "");
-            this.apiKey = yamlKey == null ? "" : yamlKey.trim();
+            if (envKey != null && !envKey.isBlank()) {
+                this.apiKey = envKey.trim();
+            } else {
+                this.apiKey = substitute(yamlKey).trim();
+            }
+            this.providers = Map.of(provider, new ProviderSettings(
+                    provider,
+                    ProviderCatalog.typeFor(provider),
+                    baseUrl,
+                    apiKey.isBlank() ? List.of() : List.of(apiKey)));
+            this.modelQueue = loadModelQueue(config);
         }
+        this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
+        this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
+        this.formats = loadFormats(config);
+    }
+
+    private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
+        ConfigurationSection section = config.getConfigurationSection("providers");
+        Map<String, ProviderSettings> loaded = new LinkedHashMap<>();
+        if (section == null) {
+            return Map.of();
+        }
+        for (String id : section.getKeys(false)) {
+            if (id == null || id.isBlank()) {
+                continue;
+            }
+            ConfigurationSection one = section.getConfigurationSection(id);
+            if (one == null) {
+                continue;
+            }
+            String normalizedId = id.trim().toLowerCase(Locale.ROOT);
+            String type = ProviderCatalog.normalizeType(one.getString("type"), normalizedId);
+            String url = substitute(one.getString("url", "")).trim();
+            if (url.isBlank()) {
+                url = ProviderCatalog.officialUrl(normalizedId);
+            } else {
+                url = trimTrailingSlash(url);
+            }
+            boolean active = normalizedId.equals(provider);
+            List<String> keys = resolveKeys(one.get("api-key"), active, legacyKey, envKey);
+            loaded.put(normalizedId, new ProviderSettings(normalizedId, type, url, keys));
+        }
+        return Map.copyOf(loaded);
+    }
+
+    private void applyActiveProvider() {
+        ProviderSettings active = providers.get(provider);
+        if (active == null) {
+            for (QueueEntryConfig entry : modelQueue) {
+                ProviderSettings candidate = providers.get(entry.provider());
+                if (candidate != null) {
+                    active = candidate;
+                    this.provider = candidate.id();
+                    break;
+                }
+            }
+        }
+        if (active == null && !providers.isEmpty()) {
+            active = providers.values().iterator().next();
+            this.provider = active.id();
+        }
+        if (active == null) {
+            return;
+        }
+        this.baseUrl = active.url();
+        this.apiKey = active.apiKeys().isEmpty() ? "" : active.apiKeys().getFirst();
+    }
+
+    private List<QueueEntryConfig> loadModelQueue(FileConfiguration config) {
+        if (!config.contains("model-queue")) {
+            return List.of(new QueueEntryConfig(provider, model, 0));
+        }
+        List<QueueEntryConfig> entries = new ArrayList<>();
+        for (Map<?, ?> map : config.getMapList("model-queue")) {
+            Object providerValue = map.get("provider");
+            Object modelValue = map.get("model");
+            if (providerValue == null || modelValue == null) {
+                continue;
+            }
+            String providerId = String.valueOf(providerValue).trim().toLowerCase(Locale.ROOT);
+            String modelId = String.valueOf(modelValue).trim();
+            if (providerId.isEmpty() || modelId.isEmpty()) {
+                continue;
+            }
+            int limit = Math.max(0, toInt(map.get("daily-request-limit"), 0));
+            entries.add(new QueueEntryConfig(providerId, modelId, limit));
+        }
+        if (entries.isEmpty()) {
+            return List.of(new QueueEntryConfig(provider, model, 0));
+        }
+        return List.copyOf(entries);
+    }
+
+    private Map<String, FormatPreset> loadFormats(FileConfiguration config) {
+        Map<String, FormatPreset> loaded = new LinkedHashMap<>();
+        ConfigurationSection section = config.getConfigurationSection("formats");
+        for (String id : FormatPresets.IDS) {
+            FormatPreset builtin = FormatPresets.builtin(id);
+            ConfigurationSection one = section == null ? null : section.getConfigurationSection(id);
+            if (one == null) {
+                loaded.put(id, builtin);
+                continue;
+            }
+            loaded.put(id, new FormatPreset(
+                    id,
+                    one.getString("instruction", builtin.instruction()),
+                    one.getInt("max-lines", builtin.maxLines()),
+                    one.getInt("max-chars", builtin.maxChars()),
+                    one.getInt("max-chars-per-line", builtin.maxCharsPerLine()),
+                    one.getInt("max-words", builtin.maxWords()),
+                    one.getInt("max-sentences", builtin.maxSentences()),
+                    one.getBoolean("strip-markdown", builtin.stripMarkdown()),
+                    one.getBoolean("strip-trailing-punctuation", builtin.stripTrailingPunctuation())
+            ));
+        }
+        return Map.copyOf(loaded);
+    }
+
+    private String normalizeConfiguredFormat(String raw) {
+        String id = FormatPresets.normalize(raw);
+        return FormatPresets.known(id) ? id : FormatPresets.SIMPLE;
+    }
+
+    private static List<String> resolveKeys(Object raw, boolean active, String legacyKey, String envKey) {
+        boolean multi = raw instanceof List<?> list && list.size() > 1;
+        boolean explicit = referencesEnv(raw);
+        List<String> configured = readKeyList(raw);
+        if (active && !multi && !explicit && envKey != null && !envKey.isBlank()) {
+            return List.of(envKey.trim());
+        }
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        if (active && legacyKey != null && !legacyKey.isBlank()) {
+            if (envKey != null && !envKey.isBlank() && !EnvSubstitutor.referencesEnv(legacyKey)) {
+                return List.of(envKey.trim());
+            }
+            String substituted = substitute(legacyKey).trim();
+            if (!substituted.isBlank()) {
+                return List.of(substituted);
+            }
+        }
+        if (active && envKey != null && !envKey.isBlank()) {
+            return List.of(envKey.trim());
+        }
+        return List.of();
+    }
+
+    private static boolean referencesEnv(Object raw) {
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                if (item != null && EnvSubstitutor.referencesEnv(String.valueOf(item))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return raw != null && EnvSubstitutor.referencesEnv(String.valueOf(raw));
+    }
+
+    private static List<String> readKeyList(Object raw) {
+        if (raw instanceof List<?> list) {
+            List<String> keys = new ArrayList<>();
+            for (Object item : list) {
+                if (item == null) {
+                    continue;
+                }
+                String value = substitute(String.valueOf(item)).trim();
+                if (!value.isEmpty()) {
+                    keys.add(value);
+                }
+            }
+            return keys;
+        }
+        if (raw == null) {
+            return List.of();
+        }
+        String value = substitute(String.valueOf(raw)).trim();
+        if (value.isEmpty()) {
+            return List.of();
+        }
+        return List.of(value);
     }
 
     private List<PoolEntry> loadPoolEntries(FileConfiguration config) {
@@ -480,5 +678,65 @@ public final class PluginConfig {
 
     public List<String> getPrewarmPrompts() {
         return prewarmPrompts;
+    }
+
+    public Map<String, ProviderSettings> providers() {
+        return providers;
+    }
+
+    public ProviderSettings provider(String id) {
+        if (id == null) {
+            return null;
+        }
+        return providers.get(id.trim().toLowerCase(Locale.ROOT));
+    }
+
+    public boolean providerAllowsKeyless(ProviderSettings candidate) {
+        return candidate != null && ("ollama".equals(candidate.id()) || isLocalBaseUrl(candidate.url()));
+    }
+
+    public List<QueueEntryConfig> modelQueue() {
+        return modelQueue;
+    }
+
+    public int modelQueueRemainingThreshold() {
+        return modelQueueRemainingThreshold;
+    }
+
+    public String defaultFormatId() {
+        return defaultFormatId;
+    }
+
+    public String normalizeFormat(String format) {
+        if (format == null || format.isBlank()) {
+            return defaultFormatId;
+        }
+        String id = FormatPresets.normalize(format);
+        return FormatPresets.known(id) ? id : defaultFormatId;
+    }
+
+    public FormatPreset presetFor(String id) {
+        String normalized = normalizeFormat(id);
+        FormatPreset configured = formats.get(normalized);
+        return configured == null ? FormatPresets.builtin(normalized) : configured;
+    }
+
+    public String maskedApiKeys() {
+        ProviderSettings active = providers.get(provider);
+        if (active == null || active.apiKeys().isEmpty()) {
+            return "";
+        }
+        StringBuilder masked = new StringBuilder();
+        for (String key : active.apiKeys()) {
+            String token = SecretMask.mask(key);
+            if (token.isEmpty()) {
+                continue;
+            }
+            if (!masked.isEmpty()) {
+                masked.append(", ");
+            }
+            masked.append(token);
+        }
+        return masked.toString();
     }
 }

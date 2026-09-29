@@ -12,6 +12,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PoolStoreTest {
@@ -28,6 +29,10 @@ class PoolStoreTest {
             source.add("Say: \"hi\"", "three");
             source.add("other", "skip-me");
             store.saveNow(source, Map.of("Say: \"hi\"", 2));
+            String saved = Files.readString(file.toPath());
+            assertTrue(saved.contains("\"one\""));
+            assertTrue(saved.contains("\"two\""));
+            assertFalse(saved.contains("\n        "));
 
             AiPool loaded = new AiPool();
             store.load(loaded, Map.of("Say: \"hi\"", 2));

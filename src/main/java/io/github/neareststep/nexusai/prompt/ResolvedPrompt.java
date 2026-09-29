@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.pool.PoolKeys;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -19,6 +20,7 @@ public final class ResolvedPrompt {
     private final String model;
     private final Duration ttl;
     private final GenerationOverrides overrides;
+    private final String formatId;
     private final boolean usable;
 
     private ResolvedPrompt(
@@ -29,6 +31,7 @@ public final class ResolvedPrompt {
             String model,
             Duration ttl,
             GenerationOverrides overrides,
+            String formatId,
             boolean usable
     ) {
         this.named = named;
@@ -38,6 +41,7 @@ public final class ResolvedPrompt {
         this.model = model;
         this.ttl = ttl;
         this.overrides = overrides;
+        this.formatId = formatId;
         this.usable = usable;
     }
 
@@ -45,6 +49,7 @@ public final class ResolvedPrompt {
         Objects.requireNonNull(config, "config");
         String prompt = text == null ? "" : text;
         boolean usable = !prompt.isEmpty() && prompt.length() <= config.getMaxPromptLength();
+        String format = config.defaultFormatId();
         return new ResolvedPrompt(
                 false,
                 null,
@@ -52,7 +57,8 @@ public final class ResolvedPrompt {
                 config.getFallback(),
                 config.getModel(),
                 null,
-                GenerationOverrides.none(),
+                GenerationOverrides.none().withFormat(format),
+                format,
                 usable
         );
     }
@@ -64,6 +70,7 @@ public final class ResolvedPrompt {
         String fallback = prompt.fallback() != null ? prompt.fallback() : config.getFallback();
         Integer max = prompt.maxPromptLength();
         boolean usable = !body.isBlank() && (max == null || body.length() <= max);
+        String format = prompt.format() == null ? config.defaultFormatId() : config.normalizeFormat(prompt.format());
         return new ResolvedPrompt(
                 true,
                 prompt.id(),
@@ -71,7 +78,8 @@ public final class ResolvedPrompt {
                 fallback,
                 prompt.overrides().model(config.getModel()),
                 prompt.ttl(),
-                prompt.overrides(),
+                prompt.overrides().withFormat(format),
+                format,
                 usable
         );
     }
@@ -105,6 +113,14 @@ public final class ResolvedPrompt {
 
     public GenerationOverrides overrides() {
         return overrides;
+    }
+
+    public String formatId() {
+        return formatId;
+    }
+
+    public String poolKey() {
+        return PoolKeys.memory(formatId, text);
     }
 
     public boolean usable() {
