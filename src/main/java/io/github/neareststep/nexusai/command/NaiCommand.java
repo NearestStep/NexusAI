@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -219,6 +220,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             }
             prompt = resolved.text();
             overrides = resolved.overrides();
+        } else if (args.length > 1) {
+            prompt = outgoingTestPrompt(prompt, true);
         }
         messages.send(sender, "command.test-sending");
         long started = System.nanoTime();
@@ -253,6 +256,21 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         for (String id : ids) {
             messages.send(sender, "command.prompts-line", Map.of("id", id));
         }
+    }
+
+    /**
+     * Free text typed into {@code /nai test} is player input and is sanitized and wrapped.
+     * A named prompt id is resolved by the catalog instead, so the admin template is not wrapped
+     * as a whole. The built-in default probe stays literal.
+     */
+    static String outgoingTestPrompt(String raw, boolean wrapPlayerText) {
+        if (raw == null) {
+            return "";
+        }
+        if (!wrapPlayerText) {
+            return raw;
+        }
+        return PlayerInput.wrap(raw);
     }
 
     private static boolean ownsRegion(Player player) {

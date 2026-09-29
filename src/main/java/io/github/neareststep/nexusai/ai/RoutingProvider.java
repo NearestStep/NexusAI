@@ -62,23 +62,34 @@ public final class RoutingProvider implements AiProvider {
 
     @Override
     public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides) {
-        Objects.requireNonNull(prompt, "prompt");
-        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        return CompletableFuture.supplyAsync(() -> route(prompt, effective), executor);
+        return complete(prompt, overrides, false);
     }
 
-    private String route(String prompt, GenerationOverrides overrides) {
+    @Override
+    public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        Objects.requireNonNull(prompt, "prompt");
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        return CompletableFuture.supplyAsync(() -> route(prompt, effective, ignoreCooldown), executor);
+    }
+
+    /**
+     * @param probe {@code /nai test}. Skips temporary cooldown, still honors a daily cap,
+     *              and does not mark a failure, skip a key, or lengthen a cooldown.
+     */
+    private String route(String prompt, GenerationOverrides overrides, boolean probe) {
         long now = clock.getAsLong();
-        List<ModelQueue.Choice> choices = queue.selectable(now);
+        List<ModelQueue.Choice> choices = queue.selectable(now, probe);
         if (choices.isEmpty()) {
-            throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, "All model-queue entries are exhausted", null);
+            throw queue.explain(null, now);
         }
         AiRequestException last = null;
         for (ModelQueue.Choice choice : choices) {
             ProviderSettings provider = config.provider(choice.provider());
             if (provider == null) {
-                queue.markFailure(choice.index(), new AiRequestException(
-                        AiErrorKind.OTHER, 0, "Unknown provider " + choice.provider(), null), clock.getAsLong());
+                last = new AiRequestException(AiErrorKind.OTHER, 0, "Unknown provider " + choice.provider(), null);
+                if (!probe) {
+                    queue.markFailure(choice.index(), last, clock.getAsLong());
+                }
                 continue;
             }
             String model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
@@ -86,14 +97,18 @@ public final class RoutingProvider implements AiProvider {
             int attempts = Math.max(1, ring.keys().size());
             for (int attempt = 0; attempt < attempts; attempt++) {
                 now = clock.getAsLong();
-                String key = ring.acquire(now);
+                String key = ring.acquire(now, probe);
                 if (key == null) {
-                    queue.cooldown(choice.index(), Math.max(now + 1_000L, ring.nextReadyAt(now)), ModelQueue.Hold.ERROR);
+                    if (!probe) {
+                        queue.cooldown(choice.index(), Math.max(now + 1_000L, ring.nextReadyAt(now)), ModelQueue.Hold.ERROR);
+                    }
                     break;
                 }
                 if (!provider.hasKeys() && !config.providerAllowsKeyless(provider)) {
-                    queue.markFailure(choice.index(), new AiRequestException(
-                            AiErrorKind.BAD_KEY, 0, "API key is not configured", null), now);
+                    last = new AiRequestException(AiErrorKind.BAD_KEY, 0, "API key is not configured", null);
+                    if (!probe) {
+                        queue.markFailure(choice.index(), last, now);
+                    }
                     break;
                 }
                 if (!queue.tryConsume(choice.index(), now)) {
@@ -101,12 +116,14 @@ public final class RoutingProvider implements AiProvider {
                 }
                 try {
                     ChatExchange exchange = http.exchange(prompt, overrides, provider.url(), key, model);
-                    queue.observe(choice.index(), exchange.headers(), clock.getAsLong());
+                    if (!probe) {
+                        queue.observe(choice.index(), exchange.headers(), clock.getAsLong());
+                    }
                     return exchange.text();
                 } catch (AiRequestException error) {
                     last = error;
                     now = clock.getAsLong();
-                    if (!key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
+                    if (!probe && !key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
                         long skipFor = error.kind() == AiErrorKind.BAD_KEY
                                 ? config.getAuthPauseSeconds() * 1000L
                                 : Math.max(config.getProviderPauseSeconds() * 1000L, error.retryAfterSeconds() * 1000L);
@@ -118,17 +135,22 @@ public final class RoutingProvider implements AiProvider {
                                 + " on " + choice.provider() + " after HTTP " + error.status()
                                 + " and trying the next key or model-queue entry.");
                     }
-                    if (error.kind() == AiErrorKind.BAD_KEY && !key.isEmpty() && ring.hasAvailable(now)) {
+                    boolean anotherKey = !key.isEmpty() && (probe
+                            ? attempt + 1 < attempts
+                            : ring.hasAvailable(now));
+                    if (error.kind() == AiErrorKind.BAD_KEY && anotherKey) {
                         continue;
                     }
-                    queue.markFailure(choice.index(), error, now);
+                    if (!probe) {
+                        queue.markFailure(choice.index(), error, now);
+                    }
                     break;
                 }
             }
         }
-        if (last != null) {
+        if (probe && last != null) {
             throw last;
         }
-        throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, "All model-queue entries are exhausted", null);
+        throw queue.explain(last, clock.getAsLong());
     }
 }
