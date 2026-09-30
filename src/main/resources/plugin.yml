@@ -10,7 +10,7 @@ softdepend: [PlaceholderAPI]
 commands:
   nai:
     description: NexusAI admin commands
-    usage: /nai <help|version|reload|status|test|prompts>
+    usage: /nai <help|version|reload|status|test|prompts|prompts import>
     aliases: [nexusai]
     permission: nexusai.command
 
@@ -26,4 +26,7 @@ permissions:
     default: op
   nexusai.test:
     description: Send one AI test request
+    default: op
+  nexusai.import:
+    description: Import prompt definitions from plugins/NexusAI/import into prompts.yml
     default: op

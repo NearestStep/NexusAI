@@ -33,6 +33,7 @@ public final class ModelQueue {
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final List<Slot> slots;
+    private final Map<String, Slot> fallbackSlots = new LinkedHashMap<>();
     private final Map<String, AtomicInteger> providerCounts = new LinkedHashMap<>();
     private final int remainingThreshold;
     private final long errorCooldownMillis;
@@ -130,7 +131,54 @@ public final class ModelQueue {
      */
     public synchronized boolean tryConsume(int index, long nowMillis) {
         roll(nowMillis);
-        Slot slot = slot(index);
+        return consume(slot(index), nowMillis);
+    }
+
+    /**
+     * How a configured fallback model may be called.
+     * A queue row with the same provider and model is reused, so its daily cap and cooldown apply
+     * and it is not called twice in one request. A model that is not in the queue has its own cooldown.
+     * It is skipped when every queue row of that provider is already at its daily cap.
+     */
+    public synchronized FallbackPlan planFallback(
+            String provider,
+            String model,
+            long nowMillis,
+            boolean ignoreCooldown,
+            java.util.Set<Integer> attempted
+    ) {
+        roll(nowMillis);
+        if (provider == null || provider.isBlank() || model == null || model.isBlank()) {
+            return FallbackPlan.blocked();
+        }
+        java.util.Set<Integer> tried = attempted == null ? java.util.Set.of() : attempted;
+        for (Slot slot : slots) {
+            if (slot.provider.equals(provider) && slot.model.equals(model)) {
+                if (tried.contains(slot.index) || !isSelectable(slot, nowMillis, ignoreCooldown)) {
+                    return FallbackPlan.blocked();
+                }
+                return FallbackPlan.queue(slot.index, provider, model);
+            }
+        }
+        if (providerDailyBlocked(provider)) {
+            return FallbackPlan.blocked();
+        }
+        Slot dedicated = fallbackSlot(provider, model);
+        if (!isSelectable(dedicated, nowMillis, ignoreCooldown)) {
+            return FallbackPlan.blocked();
+        }
+        return FallbackPlan.dedicated(provider, model);
+    }
+
+    public synchronized boolean tryConsumeFallback(String provider, String model, long nowMillis) {
+        roll(nowMillis);
+        if (provider == null || model == null) {
+            return false;
+        }
+        return consume(fallbackSlot(provider, model), nowMillis);
+    }
+
+    private boolean consume(Slot slot, long nowMillis) {
         if (slot == null) {
             return false;
         }
@@ -161,7 +209,17 @@ public final class ModelQueue {
     }
 
     public synchronized void observe(int index, Map<String, List<String>> headers, long nowMillis) {
-        Slot slot = slot(index);
+        observeSlot(slot(index), headers, nowMillis);
+    }
+
+    public synchronized void observeFallback(String provider, String model, Map<String, List<String>> headers, long nowMillis) {
+        if (provider == null || model == null) {
+            return;
+        }
+        observeSlot(fallbackSlot(provider, model), headers, nowMillis);
+    }
+
+    private void observeSlot(Slot slot, Map<String, List<String>> headers, long nowMillis) {
         if (slot == null) {
             return;
         }
@@ -176,7 +234,7 @@ public final class ModelQueue {
             Long until = RateLimitHeaders.resetForExhausted(headers, nowMillis, remainingThreshold);
             long deadline = until == null ? nowMillis + errorCooldownMillis : until;
             long previous = slot.unavailableUntil;
-            cooldown(index, deadline, Hold.HEADER);
+            cool(slot, deadline, Hold.HEADER);
             if (slot.unavailableUntil != previous && slot.hold == Hold.HEADER) {
                 slot.lastError = null;
             }
@@ -233,13 +291,26 @@ public final class ModelQueue {
     }
 
     public synchronized void markFailure(int index, AiRequestException error, long nowMillis) {
-        Slot failed = slot(index);
+        markSlotFailure(slot(index), error, nowMillis);
+    }
+
+    public synchronized void markFallbackFailure(String provider, String model, AiRequestException error, long nowMillis) {
+        if (provider == null || model == null) {
+            return;
+        }
+        markSlotFailure(fallbackSlot(provider, model), error, nowMillis);
+    }
+
+    private void markSlotFailure(Slot failed, AiRequestException error, long nowMillis) {
         if (failed != null) {
             failed.lastError = error;
             failed.lastFailedAt = nowMillis;
         }
+        if (failed == null) {
+            return;
+        }
         if (error == null) {
-            cooldown(index, nowMillis + errorCooldownMillis, Hold.ERROR);
+            cool(failed, nowMillis + errorCooldownMillis, Hold.ERROR);
             return;
         }
         long base = error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.QUOTA
@@ -254,14 +325,24 @@ public final class ModelQueue {
             until = Math.max(until, headerReset);
         }
         Hold hold = error.kind() == AiErrorKind.RATE_LIMIT ? Hold.HEADER : Hold.ERROR;
-        cooldown(index, until, hold);
+        cool(failed, until, hold);
     }
 
     /**
      * Counts one discarded answer. Does not cool the row down and does not record a provider error.
      */
     public synchronized void recordRejection(int index) {
-        Slot slot = slot(index);
+        reject(slot(index));
+    }
+
+    public synchronized void recordFallbackRejection(String provider, String model) {
+        if (provider == null || model == null) {
+            return;
+        }
+        reject(fallbackSlot(provider, model));
+    }
+
+    private void reject(Slot slot) {
         if (slot == null) {
             return;
         }
@@ -270,7 +351,17 @@ public final class ModelQueue {
     }
 
     public synchronized void cooldown(int index, long untilMillis, Hold hold) {
-        Slot slot = slot(index);
+        cool(slot(index), untilMillis, hold);
+    }
+
+    public synchronized void cooldownFallback(String provider, String model, long untilMillis, Hold hold) {
+        if (provider == null || model == null) {
+            return;
+        }
+        cool(fallbackSlot(provider, model), untilMillis, hold);
+    }
+
+    private void cool(Slot slot, long untilMillis, Hold hold) {
         if (slot == null) {
             return;
         }
@@ -313,6 +404,34 @@ public final class ModelQueue {
         return List.copyOf(lines);
     }
 
+    /**
+     * Status line for the configured fallback model. A matching queue row shares that row's counters.
+     * Selectable fallback models are {@code READY}, never {@code ACTIVE}.
+     */
+    public synchronized Status fallbackStatus(String provider, String model, long nowMillis) {
+        roll(nowMillis);
+        Slot slot = findQueueSlot(provider, model);
+        if (slot == null && provider != null && model != null && !provider.isBlank() && !model.isBlank()) {
+            slot = fallbackSlot(provider, model);
+        }
+        if (slot == null) {
+            return new Status(-1, provider == null ? "" : provider, model == null ? "" : model,
+                    0, 0, null, null, 0, "NOT SET");
+        }
+        String state = describe(slot, nowMillis, false);
+        return new Status(
+                slot.index,
+                slot.provider,
+                slot.model,
+                slot.requests.get(),
+                slot.dailyLimit,
+                slot.remainingRequests,
+                slot.remainingTokens,
+                slot.rejected.get(),
+                state
+        );
+    }
+
     public synchronized void save() {
         if (usageFile == null) {
             return;
@@ -336,6 +455,19 @@ public final class ModelQueue {
                     rows.add(row);
                 }
                 yaml.set("entries", rows);
+                if (!fallbackSlots.isEmpty()) {
+                    List<Map<String, Object>> fallbackRows = new ArrayList<>();
+                    for (Slot slot : fallbackSlots.values()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("id", slot.storageId());
+                        row.put("provider", slot.provider);
+                        row.put("model", slot.model);
+                        row.put("requests", slot.requests.get());
+                        row.put("rejected", slot.rejected.get());
+                        fallbackRows.add(row);
+                    }
+                    yaml.set("fallback", fallbackRows);
+                }
                 File parent = usageFile.getParentFile();
                 if (parent != null) {
                     parent.mkdirs();
@@ -390,6 +522,26 @@ public final class ModelQueue {
                 }
             }
         }
+        for (Map<?, ?> row : yaml.getMapList("fallback")) {
+            Object provider = row.get("provider");
+            Object model = row.get("model");
+            if (provider == null || model == null) {
+                continue;
+            }
+            int requests = 0;
+            Object raw = row.get("requests");
+            if (raw instanceof Number number) {
+                requests = Math.max(0, number.intValue());
+            }
+            int rejected = 0;
+            Object rawRejected = row.get("rejected");
+            if (rawRejected instanceof Number number) {
+                rejected = Math.max(0, number.intValue());
+            }
+            Slot slot = fallbackSlot(String.valueOf(provider), String.valueOf(model));
+            slot.requests.set(requests);
+            slot.rejected.set(rejected);
+        }
     }
 
     private synchronized void roll(long nowMillis) {
@@ -399,6 +551,17 @@ public final class ModelQueue {
         }
         day = current;
         for (Slot slot : slots) {
+            slot.requests.set(0);
+            slot.warned = false;
+            slot.remainingRequests = null;
+            slot.remainingTokens = null;
+            if (slot.hold == Hold.DAILY) {
+                slot.unavailableUntil = 0L;
+                slot.hold = Hold.NONE;
+            }
+            slot.rejected.set(0);
+        }
+        for (Slot slot : fallbackSlots.values()) {
             slot.requests.set(0);
             slot.warned = false;
             slot.remainingRequests = null;
@@ -474,8 +637,71 @@ public final class ModelQueue {
         return slots.get(index);
     }
 
+    private String describe(Slot slot, long nowMillis, boolean assignActive) {
+        if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
+            return "LIMIT REACHED (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
+        }
+        if (nowMillis < slot.unavailableUntil) {
+            String when = Instant.ofEpochMilli(slot.unavailableUntil).atZone(zone).format(CLOCK);
+            return "COOLDOWN until " + when;
+        }
+        return assignActive ? "ACTIVE" : "READY";
+    }
+
+    private boolean providerDailyBlocked(String provider) {
+        boolean any = false;
+        for (Slot slot : slots) {
+            if (!slot.provider.equals(provider)) {
+                continue;
+            }
+            any = true;
+            if (slot.dailyLimit <= 0 || slot.requests.get() < slot.dailyLimit) {
+                return false;
+            }
+        }
+        return any;
+    }
+
+    private Slot findQueueSlot(String provider, String model) {
+        if (provider == null || model == null) {
+            return null;
+        }
+        for (Slot slot : slots) {
+            if (slot.provider.equals(provider) && slot.model.equals(model)) {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    private Slot fallbackSlot(String provider, String model) {
+        String id = provider + "|" + model;
+        Slot existing = fallbackSlots.get(id);
+        if (existing != null) {
+            return existing;
+        }
+        Slot created = new Slot(-1, provider, model, 0);
+        fallbackSlots.put(id, created);
+        providerCounts.putIfAbsent(provider, new AtomicInteger());
+        return created;
+    }
+
     public enum Hold {
         NONE, DAILY, HEADER, ERROR
+    }
+
+    public record FallbackPlan(boolean allowed, boolean dedicated, int queueIndex, String provider, String model) {
+        public static FallbackPlan blocked() {
+            return new FallbackPlan(false, false, -1, "", "");
+        }
+
+        public static FallbackPlan queue(int index, String provider, String model) {
+            return new FallbackPlan(true, false, index, provider, model);
+        }
+
+        public static FallbackPlan dedicated(String provider, String model) {
+            return new FallbackPlan(true, true, -1, provider, model);
+        }
     }
 
     public record Choice(int index, String provider, String model) {
