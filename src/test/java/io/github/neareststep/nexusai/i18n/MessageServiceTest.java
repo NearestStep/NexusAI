@@ -38,6 +38,42 @@ class MessageServiceTest {
     }
 
     @Test
+    void mergeOrderIsUserThenBundledLocaleThenEnglish() {
+        org.bukkit.configuration.file.YamlConfiguration user = new org.bukkit.configuration.file.YamlConfiguration();
+        user.set("command.version", "user");
+        org.bukkit.configuration.file.YamlConfiguration bundled = new org.bukkit.configuration.file.YamlConfiguration();
+        bundled.set("command.version", "bundled");
+        bundled.set("command.reload-ok", "bundled-reload");
+        org.bukkit.configuration.file.YamlConfiguration english = new org.bukkit.configuration.file.YamlConfiguration();
+        english.set("command.version", "english");
+        english.set("command.reload-ok", "english-reload");
+        english.set("command.help", "english-help");
+
+        org.bukkit.configuration.file.YamlConfiguration merged = MessageService.merge(user, bundled, english);
+        assertEquals("user", merged.getString("command.version"));
+        assertEquals("bundled-reload", merged.getString("command.reload-ok"));
+        assertEquals("english-help", merged.getString("command.help"));
+        assertEquals(2, MessageService.filledFromDefaults(user, merged));
+    }
+
+    @Test
+    void customLocaleFallsBackToEnglish() {
+        org.bukkit.configuration.file.YamlConfiguration user = new org.bukkit.configuration.file.YamlConfiguration();
+        user.set("command.version", "Ahoy {version}");
+        org.bukkit.configuration.file.YamlConfiguration english = new org.bukkit.configuration.file.YamlConfiguration();
+        english.set("prefix", "");
+        english.set("command.version", "Version {version}");
+        english.set("command.reload-ok", "{prefix}OK");
+
+        MessageService messages = MessageService.forTest(
+                MessageService.merge(user, new org.bukkit.configuration.file.YamlConfiguration(), english),
+                english,
+                "pirate");
+        assertEquals("Ahoy 1", messages.format("command.version", java.util.Map.of("version", "1")));
+        assertEquals("OK", messages.format("command.reload-ok"));
+    }
+
+    @Test
     void normalizeLocaleAcceptsHyphen() {
         assertEquals("pt_BR", MessageService.normalizeLocale("pt-BR"));
         assertEquals("pt_BR", MessageService.normalizeLocale("PT-br"));
