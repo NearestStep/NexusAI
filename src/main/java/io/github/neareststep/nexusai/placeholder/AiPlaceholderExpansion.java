@@ -139,7 +139,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 resolved.knowledge());
         String key = httpClient.cacheKey(resolved.model(), resolved.text(), resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
-            if (config.canSendRequests()) {
+            if (config.canSendChatRequests()) {
                 UUID playerId = player != null ? player.getUniqueId() : null;
                 CompletionSupport.onComplete(
                         httpClient.requestAsync(resolved.text(), playerId, prepared.overrides(), resolved.ttl(), prepared.cacheToken()),

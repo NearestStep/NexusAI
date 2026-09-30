@@ -5,8 +5,9 @@ import java.util.regex.Pattern;
 
 /**
  * Post-processing for text that reaches placeholders, dialogue replies, the pool, and the cache.
- * Section signs are removed first so a model cannot apply Minecraft formatting. Server colours
- * come from format presets and lang files. Markdown is optional. Line and length caps follow.
+ * Section signs and {@code &} colour or format codes are removed first so a model cannot apply
+ * Minecraft formatting. Server colours come from format presets and lang files. Markdown is
+ * optional. Line and length caps follow.
  */
 public final class AnswerFormatter {
 

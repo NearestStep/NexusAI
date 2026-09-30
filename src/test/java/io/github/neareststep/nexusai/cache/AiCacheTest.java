@@ -11,6 +11,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AiCacheTest {
 
     @Test
+    void cachedRepliesLoseSectionSignsAndAmpersandCodes() {
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        cache.put("color", "COLOR#5 §cSECRED stray§ §zZ &cAMPRED &x&f&f&0&0&0&0HEX");
+        assertEquals("COLOR#5 SECRED stray zZ AMPRED HEX", cache.get("color").orElseThrow());
+        assertFalse(cache.get("color").orElseThrow().contains("§"));
+        assertFalse(cache.get("color").orElseThrow().contains("&c"));
+    }
+
+    @Test
     void putAndGet() {
         AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
         cache.put("k", "v");

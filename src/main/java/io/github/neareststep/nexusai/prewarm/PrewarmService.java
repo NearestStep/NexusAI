@@ -77,7 +77,7 @@ public final class PrewarmService {
 
     public void start() {
         running = true;
-        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String configured : config.getPrewarmPrompts()) {
@@ -95,7 +95,7 @@ public final class PrewarmService {
     }
 
     public void scheduleRefresh() {
-        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         long periodSeconds = Math.max(1L, config.getPrewarmRefreshBeforeTtl().toSeconds());
@@ -104,7 +104,7 @@ public final class PrewarmService {
 
     public void warmForPlayer(String playerName) {
         Objects.requireNonNull(playerName, "playerName");
-        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String template : config.getPrewarmPrompts()) {
@@ -137,7 +137,7 @@ public final class PrewarmService {
     }
 
     void refreshStale() {
-        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String configured : config.getPrewarmPrompts()) {

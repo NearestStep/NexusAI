@@ -259,8 +259,8 @@ public final class PoolStore {
             if (item == null) {
                 continue;
             }
-            String text = String.valueOf(item);
-            if (!text.isBlank()) {
+            String text = io.github.neareststep.nexusai.ai.PlayerInput.stripSectionSigns(String.valueOf(item)).trim();
+            if (!text.isEmpty()) {
                 answers.add(text);
             }
         }

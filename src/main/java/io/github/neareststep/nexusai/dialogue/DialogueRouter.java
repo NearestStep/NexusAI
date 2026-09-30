@@ -55,7 +55,7 @@ public final class DialogueRouter {
         if (current == null || currentQueue == null) {
             throw new AiRequestException(AiErrorKind.OTHER, 0, "NexusAI is not ready", null);
         }
-        if (!current.canSendRequests()) {
+        if (!current.canSendChatRequests()) {
             throw new AiRequestException(AiErrorKind.OTHER, 0, "NexusAI API key is not configured", null);
         }
         String admissionKey = "dialogue:" + (call.messages().isEmpty() ? "greeting" : "turn");
@@ -92,8 +92,7 @@ public final class DialogueRouter {
                     break;
                 }
                 if (!provider.hasKeys() && !current.providerAllowsKeyless(provider)) {
-                    last = new AiRequestException(AiErrorKind.BAD_KEY, 0, "API key is not configured", null);
-                    currentQueue.markFailure(choice.index(), last, now);
+                    last = new AiRequestException(AiErrorKind.OTHER, 0, "API key is not configured", null);
                     break;
                 }
                 if (!currentQueue.tryConsume(choice.index(), now)) {

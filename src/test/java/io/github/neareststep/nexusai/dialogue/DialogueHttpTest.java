@@ -137,23 +137,27 @@ class DialogueHttpTest {
                 Logger.getLogger("dialogue-http"),
                 () -> 1_000L
         );
+        String wrapped = io.github.neareststep.nexusai.ai.PlayerInput.wrap("hello");
         return router.route(new DialogueEngine.ModelCall(
                 "You are Bram.",
-                List.of(new DialogueProtocol.MemoryLine("user", "hello")),
+                List.of(new DialogueProtocol.MemoryLine("user", wrapped)),
                 tools,
                 GenerationOverrides.none(),
                 "simple",
                 UUID.randomUUID(),
-                "hello"
+                wrapped
         ));
     }
 
     @Test
     void dialogueReplyStripsSectionSignsBeforeItIsShown() {
         DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
-        String reply = transport.finishText("In the §plains§ biome §cnow", "hello", "simple", "");
-        assertEquals("In the plains biome now", reply);
+        String reply = transport.finishText(
+                "In the §plains§ biome §cnow &cAMPRED &x&f&f&0&0&0&0HEX", "hello", "simple", "");
+        assertEquals("In the plains biome now AMPRED HEX", reply);
         assertFalse(reply.contains("§"));
+        assertFalse(reply.contains("&c"));
+        assertFalse(reply.contains("&x"));
     }
 
     private static CharacterAction action() {
