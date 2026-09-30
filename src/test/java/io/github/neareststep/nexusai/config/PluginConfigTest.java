@@ -4,14 +4,22 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
 
+import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PluginConfigTest {
@@ -206,7 +214,9 @@ class PluginConfigTest {
             yaml.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
             PluginConfig blocked = new PluginConfig(yaml);
             assertFalse(blocked.canSendRequests());
+            assertFalse(blocked.canSendChatRequests());
             assertEquals("no", NaiCommand.statusApiKeyText(blocked, "yes", "no"));
+            assertTrue(blocked.credentialWarning().contains("AI requests will not be sent"));
         });
     }
 
@@ -230,13 +240,20 @@ class PluginConfigTest {
             moderation.set("providers.mock.api-key", "mod-key-ZZ99");
             PluginConfig pinned = new PluginConfig(moderation);
             assertTrue(pinned.canSendRequests());
+            assertFalse(pinned.canSendChatRequests());
             assertTrue(pinned.providerKeyPresence("yes", "no").contains("mock: yes"));
+            assertTrue(pinned.credentialWarning().contains("Pinned moderation can still run"));
+            assertTrue(pinned.credentialWarning().contains("will not be sent"));
 
             YamlConfiguration local = keyedQueueYaml();
             local.set("providers.mock.api-key", "");
             local.set("providers.mock.url", "http://127.0.0.1:18090/v1");
             local.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
-            assertTrue(new PluginConfig(local).canSendRequests());
+            PluginConfig localQueue = new PluginConfig(local);
+            assertTrue(localQueue.canSendRequests());
+            assertTrue(localQueue.canSendChatRequests());
+            assertNull(localQueue.credentialWarning());
+            assertTrue(localQueue.providerKeyPresence("yes", "no").contains("mock: local"));
 
             YamlConfiguration activeKey = keyedQueueYaml();
             activeKey.set("api.provider", "mock");
@@ -252,6 +269,56 @@ class PluginConfigTest {
             disabledPin.set("moderation.provider", "mock");
             disabledPin.set("moderation.model", "mock-mod");
             assertFalse(new PluginConfig(disabledPin).canSendRequests());
+        });
+    }
+
+    @Test
+    void moderationOnlyKeyDoesNotSendOrRecordAProviderError() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = keyedQueueYaml();
+            yaml.set("providers.mock.api-key", "mod-key-ZZ99");
+            yaml.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            yaml.set("moderation.enabled", true);
+            yaml.set("moderation.provider", "mock");
+            yaml.set("moderation.model", "mock-mod");
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.canSendRequests());
+            assertFalse(config.canSendChatRequests());
+            AtomicInteger calls = new AtomicInteger();
+            AiProvider provider = prompt -> {
+                calls.incrementAndGet();
+                return CompletableFuture.completedFuture("should-not-send");
+            };
+            AiHttpClient client = new AiHttpClient(
+                    new AiCache(Duration.ofMinutes(5), 10),
+                    provider,
+                    config,
+                    Logger.getLogger("mod-only"));
+            assertTrue(client.testAsync("FBPROBE say something").isCompletedExceptionally());
+            assertTrue(client.requestAsync("TIMEPROBE time=morning").isCompletedExceptionally());
+            assertEquals(0, calls.get());
+            assertTrue(client.lastErrorText() == null || client.lastErrorText().isBlank());
+        });
+    }
+
+    @Test
+    void ollamaWithoutAKeyIsReportedAsLocal() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = baseYaml();
+            yaml.set("providers.openai.type", "openai-compatible");
+            yaml.set("providers.openai.url", "https://api.openai.com/v1");
+            yaml.set("providers.openai.api-key", "");
+            yaml.set("providers.ollama.type", "openai-compatible");
+            yaml.set("providers.ollama.url", "http://127.0.0.1:11434/v1");
+            yaml.set("providers.ollama.api-key", "");
+            yaml.set("model-queue", List.of(
+                    Map.of("provider", "openai", "model", "gpt-4o-mini"),
+                    Map.of("provider", "ollama", "model", "mock-ok")));
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.canSendChatRequests());
+            assertEquals("openai: no, ollama: local", config.providerKeyPresence("yes", "no"));
+            assertEquals("openai: no, ollama: local", NaiCommand.statusApiKeyText(config, "yes", "no"));
+            assertNull(config.credentialWarning());
         });
     }
 

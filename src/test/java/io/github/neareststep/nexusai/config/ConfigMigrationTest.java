@@ -101,6 +101,33 @@ class ConfigMigrationTest {
     }
 
     @Test
+    void migrationAndMissingKeysShareOneBackupPerStart() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-one-backup");
+        Path file = dir.resolve("config.yml");
+        Files.writeString(file, V06, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("one-backup");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.valid());
+        assertFalse(outcome.addedKeys().isEmpty());
+        assertEquals(null, outcome.backup());
+        List<Path> backups = Files.list(dir)
+                .filter(path -> path.getFileName().toString().startsWith("config.yml.bak"))
+                .toList();
+        assertEquals(1, backups.size());
+        assertEquals(V06, Files.readString(backups.getFirst(), StandardCharsets.UTF_8));
+        assertTrue(Files.readString(file).contains("config-version:"));
+
+        ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(second.valid());
+        assertTrue(second.addedKeys().isEmpty());
+        long stillOne = Files.list(dir)
+                .filter(path -> path.getFileName().toString().startsWith("config.yml.bak"))
+                .count();
+        assertEquals(1, stillOne);
+    }
+
+    @Test
     void secondMigrationIsANoOpAndBackupIsTimestampedWhenOneExists() throws Exception {
         Path dir = Files.createTempDirectory("nexusai-migrate");
         Path file = dir.resolve("config.yml");

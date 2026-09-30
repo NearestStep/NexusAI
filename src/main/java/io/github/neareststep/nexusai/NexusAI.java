@@ -8,10 +8,9 @@ import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
-import io.github.neareststep.nexusai.config.FileBackup;
+import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
-import io.github.neareststep.nexusai.config.ConfigMerger;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
@@ -84,7 +83,7 @@ public final class NexusAI extends JavaPlugin {
     private volatile ModerationService moderationService;
     private ChatModerationListener moderationListener;
     private UnpooledGenerateLog unpooledGenerateLog;
-    private boolean loggedMissingKey;
+    private String loggedCredentialWarning = "";
     private boolean loggedMissingPapi;
 
     @Override
@@ -98,8 +97,7 @@ public final class NexusAI extends JavaPlugin {
         }
         prepareDataFolders();
         this.unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
-        migrateConfigs();
-        if (!mergeMissingConfig()) {
+        if (!prepareConfigFile()) {
             getLogger().warning("config.yml has a syntax error. The file was left unchanged, "
                     + "and AI requests stay off until a valid /nai reload.");
             this.pluginConfig = heldDefaults();
@@ -156,8 +154,7 @@ public final class NexusAI extends JavaPlugin {
                     "prompts.yml has a syntax error. The file and the loaded prompts were left unchanged. "
                             + parsed.error());
         }
-        migrateConfigs();
-        if (!mergeMissingConfig()) {
+        if (!prepareConfigFile()) {
             throw new IllegalStateException(
                     "config.yml has a syntax error. The file and the loaded configuration were left unchanged.");
         }
@@ -282,31 +279,33 @@ public final class NexusAI extends JavaPlugin {
     }
 
     /**
+     * Migrates {@code config.yml} and appends missing default keys.
+     * A single startup writes one backup, even when both steps change the file.
+     *
      * @return {@code false} when {@code config.yml} is not valid YAML and was left untouched
      */
-    private boolean mergeMissingConfig() {
+    private boolean prepareConfigFile() {
         saveDefaultConfig();
         File file = new File(getDataFolder(), "config.yml");
         try (InputStream in = getResource("config.yml")) {
-            if (in == null || !file.isFile()) {
-                return true;
-            }
-            String defaults = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            String existing = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-            ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
-            if (!result.valid()) {
+            String defaults = in == null ? "" : new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file.toPath(), defaults, getLogger());
+            if (!outcome.valid()) {
+                migrateOtherConfigs();
                 return false;
             }
-            if (result.addedKeys().isEmpty()) {
-                return true;
+            if (outcome.backup() != null) {
+                getLogger().info("Backed up config.yml to " + outcome.backup().toAbsolutePath());
             }
-            java.nio.file.Path backup = FileBackup.replace(file.toPath(), result.yaml());
-            getLogger().info("Backed up config.yml to " + backup.toAbsolutePath());
-            getLogger().info("Added missing config keys: " + String.join(", ", result.addedKeys()));
-            reloadConfig();
+            if (!outcome.addedKeys().isEmpty()) {
+                getLogger().info("Added missing config keys: " + String.join(", ", outcome.addedKeys()));
+                reloadConfig();
+            }
+            migrateOtherConfigs();
             return true;
         } catch (IOException e) {
             getLogger().log(Level.WARNING, "Failed to merge missing config keys", e);
+            migrateOtherConfigs();
             return true;
         }
     }
@@ -336,15 +335,15 @@ public final class NexusAI extends JavaPlugin {
         if (pluginConfig.requestsHeld()) {
             return;
         }
-        if (!pluginConfig.canSendRequests()) {
-            if (!loggedMissingKey) {
-                getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
-                        + "Plugin will load, but AI requests will not be sent.");
-                loggedMissingKey = true;
+        String warning = pluginConfig.credentialWarning();
+        if (warning != null) {
+            if (!warning.equals(loggedCredentialWarning)) {
+                loggedCredentialWarning = warning;
+                getLogger().warning(warning);
             }
             return;
         }
-        loggedMissingKey = false;
+        loggedCredentialWarning = "";
         if (!pluginConfig.hasApiKey() && pluginConfig.allowsKeylessRequests()) {
             getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
         }
@@ -367,8 +366,7 @@ public final class NexusAI extends JavaPlugin {
         return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger());
     }
 
-    private void migrateConfigs() {
-        ConfigMigrator.migrateFile(new File(getDataFolder(), "config.yml").toPath(), ConfigMigrator::migrateConfig, getLogger());
+    private void migrateOtherConfigs() {
         ConfigMigrator.migrateFile(new File(getDataFolder(), "prompts.yml").toPath(), ConfigMigrator::migratePrompts, getLogger());
         ConfigMigrator.migrateFile(new File(getDataFolder(), "pool.yml").toPath(), ConfigMigrator::migratePool, getLogger());
         ConfigMigrator.migrateFile(new File(getDataFolder(), "usage.yml").toPath(), ConfigMigrator::migrateUsage, getLogger());

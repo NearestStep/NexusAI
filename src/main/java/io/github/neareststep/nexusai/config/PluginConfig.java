@@ -554,8 +554,25 @@ public final class PluginConfig {
      * pinned moderation provider can accept a call. A target can accept a call when it has an API
      * key or when its endpoint does not need one (Ollama, or a localhost / port 11434 base URL).
      * An empty key on {@code api.provider} does not block a different row that can send.
+     * Pinned moderation alone does not let placeholders or {@code /nai test} send; see
+     * {@link #canSendChatRequests()}.
      */
     public boolean canSendRequests() {
+        if (canSendChatRequests()) {
+            return true;
+        }
+        if (requestsHeld) {
+            return false;
+        }
+        ModerationSettings pinned = moderation == null ? ModerationSettings.defaults() : moderation;
+        return pinned.enabled() && pinned.pinned() && providerUsable(provider(pinned.provider()));
+    }
+
+    /**
+     * Placeholders, the pool, prewarm, dialogue, and {@code /nai test} can send.
+     * A pinned moderation provider is not one of these targets.
+     */
+    public boolean canSendChatRequests() {
         if (requestsHeld) {
             return false;
         }
@@ -565,16 +582,30 @@ public final class PluginConfig {
             }
         }
         FallbackModel fallback = fallbackModel();
-        if (fallback.configured() && providerUsable(provider(fallback.provider()))) {
-            return true;
+        return fallback.configured() && providerUsable(provider(fallback.provider()));
+    }
+
+    /**
+     * Startup warning when chat requests cannot be sent, or null when they can.
+     * A config whose only usable target is pinned moderation gets its own warning.
+     */
+    public String credentialWarning() {
+        if (requestsHeld || canSendChatRequests()) {
+            return null;
         }
-        ModerationSettings pinned = moderation == null ? ModerationSettings.defaults() : moderation;
-        return pinned.enabled() && pinned.pinned() && providerUsable(provider(pinned.provider()));
+        if (canSendRequests()) {
+            return "API key is not set for the model queue or fallback model. "
+                    + "Placeholders, the pool, prewarm, and /nai test will not be sent. "
+                    + "Pinned moderation can still run.";
+        }
+        return "API key is not set (env NEXUSAI_API_KEY or api.key). "
+                + "Plugin will load, but AI requests will not be sent.";
     }
 
     /**
      * Key presence for the active provider, each model-queue provider, the fallback model, and a
      * pinned moderation provider. {@code yes} and {@code no} are the localized words.
+     * A provider that can send without a key is {@code local}.
      */
     public String providerKeyPresence(String yes, String no) {
         String present = yes == null ? "yes" : yes;
@@ -598,10 +629,19 @@ public final class PluginConfig {
             if (!line.isEmpty()) {
                 line.append(", ");
             }
-            ProviderSettings settings = providers.get(id);
-            line.append(id).append(": ").append(settings != null && settings.hasKeys() ? present : absent);
+            line.append(id).append(": ").append(keyPresence(providers.get(id), present, absent));
         }
         return line.toString();
+    }
+
+    private String keyPresence(ProviderSettings settings, String present, String absent) {
+        if (settings != null && settings.hasKeys()) {
+            return present;
+        }
+        if (providerAllowsKeyless(settings)) {
+            return "local";
+        }
+        return absent;
     }
 
     private boolean providerUsable(ProviderSettings candidate) {
