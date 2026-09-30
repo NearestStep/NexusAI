@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (1.0.0)
+
+One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `NexusAI-0.7.0-SNAPSHOT.jar` with this build. `api-version` is **1.20.6**. Existing `config.yml`, `prompts.yml`, and `pool.yml` keys and values are unchanged.
+
+### Compatibility
+
+- Supported servers are Paper and Purpur 1.20.6–26.2. The jar is compiled with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. Paper 1.20.6 accepts `api-version: '1.20.6'` because minor api-versions have been valid since 1.20.5. Newer Paper and Purpur builds still load that api-version.
+- Folia and 26.3 are not officially supported until stable builds exist. `folia-supported` stays `true`, and command results still use the region schedulers, so a current Folia server is not broken. Spigot and CraftBukkit stay unsupported.
+- `{biome}` is read through `Keyed.getKey()`. `Biome` is an enum on 1.20.6 and a registry interface on newer servers, and a direct `Biome.getKey()` call compiled against the enum fails on the interface. The other Bukkit methods this plugin calls keep the same descriptors from 1.20.6 through 26.2 (region schedulers, world time and weather, commands, and configuration).
+- CI boots official stable Paper builds 1.20.6, 1.21.1, 1.21.4, and 1.21.8 on Java 21, and 26.2 on Java 25, with PlaceholderAPI 2.12.3. It checks that NexusAI enables and `/nai status` works against a mock OpenAI-compatible endpoint.
+
 ## 0.7.0-SNAPSHOT
 
 Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. On startup the plugin migrates a missing `config-version` (0.6.0) to 1 and writes `<file>.bak` first.
