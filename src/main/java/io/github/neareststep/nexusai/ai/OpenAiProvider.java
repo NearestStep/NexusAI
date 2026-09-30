@@ -178,7 +178,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
-            if (PlayerInput.restatesGuard(text) || PlayerInput.restatesGuard(formatted)) {
+            if (PlayerInput.restatesGuard(text, prompt) || PlayerInput.restatesGuard(formatted, prompt)) {
                 throw new AiRequestException(
                         AiErrorKind.REJECTED,
                         response.statusCode(),
