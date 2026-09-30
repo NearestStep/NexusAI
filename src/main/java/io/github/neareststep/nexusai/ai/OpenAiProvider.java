@@ -115,6 +115,32 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
+        return exchange(prompt, overrides, baseUrl, apiKey, model, true);
+    }
+
+    /**
+     * Same HTTP call as {@link #exchange}, without answer formatting or player-input rejection.
+     * Chat moderation parses the raw JSON verdict. Those filters are for text shown to players,
+     * and they would drop a verdict that quotes the chat line.
+     */
+    public ChatExchange exchangeRaw(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model
+    ) {
+        return exchange(prompt, overrides, baseUrl, apiKey, model, false);
+    }
+
+    private ChatExchange exchange(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            boolean filterAnswer
+    ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         if (model != null && !model.isBlank()) {
             effective = effective.withModel(model);
@@ -169,6 +195,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String text = parsed.getChoices().getFirst().getMessage().visibleText();
             if (text == null || text.isBlank()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
+            }
+            if (!filterAnswer) {
+                return new ChatExchange(text, headers);
             }
             String formatted = AnswerFormatter.format(
                     text,

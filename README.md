@@ -51,6 +51,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `limits` | `requests-per-minute`, `requests-per-day` (server), `player-requests-per-minute`, `player-requests-per-day`, `max-prompt-length` (default **128**), `provider-pause-seconds`, `auth-pause-seconds`, `error-backoff-initial-seconds`, `error-backoff-max-seconds`, `error-log-cooldown-seconds` |
 | `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
+| `moderation` | Opt-in chat check. `enabled` (default **false**), `provider`, `model`, `max-checks-per-minute`, `player-cooldown-seconds`, `min-length`, `system-prompt`, `temperature`, `max-tokens`. See [Chat moderation](#chat-moderation) |
 | `fallback` | String on miss / rate limits / missing key |
 
 API key priority: **`NEXUSAI_API_KEY`** → `api.key` in YAML.
@@ -143,7 +144,7 @@ Answers whose `content` is an array of parts are joined into one string.
 | `/nai help` | `nexusai.command` | Show command help |
 | `/nai version` | `nexusai.command` | Show the plugin version and the authors from `plugin.yml` |
 | `/nai reload` | `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache/pool/prewarm |
-| `/nai status` | `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, fallback model |
+| `/nai status` | `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, fallback model, moderation on/off and today's checks and flags |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
 | `/nai prompts import <file> [--overwrite]` | `nexusai.import` | Import prompt definitions from `plugins/NexusAI/import/<file>` into `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
@@ -238,6 +239,26 @@ guide:
 ```
 
 `lore.md` (or `lore.txt` when no `.md` is present) and `rules` are concatenated into the system message inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`, after the admin system prompt and before the format instruction. The player-input guard stays last. `knowledge.max-chars` in `config.yml` caps one request. `knowledge.max-file-chars` caps one file. Truncation logs one warning. An unknown name logs a warning when prompts are loaded. `/nai reload` reads the folder again. The cache key includes a hash of the injected text, so editing a file changes the cached answer. There is no vector search and no embeddings.
+
+## Chat moderation
+
+Chat moderation is off unless `moderation.enabled` is `true`. Leave it off if chat must not be sent to a model.
+
+When it is on, a public chat line is still delivered immediately. The plugin does not cancel the message, change it, or wait for the model. The check is queued on the HTTP pool after the chat event returns. Cancelled chat is not checked, because that line was not sent.
+
+The model must answer with one JSON object: `flagged` (true or false), `category` (`toxicity`, `insult`, `veiled insult`, `harassment`, `spam`, or `none`), and a short `reason`. A markdown fence or a sentence around the object is accepted. A reply that is not that object is treated as not flagged, and the server log records that at FINE.
+
+A flagged line notifies every online player with `nexusai.moderation.notify` and is appended to `plugins/NexusAI/moderation.log`. The notice contains the player, the message, the category, and the reason. The helper does not punish, mute, kick, ban, or run a command. There is no `moderation.command-on-flag` setting.
+
+`nexusai.moderation.bypass` skips the check. Messages shorter than `moderation.min-length` (trimmed) are ignored. `moderation.max-checks-per-minute` is a server-wide cap. `moderation.player-cooldown-seconds` is the gap before the same player is checked again (`0` disables that gap). Each check that is actually sent spends the selected model-queue row's `daily-request-limit` in `usage.yml`. A row with no daily limit is not capped that way. `/nai status` shows whether moderation is on and how many checks and flags were recorded today. Those two counters live in `usage.yml` and reset at server-local midnight.
+
+Leave `moderation.provider` and `moderation.model` empty to use the first available model-queue row. Set both to pin one endpoint. The chat text is sanitized, wrapped as `PLAYER INPUT`, and sent with the same player-input guard used by placeholders, so the player cannot instruct the moderator model. The classifier instructions are `moderation.system-prompt`. The guard is appended after them and is not configurable.
+
+### Privacy
+
+NexusAI has no telemetry. It does not phone home.
+
+When chat moderation is enabled, the chat line is sent to the configured provider as a chat-completion request, the same way any other prompt is. That includes the player name only in the staff notice and the log file on this machine, not as a separate analytics event. The message body itself is sent to the provider. For a server that does not want chat to leave the machine, point `moderation.provider` and `moderation.model` at a local endpoint such as Ollama or LM Studio (`http://localhost:11434/v1`, a local Qwen or Llama model) and leave the API key empty. A remote provider receives the text of every checked message.
 
 ## Placeholders
 
@@ -401,6 +422,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
 - `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. That API is the same on Paper and Purpur. The call stays Folia-safe, and Folia is not an officially supported target until stable builds exist.
 - `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
+- `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
 
 ## License
 

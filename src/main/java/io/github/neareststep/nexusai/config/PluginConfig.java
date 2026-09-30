@@ -84,6 +84,7 @@ public final class PluginConfig {
     private Map<String, FormatPreset> formats = Map.of();
     private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
             io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
+    private ModerationSettings moderation = ModerationSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -165,6 +166,7 @@ public final class PluginConfig {
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
+        this.moderation = ModerationSettings.load(config);
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -690,6 +692,10 @@ public final class PluginConfig {
 
     public List<String> getPrewarmPrompts() {
         return prewarmPrompts;
+    }
+
+    public ModerationSettings moderation() {
+        return moderation;
     }
 
     public Map<String, ProviderSettings> providers() {

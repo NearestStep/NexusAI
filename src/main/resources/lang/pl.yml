@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Ostatni błąd: &f{last_error}"
   status-provider-pause: "&7Pauza dostawcy: &f{provider_pause}"
+  status-moderation: "&7Moderacja: &f{state} &8({checks} sprawdzeń, {flags} zgłoszeń dzisiaj)"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportuj prompty z folderu import"
   prompts-import-ok: "{prefix}&aZaimportowano &f{file}&a. Dodano: &f{added}&a. Pominięto: &f{skipped}&a. Konflikty: &f{conflicting}&a."
@@ -77,3 +78,6 @@ talk:
   failed: "{prefix}&cBrak odpowiedzi: &f{error}"
   empty: "{prefix}&7Napisz trochę więcej."
   reply: "{prefix}&f{character}&7: &f{reply}"
+
+moderation:
+  notify: "{prefix}&eOznaczona wiadomość &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

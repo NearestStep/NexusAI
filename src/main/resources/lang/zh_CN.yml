@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI：&f{papi}"
   status-last-error: "&7最近错误：&f{last_error}"
   status-provider-pause: "&7提供商暂停：&f{provider_pause}"
+  status-moderation: "&7审核: &f{state} &8(今日检查 {checks}，标记 {flags})"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &f从 import 文件夹导入提示词"
   prompts-import-ok: "{prefix}&a已导入 &f{file}&a。新增：&f{added}&a。跳过：&f{skipped}&a。冲突：&f{conflicting}&a。"
@@ -77,3 +78,6 @@ talk:
   failed: "{prefix}&c没有回复：&f{error}"
   empty: "{prefix}&7请再多说一点。"
   reply: "{prefix}&f{character}&7：&f{reply}"
+
+moderation:
+  notify: "{prefix}&e已标记聊天 &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"
