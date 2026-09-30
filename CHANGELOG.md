@@ -60,6 +60,15 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 - Console actions run with the server's privileges. The command text is the admin's template, but the model chooses when it runs. Give every action a cooldown and a daily limit. Do not put an open-ended economy or permission command in an action.
 - `NexusAIApi.talk(player, id, message)` returns a `CompletableFuture`. A blank message opens a session and completes with the greeting. Do not join that future on a region thread.
 
+### Chat moderation
+
+- Opt-in `moderation.enabled`, default **false**. Public chat is delivered immediately. The check is queued after the chat event returns and does not cancel, delay, or change the message. Cancelled chat is not checked.
+- A flagged line notifies online players with `nexusai.moderation.notify` and is appended to `plugins/NexusAI/moderation.log`. The helper does not punish and does not run commands. There is no `command-on-flag` setting.
+- `nexusai.moderation.bypass` skips the check. Messages shorter than `moderation.min-length` are ignored. `max-checks-per-minute` is server-wide. `player-cooldown-seconds` spaces checks for one player. A check that is sent spends that model-queue row's `daily-request-limit` in `usage.yml`. Today's check and flag counts are stored there too and reset at server-local midnight.
+- Empty `moderation.provider` and `moderation.model` use the first available model-queue row. Set both to pin an endpoint. The chat line is sanitized, wrapped as player input, and sent with the player-input guard. The model must reply with JSON (`flagged`, `category`, `reason`). An unparseable reply is not flagged.
+- `/nai status` shows moderation on or off and today's checks and flags.
+- When moderation is on, checked chat text is sent to that provider. A local model (Ollama or LM Studio) keeps the text on the machine. NexusAI still has no telemetry.
+
 ## 0.7.0-SNAPSHOT
 
 Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. On startup the plugin migrates a missing `config-version` (0.6.0) to 1 and writes `<file>.bak` first.
