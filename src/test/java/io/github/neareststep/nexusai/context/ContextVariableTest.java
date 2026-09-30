@@ -22,10 +22,14 @@ class ContextVariableTest {
 
     @Test
     void timeAndWeatherFormats() {
-        assertEquals("day 06:00", GameClock.format(0));
-        assertEquals("day 12:00", GameClock.format(6_000));
-        assertEquals("night 18:00", GameClock.format(12_000));
-        assertEquals("night 00:00", GameClock.format(18_000));
+        assertEquals("morning", GameClock.format(0));
+        assertEquals("morning", GameClock.format(5_999));
+        assertEquals("day", GameClock.format(6_000));
+        assertEquals("day", GameClock.format(11_999));
+        assertEquals("evening", GameClock.format(12_000));
+        assertEquals("night", GameClock.format(18_000));
+        assertEquals("morning", GameClock.format(24_000));
+        assertFalse(GameClock.format(1_234).contains(":"));
         assertEquals("clear", GameClock.weather(false, false));
         assertEquals("rain", GameClock.weather(true, false));
         assertEquals("thunder", GameClock.weather(true, true));
@@ -63,14 +67,14 @@ class ContextVariableTest {
         }, Map.of(
                 "biome", "desert",
                 "world", "world",
-                "time", "day 12:00",
+                "time", "day",
                 "weather", "clear",
                 "player", "QABot1"));
-        assertEquals("standing in the desert biome of world at day 12:00 in clear, talking to QABot1", sheet);
+        assertEquals("standing in the desert biome of world at day in clear, talking to QABot1", sheet);
         assertFalse(sheet.contains("PLAYER INPUT"));
         assertFalse(sheet.contains("§"));
 
-        String floodgate = prompt.render(template -> template, Map.of("player", ".Steve", "biome", "plains", "world", "w", "time", "night 00:00", "weather", "rain"));
+        String floodgate = prompt.render(template -> template, Map.of("player", ".Steve", "biome", "plains", "world", "w", "time", "night", "weather", "rain"));
         assertTrue(floodgate.contains("talking to .Steve"));
         assertFalse(floodgate.contains("PLAYER INPUT"));
 

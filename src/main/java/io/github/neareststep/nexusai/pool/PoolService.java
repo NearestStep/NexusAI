@@ -112,7 +112,7 @@ public final class PoolService {
             warnStaleNamedRows();
             store.load(pool, staticLimits(), this::dynamicLimit);
         }
-        if (!config.isPoolEnabled() || !config.canSendRequests()) {
+        if (!config.isPoolEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (PoolEntry entry : config.getPoolEntries()) {
@@ -139,7 +139,7 @@ public final class PoolService {
         Objects.requireNonNull(configuredPrompt, "configuredPrompt");
         Objects.requireNonNull(poolKey, "poolKey");
         String memory = memoryKey(configuredPrompt, poolKey);
-        if (!running || !config.isPoolEnabled() || !config.canSendRequests()) {
+        if (!running || !config.isPoolEnabled() || !config.canSendChatRequests()) {
             return;
         }
         PoolEntry entry = entriesByPrompt.get(configuredPrompt);

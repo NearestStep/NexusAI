@@ -21,7 +21,7 @@ public final class PlayerInput {
      * Cache-key marker. The guard text is not configurable, so this constant is what changes the key
      * if the guard sentence itself ever changes.
      */
-    public static final String KEY_VERSION = "player-input-guard-v6";
+    public static final String KEY_VERSION = "player-input-guard-v7";
 
     /** Shown when the reply restates the guard, leaks a boundary, or refuses and then complies. */
     public static final String GUARD_REJECTION =
@@ -36,9 +36,16 @@ public final class PlayerInput {
     private static final int UNICODE = Pattern.UNICODE_CHARACTER_CLASS;
     private static final Pattern LEGACY_COLOR = Pattern.compile(
             "(?i)[§&]x(?:[§&][0-9a-f]){6}|[§&][0-9a-fk-or]");
-    /** Section-sign codes only. Ampersand text in a model reply is left alone. */
-    private static final Pattern SECTION_COLOR = Pattern.compile(
-            "(?i)§x(?:§[0-9a-f]){6}|§[0-9a-fk-or]");
+    /**
+     * Glued boundary variants such as {@code §§END§§}. A colour-code pass would eat {@code §E}
+     * and leave {@code ND}, so these spans are rewritten to a spaced marker first.
+     */
+    private static final Pattern MARKER_END = Pattern.compile(
+            "§+\\s*end\\s*§+|§{2,}\\s*end\\b|\\bend\\s*§{2,}",
+            UNICODE);
+    private static final Pattern MARKER_PLAYER = Pattern.compile(
+            "§+\\s*player\\s+input\\s*§+|§{2,}\\s*player\\s+input\\b|\\bplayer\\s+input\\s*§{2,}",
+            UNICODE);
     /**
      * A Java account name, or the same name with one leading {@code .} used by Floodgate for Bedrock.
      * The body is 3–16 letters, digits, or underscores.
@@ -245,16 +252,25 @@ public final class PlayerInput {
     }
 
     /**
-     * Removes Minecraft section-sign formatting from model output.
-     * A legacy code is {@code §} plus one color or format character, or a hex code
-     * {@code §x§R§R§G§G§B§B}. Those codes are removed as a unit, then every remaining {@code §} is removed.
-     * {@code &} codes are not color codes in the reply and stay as text.
+     * Removes Minecraft formatting from model output, pool rows, and cached answers.
+     * A legacy code is {@code §} or {@code &} plus one color or format character
+     * ({@code 0-9}, {@code a-f}, {@code k-o}, {@code r}), or a hex code
+     * {@code §x§R§R§G§G§B§B} / {@code &x&R&R&G&G&B&B}. Those codes are removed as a unit,
+     * then every remaining {@code §} is removed. A bare {@code &} is kept, so
+     * {@code rock & stone} and {@code &#FF0000} stay as text.
      */
     public static String stripSectionSigns(String raw) {
         if (raw == null || raw.isEmpty()) {
             return "";
         }
-        return SECTION_COLOR.matcher(raw).replaceAll("").replace("§", "");
+        return LEGACY_COLOR.matcher(raw).replaceAll("").replace("§", "");
+    }
+
+    /**
+     * True when {@code text} contains a wrapped player span. The guard is sent only then.
+     */
+    public static boolean containsWrappedInput(String text) {
+        return text != null && text.contains(OPEN);
     }
 
     /**
@@ -286,10 +302,15 @@ public final class PlayerInput {
     }
 
     /**
-     * Appends {@link #GUARD} after whatever the admin and the format preset already contributed.
-     * An empty admin prompt still yields the guard. The guard is always the final paragraph.
+     * Appends {@link #GUARD} after whatever the admin and the format preset already contributed,
+     * and only when {@code include} is true. The guard is the final paragraph when it is sent.
+     * An empty admin prompt with the guard still yields the guard alone. Without it, {@code system}
+     * is returned unchanged (a null system becomes an empty string).
      */
-    public static String appendGuard(String system) {
+    public static String appendGuard(String system, boolean include) {
+        if (!include) {
+            return system == null ? "" : system;
+        }
         if (system == null || system.isBlank()) {
             return GUARD;
         }
@@ -464,11 +485,15 @@ public final class PlayerInput {
     }
 
     /**
-     * Lowercases, strips legacy color codes, then strips every remaining {@code &}.
+     * Lowercases, rewrites glued markers such as {@code §§END§§} so a colour code cannot eat them,
+     * strips legacy color codes, then strips every remaining {@code &}.
      * Section signs that are not part of a color code stay, so {@code §§§} is still visible.
      */
     static String normalize(String raw) {
-        return LEGACY_COLOR.matcher(raw.toLowerCase(Locale.ROOT)).replaceAll("").replace("&", "");
+        String lower = raw.toLowerCase(Locale.ROOT);
+        lower = MARKER_END.matcher(lower).replaceAll("§§§ end §§§");
+        lower = MARKER_PLAYER.matcher(lower).replaceAll("§§§ player input §§§");
+        return LEGACY_COLOR.matcher(lower).replaceAll("").replace("&", "");
     }
 
     private static boolean coOccurs(Pattern left, Pattern right, String sentence) {

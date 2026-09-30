@@ -38,7 +38,7 @@ public final class DialogueProtocol {
         ArrayNode array = root.putArray("messages");
         ObjectNode systemMessage = array.addObject();
         systemMessage.put("role", "system");
-        systemMessage.put("content", PlayerInput.appendGuard(system));
+        systemMessage.put("content", PlayerInput.appendGuard(system, guardNeeded(system, messages)));
         if (messages != null) {
             for (MemoryLine line : messages) {
                 ObjectNode message = array.addObject();
@@ -129,6 +129,21 @@ public final class DialogueProtocol {
             return new TokenBudget(null, floor, effort);
         }
         return new TokenBudget(floor, null, effort);
+    }
+
+    private static boolean guardNeeded(String system, List<MemoryLine> messages) {
+        if (PlayerInput.containsWrappedInput(system)) {
+            return true;
+        }
+        if (messages == null) {
+            return false;
+        }
+        for (MemoryLine line : messages) {
+            if (line != null && PlayerInput.containsWrappedInput(line.text())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void addName(List<String> names, String raw) {

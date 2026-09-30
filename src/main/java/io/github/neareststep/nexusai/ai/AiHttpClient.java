@@ -122,7 +122,7 @@ public final class AiHttpClient {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(admissionKey, "admissionKey");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(null, admissionKey, false);
@@ -148,7 +148,7 @@ public final class AiHttpClient {
 
     public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides) {
         Objects.requireNonNull(prompt, "prompt");
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(RateLimiter.SERVER_SENTINEL, prompt, true);
@@ -205,7 +205,7 @@ public final class AiHttpClient {
         if (existing != null) {
             return existing;
         }
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         CompletableFuture<String> created = new CompletableFuture<>();
@@ -280,6 +280,10 @@ public final class AiHttpClient {
                 gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);
                 created.complete(value);
             } else if (error != null || value == null || value.isBlank()) {
+                if (AiErrors.localMissingKey(error)) {
+                    created.completeExceptionally(AiErrors.unwrap(error));
+                    return;
+                }
                 Throwable failure = error != null
                         ? error
                         : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
@@ -350,6 +354,9 @@ public final class AiHttpClient {
     }
 
     public void recordAdmissionFailure(String admissionKey, Throwable error) {
+        if (AiErrors.localMissingKey(error)) {
+            return;
+        }
         AiErrorKind kind = AiErrors.classify(error);
         if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
             return;

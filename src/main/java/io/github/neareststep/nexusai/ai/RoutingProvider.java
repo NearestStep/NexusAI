@@ -159,10 +159,8 @@ public final class RoutingProvider implements AiProvider {
                 return null;
             }
             if (!provider.hasKeys() && !config.providerAllowsKeyless(provider)) {
-                last.error = new AiRequestException(AiErrorKind.BAD_KEY, 0, "API key is not configured", null);
-                if (!probe) {
-                    fail(queueIndex, dedicatedFallback, providerId, model, last.error);
-                }
+                // No HTTP call. Do not record this as a rejected key or cool the row down.
+                last.error = new AiRequestException(AiErrorKind.OTHER, 0, "API key is not configured", null);
                 return null;
             }
             boolean consumed = dedicatedFallback

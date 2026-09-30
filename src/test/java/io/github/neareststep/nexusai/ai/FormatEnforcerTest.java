@@ -55,9 +55,14 @@ class FormatEnforcerTest {
         yaml.set("api.key", "test-key");
         yaml.set("api.system-prompt", "Be brief");
         PluginConfig config = new PluginConfig(yaml);
-        var body = OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none().withFormat("hologram"));
-        String system = body.getMessages().getFirst().getContent();
+        var plain = OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none().withFormat("hologram"));
+        String withoutGuard = plain.getMessages().getFirst().getContent();
         String instruction = FormatPresets.builtin("hologram").instruction();
+        assertTrue(withoutGuard.startsWith("Be brief"));
+        assertTrue(withoutGuard.endsWith(instruction));
+        assertFalse(withoutGuard.contains(PlayerInput.GUARD));
+        var wrapped = OpenAiProvider.buildBody(config, PlayerInput.wrap("hi"), GenerationOverrides.none().withFormat("hologram"));
+        String system = wrapped.getMessages().getFirst().getContent();
         assertTrue(system.startsWith("Be brief"));
         assertTrue(system.contains(instruction));
         assertTrue(system.endsWith(PlayerInput.GUARD));

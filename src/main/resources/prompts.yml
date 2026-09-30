@@ -18,7 +18,7 @@ config-version: 1
 #
 # These tokens work without PlaceholderAPI. They are read on the player's region thread.
 # A vars: entry of the same name wins: {player} {world} {biome} {time} {weather}
-# {time} looks like "day 14:00" or "night 00:00". {weather} is clear, rain, or thunder.
+# {time} is morning, day, evening, or night. {weather} is clear, rain, or thunder.
 #
 # format: simple, chat, gui, name, hologram, actionbar, or bossbar.
 # Omit it to use formats.default from config.yml. The format is part of the cache key
