@@ -43,13 +43,41 @@ class ContextVariableTest {
         String rendered = prompt.render(template -> {
             throw new AssertionError(template);
         }, Map.of("player", "Steve", "biome", "plains", "weather", "rain"));
-        assertEquals("Hello " + PlayerInput.wrap("Steve") + " in " + PlayerInput.wrap("hub"), rendered);
+        assertEquals("Hello Steve in " + PlayerInput.wrap("hub"), rendered);
         assertTrue(PromptCatalog.parse("""
                 where:
                   prompt: "You are in {world} during {time} with {weather}"
                 """).catalog().find("where").orElseThrow().playerDependent());
         assertEquals("You are in {world}", ContextVariables.apply("You are in {world}", Set.of(), Map.of()));
-        assertEquals("You are in " + PlayerInput.wrap("lobby"), ContextVariables.apply("You are in {world}", Set.of("player"), Map.of("world", "lobby")));
+        assertEquals("You are in lobby", ContextVariables.apply("You are in {world}", Set.of("player"), Map.of("world", "lobby")));
+    }
+
+    @Test
+    void serverBuiltInsAreRawInPlaceholderAndDialoguePrompts() {
+        var prompt = PromptCatalog.parse("""
+                guide:
+                  prompt: "standing in the {biome} biome of {world} at {time} in {weather}, talking to {player}"
+                """).catalog().find("guide").orElseThrow();
+        String sheet = prompt.render(template -> {
+            throw new AssertionError(template);
+        }, Map.of(
+                "biome", "desert",
+                "world", "world",
+                "time", "day 12:00",
+                "weather", "clear",
+                "player", "QABot1"));
+        assertEquals("standing in the desert biome of world at day 12:00 in clear, talking to QABot1", sheet);
+        assertFalse(sheet.contains("PLAYER INPUT"));
+        assertFalse(sheet.contains("§"));
+
+        String floodgate = prompt.render(template -> template, Map.of("player", ".Steve", "biome", "plains", "world", "w", "time", "night 00:00", "weather", "rain"));
+        assertTrue(floodgate.contains("talking to .Steve"));
+        assertFalse(floodgate.contains("PLAYER INPUT"));
+
+        String untrusted = ContextVariables.apply("Hello {player}", Set.of(), Map.of("player", "Not A Name"));
+        assertEquals("Hello " + PlayerInput.wrap("Not A Name"), untrusted);
+        assertEquals("Hello " + PlayerInput.wrap("ab"), ContextVariables.apply("Hello {player}", Set.of(), Map.of("player", "ab")));
+        assertEquals("Hello Steve", ContextVariables.apply("Hello {player}", Set.of(), Map.of("player", "Steve")));
     }
 
     @Test

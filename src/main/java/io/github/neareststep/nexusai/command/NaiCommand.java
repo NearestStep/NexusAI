@@ -153,7 +153,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         if (args.length < 2) {
-            messages.send(sender, "talk.usage");
+            messages.send(sender, sender instanceof Player ? "talk.usage" : "talk.console-usage");
             return;
         }
         if ("end".equalsIgnoreCase(args[1])) {
@@ -176,15 +176,16 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             id = args[1];
             messageAt = 2;
         } else {
-            if (args.length < 3) {
-                messages.send(sender, "talk.players-only");
+            String typedId = args.length >= 3 ? args[2] : "";
+            boolean online = Bukkit.getPlayerExact(args[1]) != null;
+            boolean known = !typedId.isEmpty()
+                    && plugin.getPromptCatalog().find(typedId.toLowerCase(Locale.ROOT)).isPresent();
+            ConsoleTalkError error = consoleTalkError(args, online, known);
+            if (error != null) {
+                messages.send(sender, error.messageKey(), error.placeholders());
                 return;
             }
             player = Bukkit.getPlayerExact(args[1]);
-            if (player == null) {
-                messages.send(sender, "talk.unknown-player", Map.of("player", args[1]));
-                return;
-            }
             id = args[2];
             messageAt = 3;
         }
@@ -226,9 +227,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-provider", Map.of("provider", config.getProvider()));
         messages.send(sender, "command.status-base-url", Map.of("base_url", config.getBaseUrl()));
         messages.send(sender, "command.status-model", Map.of("model", config.getModel()));
-        String masked = config.maskedApiKeys();
         messages.send(sender, "command.status-api-key", Map.of(
-                "api_key", masked.isBlank() ? no : masked
+                "api_key", statusApiKeyText(config, yes, no)
         ));
         messages.send(sender, "command.status-pool", Map.of(
                 "pool_state", config.isPoolEnabled() ? enabled : disabled,
@@ -280,6 +280,50 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-knowledge", Map.of(
                 "files", String.valueOf(plugin.getKnowledgeBase().size())
         ));
+    }
+
+    /**
+     * Text for the API-key status line. A configured key on {@code api.provider} stays masked.
+     * When that provider has no key but another queue, fallback, or moderation target can send,
+     * the line lists key presence per provider instead of a single {@code no}.
+     */
+    public static String statusApiKeyText(PluginConfig config, String yes, String no) {
+        if (config.hasApiKey()) {
+            String masked = config.maskedApiKeys();
+            return masked.isBlank() ? no : masked;
+        }
+        if (config.canSendRequests()) {
+            return config.providerKeyPresence(yes, no);
+        }
+        return no;
+    }
+
+    /**
+     * Argument errors for the console form {@code /nai talk <player> <id> [message]}.
+     * {@code null} means the talk may proceed and the character's reply still goes to the player.
+     * A non-null result is sent to the command sender, not the named player.
+     */
+    static ConsoleTalkError consoleTalkError(String[] args, boolean playerOnline, boolean characterKnown) {
+        if (args.length >= 2 && "end".equalsIgnoreCase(args[1])) {
+            return null;
+        }
+        if (args.length < 3) {
+            return new ConsoleTalkError("talk.console-usage", Map.of());
+        }
+        if (!playerOnline) {
+            return new ConsoleTalkError("talk.unknown-player", Map.of("player", args[1]));
+        }
+        if (!characterKnown) {
+            String id = args[2] == null ? "" : args[2].toLowerCase(Locale.ROOT);
+            return new ConsoleTalkError("talk.unknown-character", Map.of("id", id));
+        }
+        return null;
+    }
+
+    record ConsoleTalkError(String messageKey, Map<String, String> placeholders) {
+        ConsoleTalkError {
+            placeholders = placeholders == null ? Map.of() : Map.copyOf(placeholders);
+        }
     }
 
     static String queueLine(ModelQueue.Status row) {

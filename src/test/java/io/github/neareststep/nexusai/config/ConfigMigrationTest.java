@@ -147,6 +147,48 @@ class ConfigMigrationTest {
     }
 
     @Test
+    void appendingMissingKeysBacksUpConfigBeforeWriting() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-merge");
+        Path file = dir.resolve("config.yml");
+        String original = "locale: de\n# keep\n";
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(original, "locale: en\nfallback: \"...\"\n");
+        assertFalse(result.addedKeys().isEmpty());
+        Path backup = FileBackup.replace(file, result.yaml());
+        assertEquals(dir.resolve("config.yml.bak"), backup);
+        assertEquals(original, Files.readString(backup, StandardCharsets.UTF_8));
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("fallback:"));
+        assertTrue(written.contains("# keep"));
+        assertTrue(written.contains("locale: de"));
+
+        Path second = FileBackup.replace(file, written + "extra: 1\n");
+        assertTrue(second.getFileName().toString().startsWith("config.yml.bak."));
+        assertEquals(original, Files.readString(dir.resolve("config.yml.bak"), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void migrationRewritesBackUpPromptsPoolAndUsage() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-migrate-all");
+        String prompts = "welcome:\n  prompt: \"Hi\"\n";
+        String pool = "pools:\n- prompt: tip\n  answers:\n  - hello\n";
+        String usage = "today: 1\n";
+        Files.writeString(dir.resolve("prompts.yml"), prompts, StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve("pool.yml"), pool, StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve("usage.yml"), usage, StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("migrate-all");
+        assertFalse(ConfigMigrator.migrateFile(dir.resolve("prompts.yml"), ConfigMigrator::migratePrompts, logger).isEmpty());
+        assertFalse(ConfigMigrator.migrateFile(dir.resolve("pool.yml"), ConfigMigrator::migratePool, logger).isEmpty());
+        assertFalse(ConfigMigrator.migrateFile(dir.resolve("usage.yml"), ConfigMigrator::migrateUsage, logger).isEmpty());
+        assertEquals(prompts, Files.readString(dir.resolve("prompts.yml.bak"), StandardCharsets.UTF_8));
+        assertEquals(pool, Files.readString(dir.resolve("pool.yml.bak"), StandardCharsets.UTF_8));
+        assertEquals(usage, Files.readString(dir.resolve("usage.yml.bak"), StandardCharsets.UTF_8));
+        assertTrue(Files.readString(dir.resolve("prompts.yml"), StandardCharsets.UTF_8).contains("config-version:"));
+        assertTrue(Files.readString(dir.resolve("pool.yml"), StandardCharsets.UTF_8).contains("config-version:"));
+        assertTrue(Files.readString(dir.resolve("usage.yml"), StandardCharsets.UTF_8).contains("config-version:"));
+    }
+
+    @Test
     void poolMigrationQuotesAnswersAndStillReadsWrappedFiles() throws Exception {
         String old = """
                 pools:
