@@ -31,6 +31,17 @@ class AnswerFormatterTest {
     }
 
     @Test
+    void stripsSectionSignsBeforePlaceholdersDialoguePoolAndCache() {
+        assertEquals("In the plains biome", AnswerFormatter.format("In the §plains§ biome", false, 0, 0));
+        assertEquals("Hello", AnswerFormatter.format("§cHello", false, 0, 0));
+        assertEquals("Hello", AnswerFormatter.format("§c§lHello", false, 0, 0));
+        assertEquals("hex", AnswerFormatter.format("§x§f§f§0§0§0§0hex", false, 0, 0));
+        assertEquals("A&B", AnswerFormatter.format("A&B", false, 0, 0));
+        assertFalse(AnswerFormatter.format("§ksecret", false, 0, 0).contains("§"));
+        assertEquals("Hello", PlayerInput.stripSectionSigns("§cHello"));
+    }
+
+    @Test
     void keepsMarkdownWhenDisabled() {
         assertEquals("**Hi**", AnswerFormatter.format("**Hi**", false, 0, 0));
     }

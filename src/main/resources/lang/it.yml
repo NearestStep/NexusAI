@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&cI dialoghi sono disattivati."
   players-only: "{prefix}&cSolo i giocatori possono parlare con un personaggio. Dalla console: &e/nai talk <player> <id>"
   usage: "{prefix}&cUso: &e/nai talk <id> [message] &co &e/nai talk end"
+  console-usage: "{prefix}&cUso: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&cPersonaggio sconosciuto &f{id}&c."
   unknown-player: "{prefix}&cIl giocatore &f{player} &cnon è online."
   no-session: "{prefix}&7Non sei in un dialogo."

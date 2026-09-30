@@ -550,11 +550,62 @@ public final class PluginConfig {
     }
 
     /**
-     * Requests may be sent when a key is configured, or when the endpoint does not need one
-     * (Ollama preset, or a localhost / port 11434 base URL).
+     * Requests may be sent when at least one model-queue row, the fallback model, or an enabled
+     * pinned moderation provider can accept a call. A target can accept a call when it has an API
+     * key or when its endpoint does not need one (Ollama, or a localhost / port 11434 base URL).
+     * An empty key on {@code api.provider} does not block a different row that can send.
      */
     public boolean canSendRequests() {
-        return !requestsHeld && (hasApiKey() || allowsKeylessRequests());
+        if (requestsHeld) {
+            return false;
+        }
+        for (QueueEntryConfig entry : modelQueue) {
+            if (providerUsable(provider(entry.provider()))) {
+                return true;
+            }
+        }
+        FallbackModel fallback = fallbackModel();
+        if (fallback.configured() && providerUsable(provider(fallback.provider()))) {
+            return true;
+        }
+        ModerationSettings pinned = moderation == null ? ModerationSettings.defaults() : moderation;
+        return pinned.enabled() && pinned.pinned() && providerUsable(provider(pinned.provider()));
+    }
+
+    /**
+     * Key presence for the active provider, each model-queue provider, the fallback model, and a
+     * pinned moderation provider. {@code yes} and {@code no} are the localized words.
+     */
+    public String providerKeyPresence(String yes, String no) {
+        String present = yes == null ? "yes" : yes;
+        String absent = no == null ? "no" : no;
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        if (provider != null && !provider.isBlank()) {
+            ids.add(provider);
+        }
+        for (QueueEntryConfig entry : modelQueue) {
+            ids.add(entry.provider());
+        }
+        FallbackModel fallback = fallbackModel();
+        if (fallback.configured()) {
+            ids.add(fallback.provider());
+        }
+        if (moderation != null && moderation.pinned()) {
+            ids.add(moderation.provider());
+        }
+        StringBuilder line = new StringBuilder();
+        for (String id : ids) {
+            if (!line.isEmpty()) {
+                line.append(", ");
+            }
+            ProviderSettings settings = providers.get(id);
+            line.append(id).append(": ").append(settings != null && settings.hasKeys() ? present : absent);
+        }
+        return line.toString();
+    }
+
+    private boolean providerUsable(ProviderSettings candidate) {
+        return candidate != null && (candidate.hasKeys() || providerAllowsKeyless(candidate));
     }
 
     /**

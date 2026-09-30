@@ -49,6 +49,7 @@ class LocaleFilesTest {
             "talk.disabled",
             "talk.players-only",
             "talk.usage",
+            "talk.console-usage",
             "talk.unknown-character",
             "talk.unknown-player",
             "talk.no-session",

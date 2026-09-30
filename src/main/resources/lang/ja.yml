@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&c会話は無効です。"
   players-only: "{prefix}&cキャラクターと話せるのはプレイヤーだけです。コンソールから: &e/nai talk <player> <id>"
   usage: "{prefix}&c使い方: &e/nai talk <id> [message] &cまたは &e/nai talk end"
+  console-usage: "{prefix}&c使い方: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&c不明なキャラクター &f{id}&c。"
   unknown-player: "{prefix}&cプレイヤー &f{player} &cはオフラインです。"
   no-session: "{prefix}&7会話中ではありません。"

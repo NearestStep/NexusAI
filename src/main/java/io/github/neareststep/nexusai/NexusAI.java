@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
+import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.ConfigMerger;
@@ -299,7 +300,8 @@ public final class NexusAI extends JavaPlugin {
             if (result.addedKeys().isEmpty()) {
                 return true;
             }
-            Files.writeString(file.toPath(), result.yaml(), StandardCharsets.UTF_8);
+            java.nio.file.Path backup = FileBackup.replace(file.toPath(), result.yaml());
+            getLogger().info("Backed up config.yml to " + backup.toAbsolutePath());
             getLogger().info("Added missing config keys: " + String.join(", ", result.addedKeys()));
             reloadConfig();
             return true;
@@ -343,7 +345,7 @@ public final class NexusAI extends JavaPlugin {
             return;
         }
         loggedMissingKey = false;
-        if (!pluginConfig.hasApiKey()) {
+        if (!pluginConfig.hasApiKey() && pluginConfig.allowsKeylessRequests()) {
             getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
         }
     }
