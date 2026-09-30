@@ -29,7 +29,11 @@ class PlaceholderActionIsolationTest {
         JsonNode body = mapper.valueToTree(OpenAiProvider.buildBody(config, "give_iron", GenerationOverrides.none()));
         assertFalse(body.has("tools"));
         assertFalse(body.has("tool_choice"));
-        assertEquals("give_iron", body.get("messages").get(1).get("content").asText());
+        JsonNode messages = body.get("messages");
+        assertEquals(1, messages.size());
+        assertEquals("user", messages.get(0).get("role").asText());
+        assertEquals("give_iron", messages.get(0).get("content").asText());
+        assertFalse(messages.get(0).get("content").asText().contains(PlayerInput.GUARD));
 
         DialogueProtocol.ParsedCompletion parsed = DialogueProtocol.parse(
                 "{\"choices\":[{\"message\":{\"content\":\"give_iron\"}}]}");

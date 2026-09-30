@@ -82,8 +82,10 @@ public final class MessageService {
     }
 
     public String format(String key, Map<String, String> placeholders) {
-        String message = raw(key);
-        String prefix = raw("prefix");
+        // Colour codes belong to the template and the prefix. Substituted values, including a
+        // model reply, are inserted afterwards so their '&' text is not turned into formatting.
+        String message = colorize(raw(key));
+        String prefix = colorize(raw("prefix"));
         Map<String, String> values = new LinkedHashMap<>();
         values.put("prefix", prefix);
         if (placeholders != null) {
@@ -92,7 +94,7 @@ public final class MessageService {
         for (Map.Entry<String, String> entry : values.entrySet()) {
             message = message.replace('{' + entry.getKey() + '}', entry.getValue() == null ? "" : entry.getValue());
         }
-        return colorize(message);
+        return message;
     }
 
     public String format(String key) {

@@ -4,6 +4,8 @@ import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.GameClock;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
@@ -165,6 +168,29 @@ class AiHttpClientTest {
         assertEquals("answer", second.get(2, TimeUnit.SECONDS));
         assertEquals(1, calls.get());
         assertEquals("answer", cache.get(client.cacheKey("same")).orElseThrow());
+    }
+
+    @Test
+    void repeatedCachedReadsWithinTheSamePeriodHitTheCache() {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("period-" + calls.get());
+        };
+        AiHttpClient client = new AiHttpClient(cache, provider, configWithKey, Logger.getLogger("time-cache"));
+        String template = "TIMEPROBE time={time}";
+        String morning = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(0)));
+        String stillMorning = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(4_000)));
+        assertEquals("TIMEPROBE time=morning", morning);
+        assertEquals(morning, stillMorning);
+        assertEquals("period-1", client.requestAsync(morning).join());
+        assertEquals("period-1", client.requestAsync(stillMorning).join());
+        assertEquals(1, calls.get());
+
+        String evening = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(12_000)));
+        assertEquals("TIMEPROBE time=evening", evening);
+        assertEquals("period-2", client.requestAsync(evening).join());
+        assertEquals(2, calls.get());
     }
 
     @Test

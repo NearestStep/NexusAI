@@ -2,13 +2,16 @@
 
 ## Unreleased (1.0.0)
 
-One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `NexusAI-0.7.0-SNAPSHOT.jar` with this build. `api-version` is **1.20.6**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. New keys are added only when they are missing. Before that write, and before a migration rewrites `config.yml`, `prompts.yml`, `pool.yml`, or `usage.yml`, the file is copied to `<file>.bak` (or `<file>.bak.<timestamp>` when that backup exists) and the backup path is logged.
+One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `NexusAI-0.7.0-SNAPSHOT.jar` with this build. `api-version` is **1.20.6**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. New keys are added only when they are missing. Before that write, and before a migration rewrites `config.yml`, `prompts.yml`, `pool.yml`, or `usage.yml`, the file is copied to `<file>.bak` (or `<file>.bak.<timestamp>` when that backup exists) and the backup path is logged. One startup writes one backup of `config.yml`.
 
 ### Requests, player input, and console talk
 
-- A request is allowed when any `model-queue` row, the fallback model, or an enabled pinned moderation provider has a key or is a local endpoint. An empty key on `api.provider` does not block the others. `/nai test` uses that queue. `/nai status` lists key presence per provider when `api.provider` has no key but another target can send. The missing-key warning is logged only when no target can send.
-- `{biome}`, `{world}`, `{time}`, and `{weather}` are inserted raw. `{player}` is raw when the name matches `[A-Za-z0-9_]{3,16}` or that pattern with one leading `.`. Other names, `vars:`, PlaceholderAPI values, talk messages, and extra `/nai test` text stay wrapped. Dialogue system prompts use the same rules. The cache key is `player-input-guard-v6`.
-- Model replies lose every `§` and legacy `§` colour code before they reach placeholders, dialogue replies, the pool, or the cache.
+- A request is allowed when any `model-queue` row, the fallback model, or an enabled pinned moderation provider has a key or is a local endpoint. An empty key on `api.provider` does not block the others. Placeholders and `/nai test` send only when a queue row or the fallback model can. `/nai status` lists key presence per provider when `api.provider` has no key but another target can send.
+- `{biome}`, `{world}`, `{time}`, and `{weather}` are inserted raw. `{time}` is `morning`, `day`, `evening`, or `night`, not a minute clock, so repeated `cached_` reads in the same period reuse one answer. `{player}` is raw when the name matches `[A-Za-z0-9_]{3,16}` or that pattern with one leading `.`. Other names, `vars:`, PlaceholderAPI values, talk messages, and extra `/nai test` text stay wrapped. Dialogue system prompts use the same rules. The cache key is `player-input-guard-v7`.
+- Model replies lose every `§`, every legacy `§` colour code, and the same `&` colour and format codes (`&0-9a-fk-or`, `&x` hex) before they reach placeholders, dialogue replies, the pool, or the cache. `&#RRGGBB` and a bare `&` stay text. Stored pool and cache rows are cleaned on the way out, including answers written by an older jar. Chat templates translate `&` before `{reply}` or `{answer}` is inserted, so a model cannot colour `/nai talk` or `/nai test`.
+- The player-input guard is sent only when the request contains `§§§ PLAYER INPUT §§§`. A prompt with no wrapped span does not include it. Marker checks still reject a glued boundary such as `§§END§§`.
+- `/nai status` lists a keyless local provider as `local`. When only pinned moderation has a key, startup warns that placeholders and `/nai test` will not be sent, and status does not show a provider key rejection for a call that never left the server.
+- One startup writes one `config.yml` backup. A 0.6.0 migration that also appends missing keys keeps the original file as that single backup.
 - From the console, `/nai talk <player>` with no id prints `/nai talk <player> <id> [message]`. An unknown character or an offline player is reported to the console. The character's reply still goes to the player.
 
 ### Fallback model
@@ -20,7 +23,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 ### Knowledge
 
 - `plugins/NexusAI/knowledge/` holds `.md` and `.txt` files. `example.md` is created on first start and is never overwritten.
-- A prompt lists `knowledge: [lore, rules]` (names without the extension). The text is inserted in the system message after the admin system prompt and before the format instruction, inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`. The player-input guard stays last.
+- A prompt lists `knowledge: [lore, rules]` (names without the extension). The text is inserted in the system message after the admin system prompt and before the format instruction, inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`. When the request contains wrapped player input, the player-input guard stays last.
 - `knowledge.max-chars` caps one request. `knowledge.max-file-chars` caps one file. Truncation logs one warning. An unknown file logs a warning when prompts load. `/nai reload` reads the folder again. The cache key includes a hash of the injected text. There is no vector search.
 
 ### Prompt import
@@ -46,7 +49,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 ### Compatibility
 
 - Supported servers are Paper and Purpur 1.20.6–26.2. The jar is compiled with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. Paper 1.20.6 accepts `api-version: '1.20.6'` because minor api-versions have been valid since 1.20.5. Newer Paper and Purpur builds still load that api-version.
-- Folia is not supported. Paper and Purpur 26.3 are not supported. `plugin.yml` still has `folia-supported: true`; that flag is not a support statement. Spigot and CraftBukkit are not supported.
+- Folia is not supported. `plugin.yml` sets `folia-supported: false`. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
 - `{biome}` is read through `Keyed.getKey()`. `Biome` is an enum on 1.20.6 and a registry interface on newer servers, and a direct `Biome.getKey()` call compiled against the enum fails on the interface. The other Bukkit methods this plugin calls keep the same descriptors from 1.20.6 through 26.2 (region schedulers, world time and weather, commands, and configuration).
 - CI boots official stable Paper builds 1.20.6, 1.21.1, 1.21.4, and 1.21.8 on Java 21, and 26.2 on Java 25, with PlaceholderAPI 2.12.3. It checks that NexusAI enables and `/nai status` works against a mock OpenAI-compatible endpoint.
 
@@ -54,7 +57,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 
 - `/nai talk <id> [message]` talks to a character whose id is a prompt in `prompts.yml`. A message is one reply. With no message, a session opens: the player's later chat lines go to that character and are not broadcast. The session ends on `dialogue.session-timeout-seconds`, when the player walks farther than `dialogue.leave-radius`, on `/nai talk end`, or on quit. The console form is `/nai talk <player> <id> [message]`, so an NPC plugin can run the command as the player or from the console.
 - `nexusai.talk` defaults to op. An admin grants it to the players who should talk. They do not need `nexusai.command`. The `/nai` command node has no permission of its own, so that grant is enough to run `/nai talk`. Admin subcommands still need `nexusai.command`.
-- The model receives the character prompt as the system text, the player-input guard, and the last `dialogue.memory-turns` turns (default 8). Memory is per player and character, trimmed to `dialogue.memory-max-chars`, and dropped after `dialogue.memory-expiry-hours` when `dialogue.persist-memory` is true (`dialogue-memory.yml`). Otherwise it lasts until restart.
+- The model receives the character prompt as the system text and the last `dialogue.memory-turns` turns (default 8). The player-input guard is included when a turn contains wrapped player text. Memory is per player and character, trimmed to `dialogue.memory-max-chars`, and dropped after `dialogue.memory-expiry-hours` when `dialogue.persist-memory` is true (`dialogue-memory.yml`). Otherwise it lasts until restart.
 - Dialogue limits are separate from placeholder limits: `dialogue.max-replies-per-session`, `dialogue.message-cooldown-millis` (default 3000), `dialogue.conversations-per-player-per-day`, and `dialogue.max-message-length`. Each line still spends the model queue, key rotation, and the server and player daily caps. Dialogue replies are not taken from the answer pool. A greeting written in `dialogue.greeting` is sent as-is. A generated greeting may be cached for `cache.ttl` when `dialogue.cache-greeting` is true.
 - Player lines are sanitized, wrapped in `§§§ PLAYER INPUT §§§`, and the reply goes through the same guard filter as placeholders.
 - Dialogue messages are translated in every bundled locale.
@@ -122,7 +125,7 @@ Named prompts. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `api-versio
 
 ### Region schedulers
 
-- `plugin.yml` sets `folia-supported: true`. That flag is not a support statement. Folia is not a supported platform, and 26.3 is not a supported version. See the 1.0.0 compatibility notes.
+- 0.6.0 set `folia-supported: true`. That was not Folia support. 1.0.0 sets `folia-supported: false`. Folia is not a supported platform, and 26.3 is not a supported version. See the 1.0.0 compatibility notes.
 - `/nai test` no longer calls `Bukkit.getScheduler()`. The result is delivered with the player's entity scheduler, or the global region scheduler for any other sender. A failure in that async completion is written to the server log.
 
 ## 0.5.1-SNAPSHOT

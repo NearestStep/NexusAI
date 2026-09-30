@@ -79,7 +79,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         if (instruction != null && !instruction.isBlank()) {
             system = system == null ? instruction : system + "\n\n" + instruction;
         }
-        system = PlayerInput.appendGuard(system);
+        system = PlayerInput.appendGuard(system, PlayerInput.containsWrappedInput(prompt));
+        if (system.isBlank()) {
+            system = null;
+        }
         Double temperature = effective.temperature(config.getTemperature());
         Integer maxTokens = effective.maxTokens(config.getMaxTokens());
         String model = effective.model(config.getModel());
@@ -99,7 +102,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             }
         }
         List<ChatCompletionRequest.Message> messages = new ArrayList<>(2);
-        messages.add(new ChatCompletionRequest.Message("system", system));
+        if (system != null) {
+            messages.add(new ChatCompletionRequest.Message("system", system));
+        }
         messages.add(new ChatCompletionRequest.Message("user", prompt));
         return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
     }
