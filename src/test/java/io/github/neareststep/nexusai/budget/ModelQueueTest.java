@@ -95,6 +95,36 @@ class ModelQueueTest {
         assertEquals("openai", queue.select(1_000L).orElseThrow().provider());
     }
 
+    @Test
+    void rejectedCountPersistsAcrossReloadAndResetsAtMidnight() throws Exception {
+        Path file = Files.createTempDirectory("nexusai-usage-rejected").resolve("usage.yml");
+        AtomicReference<LocalDate> day = new AtomicReference<>(LocalDate.of(2026, 9, 29));
+        Logger logger = Logger.getLogger("queue-rejected-persist");
+        ZoneId zone = ZoneId.of("UTC");
+        ModelQueue queue = queue(file, day, logger, zone, 0);
+        assertTrue(queue.tryConsume(0, 1_000L));
+        queue.recordRejection(0);
+        queue.recordRejection(0);
+        queue.recordRejection(1);
+        assertEquals(1, queue.requestsToday(0));
+        assertEquals(2, queue.status(1_000L).get(0).rejected());
+        assertEquals(1, queue.status(1_000L).get(1).rejected());
+
+        ModelQueue reloaded = queue(file, day, logger, zone, 0);
+        assertEquals(1, reloaded.requestsToday(0));
+        assertEquals(2, reloaded.status(1_000L).get(0).rejected());
+        assertEquals(1, reloaded.status(1_000L).get(1).rejected());
+
+        day.set(LocalDate.of(2026, 9, 30));
+        assertEquals(0, reloaded.requestsToday(0));
+        assertEquals(0, reloaded.status(2_000L).get(0).rejected());
+        assertEquals(0, reloaded.status(2_000L).get(1).rejected());
+
+        ModelQueue nextDay = queue(file, day, logger, zone, 0);
+        assertEquals(0, nextDay.requestsToday(0));
+        assertEquals(0, nextDay.status(2_000L).get(0).rejected());
+    }
+
     private static ModelQueue queue(Path file, AtomicReference<LocalDate> day, Logger logger, ZoneId zone, int limit) {
         return new ModelQueue(
                 List.of(

@@ -266,6 +266,7 @@ public final class ModelQueue {
             return;
         }
         slot.rejected.incrementAndGet();
+        save();
     }
 
     public synchronized void cooldown(int index, long untilMillis, Hold hold) {
@@ -331,6 +332,7 @@ public final class ModelQueue {
                     row.put("provider", slot.provider);
                     row.put("model", slot.model);
                     row.put("requests", slot.requests.get());
+                    row.put("rejected", slot.rejected.get());
                     rows.add(row);
                 }
                 yaml.set("entries", rows);
@@ -370,9 +372,15 @@ public final class ModelQueue {
             if (raw instanceof Number number) {
                 requests = Math.max(0, number.intValue());
             }
+            int rejected = 0;
+            Object rawRejected = row.get("rejected");
+            if (rawRejected instanceof Number number) {
+                rejected = Math.max(0, number.intValue());
+            }
             for (Slot slot : slots) {
                 if (slot.storageId().equals(String.valueOf(id))) {
                     slot.requests.set(requests);
+                    slot.rejected.set(rejected);
                     if (slot.dailyLimit > 0 && requests >= slot.dailyLimit) {
                         holdUntilMidnight(slot, clock.getAsLong());
                     }
