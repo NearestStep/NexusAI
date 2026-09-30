@@ -39,7 +39,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 ### Compatibility
 
 - Supported servers are Paper and Purpur 1.20.6–26.2. The jar is compiled with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. Paper 1.20.6 accepts `api-version: '1.20.6'` because minor api-versions have been valid since 1.20.5. Newer Paper and Purpur builds still load that api-version.
-- Folia and 26.3 are not officially supported until stable builds exist. `folia-supported` stays `true`, and command results still use the region schedulers, so a current Folia server is not broken. Spigot and CraftBukkit stay unsupported.
+- Folia is not supported. Paper and Purpur 26.3 are not supported. `plugin.yml` still has `folia-supported: true`; that flag is not a support statement. Spigot and CraftBukkit are not supported.
 - `{biome}` is read through `Keyed.getKey()`. `Biome` is an enum on 1.20.6 and a registry interface on newer servers, and a direct `Biome.getKey()` call compiled against the enum fails on the interface. The other Bukkit methods this plugin calls keep the same descriptors from 1.20.6 through 26.2 (region schedulers, world time and weather, commands, and configuration).
 - CI boots official stable Paper builds 1.20.6, 1.21.1, 1.21.4, and 1.21.8 on Java 21, and 26.2 on Java 25, with PlaceholderAPI 2.12.3. It checks that NexusAI enables and `/nai status` works against a mock OpenAI-compatible endpoint.
 
@@ -102,7 +102,7 @@ Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `
 
 ## 0.6.0-SNAPSHOT
 
-Named prompts and Folia. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml` values are kept. On first startup the plugin creates `plugins/NexusAI/prompts.yml` from the commented default and does not overwrite it later.
+Named prompts. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml` values are kept. On first startup the plugin creates `plugins/NexusAI/prompts.yml` from the commented default and does not overwrite it later.
 
 ### Named prompts
 
@@ -113,9 +113,9 @@ Named prompts and Folia. Replace `NexusAI-0.5.1-SNAPSHOT.jar` with this build. `
 - `pool.entries[].prompt` and `prewarm.prompts` may be an id. A player-specific prompt is not filled until a player reads it. `/nai reload` reloads `prompts.yml`. `/nai prompts` lists ids. `/nai test` tab-completes ids and, when the whole argument is an id, sends that prompt.
 - Load warnings cover an invalid id, an empty prompt, a duplicate id, an unknown setting, an id that collides with another prompt, and an id-shaped pool or prewarm entry that is not defined. Those id-shaped entries are still sent as literal text.
 
-### Folia
+### Region schedulers
 
-- `plugin.yml` sets `folia-supported: true`. Paper, Purpur, and Folia 26.2/26.3 keep one code path.
+- `plugin.yml` sets `folia-supported: true`. That flag is not a support statement. Folia is not a supported platform, and 26.3 is not a supported version. See the 1.0.0 compatibility notes.
 - `/nai test` no longer calls `Bukkit.getScheduler()`. The result is delivered with the player's entity scheduler, or the global region scheduler for any other sender. A failure in that async completion is written to the server log.
 
 ## 0.5.1-SNAPSHOT
