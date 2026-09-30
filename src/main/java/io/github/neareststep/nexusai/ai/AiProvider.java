@@ -21,4 +21,14 @@ public interface AiProvider {
     default CompletableFuture<String> complete(String prompt, GenerationOverrides overrides) {
         return complete(prompt);
     }
+
+    /**
+     * Same as {@link #complete(String, GenerationOverrides)}.
+     * When {@code ignoreCooldown} is true, a probe may call a model that is in a temporary
+     * error or rate-limit cooldown. Daily caps still apply. Implementations that have no
+     * cooldown ignore the flag.
+     */
+    default CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        return complete(prompt, overrides);
+    }
 }

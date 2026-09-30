@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -12,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
@@ -191,6 +193,28 @@ class AiHttpClientTest {
         assertTrue(client.lastErrorText().contains("API key"));
         clock.addAndGet(300_000L);
         assertFalse(client.isProviderPaused());
+    }
+
+    @Test
+    void testAsyncAsksTheProviderToIgnoreCooldown() {
+        AtomicBoolean ignoreCooldown = new AtomicBoolean();
+        AiProvider provider = new AiProvider() {
+            @Override
+            public CompletableFuture<String> complete(String prompt) {
+                return CompletableFuture.completedFuture("pong");
+            }
+
+            @Override
+            public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean probe) {
+                ignoreCooldown.set(probe);
+                return CompletableFuture.completedFuture("pong");
+            }
+        };
+        AiHttpClient client = client(configWithKey, new RateLimiter(100, 100), new AtomicLong(1_000L), provider);
+        assertEquals("pong", client.requestAsync("live").join());
+        assertFalse(ignoreCooldown.get());
+        assertEquals("pong", client.testAsync("probe").join());
+        assertTrue(ignoreCooldown.get());
     }
 
     @Test

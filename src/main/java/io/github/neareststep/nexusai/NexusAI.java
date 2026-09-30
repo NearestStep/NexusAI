@@ -5,6 +5,9 @@ import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
+import io.github.neareststep.nexusai.ai.RoutingProvider;
+import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.ConfigMerger;
@@ -62,11 +65,20 @@ public final class NexusAI extends JavaPlugin {
     private HttpClient sharedHttpClient;
     private AiPlaceholderExpansion placeholderExpansion;
     private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
+    private volatile ModelQueue modelQueue;
     private boolean loggedMissingKey;
     private boolean loggedMissingPapi;
 
     @Override
     public void onEnable() {
+        if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
+            getLogger().warning("Could not create the NexusAI data folder.");
+        }
+        saveDefaultConfig();
+        if (!new File(getDataFolder(), "prompts.yml").isFile()) {
+            saveResource("prompts.yml", false);
+        }
+        migrateConfigs();
         if (!mergeMissingConfig()) {
             getLogger().warning("config.yml has a syntax error. The file was left unchanged, "
                     + "and AI requests stay off until a valid /nai reload.");
@@ -78,10 +90,15 @@ public final class NexusAI extends JavaPlugin {
         this.messageService.reload(pluginConfig.getLocale());
         loadPrompts();
         logCredentialState();
+        logMissingEnvVars();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
                 + ", model: " + pluginConfig.getModel());
+        String maskedKeys = pluginConfig.maskedApiKeys();
+        if (!maskedKeys.isBlank()) {
+            getLogger().info("API keys: " + maskedKeys);
+        }
 
         this.httpExecutor = createHttpExecutor();
         this.scheduler = createScheduler();
@@ -112,6 +129,7 @@ public final class NexusAI extends JavaPlugin {
                     "prompts.yml has a syntax error. The file and the loaded prompts were left unchanged. "
                             + parsed.error());
         }
+        migrateConfigs();
         if (!mergeMissingConfig()) {
             throw new IllegalStateException(
                     "config.yml has a syntax error. The file and the loaded configuration were left unchanged.");
@@ -125,6 +143,7 @@ public final class NexusAI extends JavaPlugin {
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
+        logMissingEnvVars();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -164,6 +183,9 @@ public final class NexusAI extends JavaPlugin {
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        if (modelQueue != null) {
+            modelQueue.save();
+        }
         if (prewarmService != null) {
             prewarmService.shutdown();
             prewarmService = null;
@@ -265,6 +287,13 @@ public final class NexusAI extends JavaPlugin {
         return config;
     }
 
+    private void logMissingEnvVars() {
+        for (String name : pluginConfig.missingEnvVars()) {
+            getLogger().warning("Environment variable " + name
+                    + " is not set. Its placeholder was replaced with an empty value and is not used as an API key.");
+        }
+    }
+
     private void logCredentialState() {
         if (pluginConfig.requestsHeld()) {
             return;
@@ -288,7 +317,22 @@ public final class NexusAI extends JavaPlugin {
         if (!KNOWN_PROVIDERS.contains(provider)) {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
-        return new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        OpenAiProvider http = new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        this.modelQueue = new ModelQueue(
+                config.modelQueue(),
+                config.modelQueueRemainingThreshold(),
+                config.getProviderPauseSeconds() * 1000L,
+                config.getAuthPauseSeconds() * 1000L,
+                new File(getDataFolder(), "usage.yml"),
+                getLogger());
+        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger());
+    }
+
+    private void migrateConfigs() {
+        ConfigMigrator.migrateFile(new File(getDataFolder(), "config.yml").toPath(), ConfigMigrator::migrateConfig, getLogger());
+        ConfigMigrator.migrateFile(new File(getDataFolder(), "prompts.yml").toPath(), ConfigMigrator::migratePrompts, getLogger());
+        ConfigMigrator.migrateFile(new File(getDataFolder(), "pool.yml").toPath(), ConfigMigrator::migratePool, getLogger());
+        ConfigMigrator.migrateFile(new File(getDataFolder(), "usage.yml").toPath(), ConfigMigrator::migrateUsage, getLogger());
     }
 
     private HttpClient sharedClient(PluginConfig config) {
@@ -391,6 +435,10 @@ public final class NexusAI extends JavaPlugin {
 
     public PromptCatalog getPromptCatalog() {
         return promptCatalog;
+    }
+
+    public ModelQueue getModelQueue() {
+        return modelQueue;
     }
 
     private void loadPrompts() {

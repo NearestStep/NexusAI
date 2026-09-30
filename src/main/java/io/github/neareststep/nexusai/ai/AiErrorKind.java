@@ -11,7 +11,9 @@ public enum AiErrorKind {
     TIMEOUT("timeout"),
     OTHER("other"),
     /** Local minute/day limiter. Not a provider failure. */
-    LOCAL_LIMIT("local-limit");
+    LOCAL_LIMIT("local-limit"),
+    /** The model leaked a player-input boundary or restated the guard. Not a provider failure. */
+    REJECTED("rejected");
 
     private final String langKey;
 
