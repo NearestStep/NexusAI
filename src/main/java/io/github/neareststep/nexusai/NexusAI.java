@@ -27,6 +27,9 @@ import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
+import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.dialogue.DialogueListener;
+import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.Bukkit;
@@ -75,6 +78,7 @@ public final class NexusAI extends JavaPlugin {
     private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
     private volatile KnowledgeBase knowledgeBase = KnowledgeBase.empty();
     private volatile ModelQueue modelQueue;
+    private DialogueService dialogueService;
     private volatile OpenAiProvider openAiProvider;
     private volatile ModerationService moderationService;
     private ChatModerationListener moderationListener;
@@ -129,6 +133,11 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onDisable() {
         unregisterPlaceholderExpansion();
+        if (dialogueService != null) {
+            dialogueService.shutdown();
+            NexusAIApi.bind(null);
+            dialogueService = null;
+        }
         stopRuntimeServices(true);
         closeSharedHttpClient();
         shutdownExecutor(scheduler);
@@ -199,6 +208,12 @@ public final class NexusAI extends JavaPlugin {
         poolService.start();
         prewarmService.start();
         prewarmService.scheduleRefresh();
+        if (dialogueService == null) {
+            dialogueService = new DialogueService(this, httpExecutor, scheduler);
+            dialogueService.start();
+            getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
+            NexusAIApi.bind(dialogueService);
+        }
         startModeration();
     }
 
@@ -472,6 +487,10 @@ public final class NexusAI extends JavaPlugin {
 
     public ModelQueue getModelQueue() {
         return modelQueue;
+    }
+
+    public DialogueService getDialogueService() {
+        return dialogueService;
     }
 
     public ModerationService getModerationService() {

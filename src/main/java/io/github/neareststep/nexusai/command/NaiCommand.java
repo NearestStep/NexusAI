@@ -43,7 +43,7 @@ import java.util.stream.Stream;
 public final class NaiCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "version", "reload", "status", "test", "prompts");
+            "help", "version", "reload", "status", "test", "prompts", "talk");
     private static final String DEFAULT_TEST_PROMPT = "Reply with exactly the word pong.";
 
     private final NexusAI plugin;
@@ -60,12 +60,25 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             @NotNull String[] args
     ) {
         MessageService messages = plugin.getMessageService();
-        if (!sender.hasPermission("nexusai.command")) {
+        String sub = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
+        boolean admin = sender.hasPermission("nexusai.command");
+        boolean canTalk = sender.hasPermission("nexusai.talk") || admin;
+        if ("talk".equals(sub)) {
+            if (!canTalk) {
+                messages.send(sender, "command.no-permission");
+                return true;
+            }
+            handleTalk(sender, messages, args);
+            return true;
+        }
+        if (!admin) {
+            if ("help".equals(sub) && sender.hasPermission("nexusai.talk")) {
+                sendTalkHelp(sender, messages);
+                return true;
+            }
             messages.send(sender, "command.no-permission");
             return true;
         }
-
-        String sub = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
         if (args.length > 1 && !"test".equals(sub) && !"prompts".equals(sub)) {
             messages.send(sender, "command.extra-args");
             return true;
@@ -122,6 +135,63 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         if (sender.hasPermission("nexusai.import")) {
             messages.send(sender, "command.help-prompts-import");
         }
+        if (sender.hasPermission("nexusai.talk") || sender.hasPermission("nexusai.command")) {
+            messages.send(sender, "command.help-talk");
+            messages.send(sender, "command.help-talk-end");
+        }
+    }
+
+    private void sendTalkHelp(CommandSender sender, MessageService messages) {
+        messages.send(sender, "command.help-header");
+        messages.send(sender, "command.help-talk");
+        messages.send(sender, "command.help-talk-end");
+    }
+
+    private void handleTalk(CommandSender sender, MessageService messages, String[] args) {
+        if (plugin.getDialogueService() == null) {
+            messages.send(sender, "talk.disabled");
+            return;
+        }
+        if (args.length < 2) {
+            messages.send(sender, "talk.usage");
+            return;
+        }
+        if ("end".equalsIgnoreCase(args[1])) {
+            if (args.length > 2) {
+                messages.send(sender, "command.extra-args");
+                return;
+            }
+            if (!(sender instanceof Player player)) {
+                messages.send(sender, "talk.no-session");
+                return;
+            }
+            plugin.getDialogueService().end(player);
+            return;
+        }
+        Player player;
+        String id;
+        int messageAt;
+        if (sender instanceof Player self) {
+            player = self;
+            id = args[1];
+            messageAt = 2;
+        } else {
+            if (args.length < 3) {
+                messages.send(sender, "talk.players-only");
+                return;
+            }
+            player = Bukkit.getPlayerExact(args[1]);
+            if (player == null) {
+                messages.send(sender, "talk.unknown-player", Map.of("player", args[1]));
+                return;
+            }
+            id = args[2];
+            messageAt = 3;
+        }
+        String message = messageAt >= args.length
+                ? ""
+                : String.join(" ", Arrays.copyOfRange(args, messageAt, args.length)).trim();
+        plugin.getDialogueService().fromCommand(player, id, message);
     }
 
     private void handleReload(CommandSender sender, MessageService messages) {
@@ -420,8 +490,46 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             @NotNull String alias,
             @NotNull String[] args
     ) {
-        if (!sender.hasPermission("nexusai.command")) {
+        boolean admin = sender.hasPermission("nexusai.command");
+        boolean canTalk = admin || sender.hasPermission("nexusai.talk");
+        if (!admin && !canTalk) {
             return List.of();
+        }
+        if (args.length == 2 && "talk".equals(args[0].toLowerCase(Locale.ROOT)) && canTalk) {
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            List<String> ids = new ArrayList<>();
+            if ("end".startsWith(prefix)) {
+                ids.add("end");
+            }
+            if (!(sender instanceof Player)) {
+                try {
+                    if (Bukkit.getServer() != null) {
+                        for (Player player : Bukkit.getOnlinePlayers()) {
+                            if (player.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                                ids.add(player.getName());
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // Tab completion must not fail when the server is not booted.
+                }
+            }
+            for (String id : plugin.getPromptCatalog().ids()) {
+                if (id.startsWith(prefix)) {
+                    ids.add(id);
+                }
+            }
+            return ids;
+        }
+        if (args.length == 3 && "talk".equals(args[0].toLowerCase(Locale.ROOT)) && !(sender instanceof Player)) {
+            String prefix = args[2].toLowerCase(Locale.ROOT);
+            List<String> ids = new ArrayList<>();
+            for (String id : plugin.getPromptCatalog().ids()) {
+                if (id.startsWith(prefix)) {
+                    ids.add(id);
+                }
+            }
+            return ids;
         }
         if (args.length >= 2 && "prompts".equals(args[0].toLowerCase(Locale.ROOT))) {
             return completePrompts(sender, args);
@@ -439,6 +547,10 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         if (args.length != 1) {
             return List.of();
         }
+        if (!admin) {
+            String prefix = args[0].toLowerCase(Locale.ROOT);
+            return "talk".startsWith(prefix) ? List.of("talk") : List.of();
+        }
         String prefix = args[0].toLowerCase(Locale.ROOT);
         List<String> out = new ArrayList<>();
         for (String sub : SUBCOMMANDS) {
@@ -452,6 +564,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 continue;
             }
             if ("test".equals(sub) && !sender.hasPermission("nexusai.test")) {
+                continue;
+            }
+            if ("talk".equals(sub) && !sender.hasPermission("nexusai.talk") && !sender.hasPermission("nexusai.command")) {
                 continue;
             }
             out.add(sub);

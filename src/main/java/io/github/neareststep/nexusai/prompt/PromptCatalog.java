@@ -36,6 +36,8 @@ public final class PromptCatalog {
             "temperature",
             "max-tokens",
             "format",
+            "dialogue",
+            "actions",
             "knowledge",
             "fallback-model"
     );
@@ -87,6 +89,9 @@ public final class PromptCatalog {
             GenerationOverrides overrides = GenerationOverrides.none();
             Map<String, String> vars = Map.of();
             String format = null;
+            io.github.neareststep.nexusai.dialogue.DialogueBinding.Result dialogue =
+                    new io.github.neareststep.nexusai.dialogue.DialogueBinding.Result(
+                            io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
             List<String> knowledge = List.of();
             FallbackModel fallbackModel = null;
             if (raw instanceof ConfigurationSection section) {
@@ -96,12 +101,14 @@ public final class PromptCatalog {
                 maxPromptLength = readMaxLength(key, section, warnings);
                 overrides = readOverrides(key, section, warnings);
                 format = readFormat(key, section, warnings);
+                dialogue = io.github.neareststep.nexusai.dialogue.DialogueBinding.read(key, section, warnings);
                 knowledge = readKnowledge(key, section, warnings);
                 fallbackModel = readFallbackModel(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
             loaded.put(key, new NamedPrompt(
-                    key, template, vars, ttl, fallback, maxPromptLength, overrides, format, knowledge, fallbackModel));
+                    key, template, vars, ttl, fallback, maxPromptLength, overrides, format,
+                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions()));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));
