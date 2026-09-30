@@ -26,6 +26,10 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 
 - `%ainexus_generate_<prompt>%` logs one warning when that prompt is not in `pool.entries` or the pool is disabled. The warning names the placeholder, says `generate_` only serves pooled answers, and includes a `pool.entries` example. It is logged once per prompt until `/nai reload`. `/nai status` lists those prompts. There is no stack trace.
 
+### Version command
+
+- `/nai version` also prints the authors from `plugin.yml` (`PluginMeta.getAuthors()`). The message is `command.version` with `{version}` and `{authors}`.
+
 ### Language files
 
 - On enable, missing bundled `lang/*.yml` files are copied to `plugins/NexusAI/lang/`. An existing file is never overwritten.
