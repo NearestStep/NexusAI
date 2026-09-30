@@ -90,6 +90,27 @@ model-queue:
   #   model: llama-3.3-70b-versatile
   #   daily-request-limit: 500
 
+# One last model after every model-queue entry is unavailable, failed, or rejected for this call.
+# Order: model-queue, then fallback-model, then a pooled answer, then fallback text.
+# Both provider and model are required. Leave either blank to disable.
+# A queue row with the same provider and model keeps that row's daily cap and cooldown and is not called twice.
+# A model that is not in the queue has its own cooldown. It is skipped when every queue row of that provider
+# is already at its daily cap. The reply uses the same player-input filter as the queue.
+# /nai status prints this model. A prompt may set its own fallback-model and that overrides this one.
+fallback-model:
+  provider: ""
+  model: ""
+
+# Server lore from plugins/NexusAI/knowledge/*.md and *.txt. No vector search.
+# A prompt lists file names without the extension: knowledge: [lore, rules]
+# The text is added to the system message after the admin system prompt and before the format instruction.
+# The player-input guard stays last. max-chars is the cap for one request. max-file-chars is the cap for one file.
+# Longer text is truncated and one warning is logged. /nai reload reads the folder again.
+# The example file is created once and is never overwritten.
+knowledge:
+  max-chars: 6000
+  max-file-chars: 4000
+
 # format: presets. Prompts inherit formats.default when they omit format.
 formats:
   default: simple
@@ -222,6 +243,7 @@ prewarm:
 fallback: "..."
 
 # NPC dialogues (/nai talk). Separate from placeholder limits.
+# /nai talk needs nexusai.talk. That permission defaults to op; grant it to players explicitly.
 # A reply still spends the model queue, key rotation, and the daily request caps.
 # Dialogue lines are not stored in the answer pool. A generated greeting may be cached.
 dialogue:

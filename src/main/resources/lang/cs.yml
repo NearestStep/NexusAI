@@ -7,8 +7,8 @@ command:
   extra-args: "{prefix}&cPřebytečné argumenty. Použijte &e/nai help&c."
   help-header: "{prefix}&ePříkazy NexusAI:"
   help-help: "&7/nai help &8- &fZobrazit tuto nápovědu"
-  help-version: "&7/nai version &8- &fZobrazit verzi pluginu"
-  help-reload: "&7/nai reload &8- &fZnovu načíst config, prompty a locale"
+  help-version: "&7/nai version &8- &fZobrazit verzi pluginu a autora"
+  help-reload: "&7/nai reload &8- &fZnovu načíst config, prompty, znalosti a jazykové soubory"
   help-status: "&7/nai status &8- &fZobrazit stav"
   help-test: "&7/nai test [prompt] &8- &fOdeslat jeden testovací požadavek"
   help-prompts: "&7/nai prompts &8- &fVypsat pojmenované prompty"
@@ -17,7 +17,7 @@ command:
   test-sending: "{prefix}&7Odesílání testovacího požadavku..."
   test-ok: "{prefix}&aOdpověď &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cTest selhal &8({latency_ms} ms)&c: &f{error}"
-  version: "{prefix}&fVerze: &a{version}"
+  version: "{prefix}&fVerze: &a{version}&7. Autor: &f{authors}"
   prompts-header: "{prefix}&ePojmenované prompty &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7Žádné pojmenované prompty. Přidejte je do &fprompts.yml&7."
@@ -35,6 +35,13 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Poslední chyba: &f{last_error}"
   status-provider-pause: "&7Pauza poskytovatele: &f{provider_pause}"
+
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportovat prompty ze složky import"
+  prompts-import-ok: "{prefix}&aImportováno &f{file}&a. Přidáno: &f{added}&a. Přeskočeno: &f{skipped}&a. Konflikty: &f{conflicting}&a."
+  prompts-import-fail: "{prefix}&cImport selhal: &f{error}"
+  status-fallback-model: "&7Záložní model: &f{entry}"
+  status-knowledge: "&7Soubory znalostí: &f{files}"
+  status-unpooled: "&7generate_ požadován, ale není v poolu: &f{prompts}"
 
 common:
   "yes": "ano"
