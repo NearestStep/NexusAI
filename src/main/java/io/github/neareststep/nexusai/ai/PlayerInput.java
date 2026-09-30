@@ -81,13 +81,22 @@ public final class PlayerInput {
                     + "|инструкц\\w*|правил\\w*|запрос\\w*|просьб\\w*",
             UNICODE);
     private static final Pattern META_PIVOT = Pattern.compile(
-            "\\b(?:however|anyway|nevertheless|regardless)\\b"
+            "\\b(?:however|anyway|nevertheless|nonetheless|regardless|anyhow)\\b"
                     + "|\\bthat said\\b"
+                    + "|\\beven so\\b"
+                    + "|\\bin any case\\b"
+                    + "|\\ball the same\\b"
                     + "|\\bbut\\b"
                     + "|\\bstill\\b"
                     + "|тем не менее"
+                    + "|(?<!\\w)тем более(?!\\w)"
                     + "|однако"
+                    + "|вс[её]-таки"
                     + "|вс[её] же"
+                    + "|(?<!\\w)впрочем(?!\\w)"
+                    + "|(?<!\\w)зато(?!\\w)"
+                    + "|(?<!\\w)так или иначе(?!\\w)"
+                    + "|(?<!\\w)в любом случае(?!\\w)"
                     + "|(?<!\\w)но(?!\\w)"
                     + "|раз\\s+(?:вы|ты)\\s+прос\\w*",
             UNICODE);
