@@ -10,6 +10,7 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import org.bukkit.Bukkit;
@@ -156,6 +157,13 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 messages.send(sender, "command.status-queue-line", Map.of("entry", queueLine(row)));
             }
         }
+        ModerationService moderation = plugin.getModerationService();
+        boolean moderationOn = moderation != null && moderation.enabled();
+        messages.send(sender, "command.status-moderation", Map.of(
+                "state", moderationOn ? enabled : disabled,
+                "checks", String.valueOf(moderation == null ? 0 : moderation.checksToday()),
+                "flags", String.valueOf(moderation == null ? 0 : moderation.flagsToday())
+        ));
     }
 
     static String queueLine(ModelQueue.Status row) {

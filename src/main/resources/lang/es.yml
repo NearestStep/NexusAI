@@ -33,6 +33,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Último error: &f{last_error}"
   status-provider-pause: "&7Pausa del proveedor: &f{provider_pause}"
+  status-moderation: "&7Moderación: &f{state} &8({checks} comprobaciones, {flags} avisos hoy)"
 
 common:
   "yes": "sí"
@@ -48,3 +49,6 @@ error:
   unknown-model: "modelo desconocido"
   timeout: "tiempo de espera"
   other: "error"
+
+moderation:
+  notify: "{prefix}&eMensaje marcado &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"
