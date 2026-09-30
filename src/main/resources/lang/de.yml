@@ -8,7 +8,7 @@ command:
   help-header: "{prefix}&eNexusAI-Befehle:"
   help-help: "&7/nai help &8- &fDiese Hilfe anzeigen"
   help-version: "&7/nai version &8- &fPlugin-Version anzeigen"
-  help-reload: "&7/nai reload &8- &fConfig, Prompts und Locale neu laden"
+  help-reload: "&7/nai reload &8- &fConfig, Prompts, Wissen und Sprachdateien neu laden"
   help-status: "&7/nai status &8- &fStatus anzeigen"
   help-test: "&7/nai test [prompt] &8- &fEine Testanfrage senden"
   help-prompts: "&7/nai prompts &8- &fBenannte Prompts auflisten"
@@ -34,12 +34,12 @@ command:
   status-last-error: "&7Letzter Fehler: &f{last_error}"
   status-provider-pause: "&7Anbieter-Pause: &f{provider_pause}"
 
-  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
-  prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
-  prompts-import-fail: "{prefix}&cImport failed: &f{error}"
-  status-fallback-model: "&7Fallback model: &f{entry}"
-  status-knowledge: "&7Knowledge files: &f{files}"
-  status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fPrompts aus dem Import-Ordner importieren"
+  prompts-import-ok: "{prefix}&aImportiert: &f{file}&a. Hinzugefügt: &f{added}&a. Übersprungen: &f{skipped}&a. Konflikte: &f{conflicting}&a."
+  prompts-import-fail: "{prefix}&cImport fehlgeschlagen: &f{error}"
+  status-fallback-model: "&7Fallback-Modell: &f{entry}"
+  status-knowledge: "&7Wissensdateien: &f{files}"
+  status-unpooled: "&7generate_ angefordert, aber nicht im Pool: &f{prompts}"
 
 common:
   "yes": "ja"
