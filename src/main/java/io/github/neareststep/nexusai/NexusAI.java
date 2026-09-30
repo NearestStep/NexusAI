@@ -185,6 +185,9 @@ public final class NexusAI extends JavaPlugin {
 
         AiProvider provider = createProvider(pluginConfig);
         RequestGate gate = RequestGate.fromConfig(rateLimiter, pluginConfig);
+        // Enable and /nai reload both build this gate. resetBackoff drops any empty-reply hold
+        // so a changed prompt is sent again instead of staying on the previous cooldown.
+        gate.resetBackoff();
         AiDiagnostics diagnostics = new AiDiagnostics(
                 getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());

@@ -3,7 +3,10 @@ package io.github.neareststep.nexusai.dialogue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.KeyRing;
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -24,6 +27,7 @@ import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DialogueHttpTest {
@@ -158,6 +162,16 @@ class DialogueHttpTest {
         assertFalse(reply.contains("§"));
         assertFalse(reply.contains("&c"));
         assertFalse(reply.contains("&x"));
+    }
+
+    @Test
+    void colourOnlyDialogueReplyNamesTheEmptyReply() {
+        DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
+        AiRequestException error = assertThrows(
+                AiRequestException.class,
+                () -> transport.finishText("&c§l", "hello", "simple", ""));
+        assertEquals(AiErrorKind.EMPTY_REPLY, error.kind());
+        assertEquals(PlayerInput.EMPTY_REPLY, error.getMessage());
     }
 
     private static CharacterAction action() {
