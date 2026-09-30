@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MessageServiceTest {
@@ -22,6 +23,29 @@ class MessageServiceTest {
         assertTrue(formatted.contains("0.3.0"));
         assertTrue(formatted.contains("Version:"));
         assertTrue(formatted.indexOf('&') < 0);
+    }
+
+    @Test
+    void templateColoursAreTranslatedBeforeTheReplyIsInserted() {
+        YamlConfiguration en = new YamlConfiguration();
+        en.set("prefix", "&8[&bNexusAI&8]&r ");
+        en.set("talk.reply", "{prefix}&f{character}&7: &f{reply}");
+        en.set("command.test-ok", "{prefix}&aAnswer: &f{answer}");
+
+        MessageService messages = MessageService.forTest(en, en, "en");
+        String reply = "&cAMPRED &#FF0000AMPHASH &x&f&f&0&0&0&0AMPHEX &lAMPBOLD &kAMPMAGIC";
+        String talk = messages.format("talk.reply", Map.of("character", "npc", "reply", reply));
+        String test = messages.format("command.test-ok", Map.of("answer", reply));
+
+        assertTrue(talk.contains("§f"));
+        assertTrue(talk.contains("&cAMPRED"));
+        assertTrue(talk.contains("&#FF0000AMPHASH"));
+        assertTrue(talk.contains("&x&f&f&0&0&0&0AMPHEX"));
+        assertTrue(talk.contains("&kAMPMAGIC"));
+        assertFalse(talk.contains("§cAMPRED"));
+        assertTrue(test.contains("&cAMPRED"));
+        assertFalse(test.contains("§cAMPRED"));
+        assertTrue(test.indexOf('§') >= 0);
     }
 
     @Test

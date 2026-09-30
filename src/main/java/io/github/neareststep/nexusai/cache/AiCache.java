@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.cache;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
@@ -53,7 +54,12 @@ public final class AiCache {
     }
 
     public Optional<String> get(String key) {
-        return Optional.ofNullable(cache.getIfPresent(key));
+        String value = cache.getIfPresent(key);
+        if (value == null) {
+            return Optional.empty();
+        }
+        String cleaned = PlayerInput.stripSectionSigns(value).trim();
+        return cleaned.isEmpty() ? Optional.empty() : Optional.of(cleaned);
     }
 
     public void put(String key, String value) {
