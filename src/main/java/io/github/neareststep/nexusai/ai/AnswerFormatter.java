@@ -43,7 +43,7 @@ public final class AnswerFormatter {
         return text;
     }
 
-    static String stripMarkdown(String text) {
+    public static String stripMarkdown(String text) {
         String stripped = FENCED.matcher(text).replaceAll("$1");
         stripped = INLINE_CODE.matcher(stripped).replaceAll("$1");
         stripped = IMAGE.matcher(stripped).replaceAll("$1");
