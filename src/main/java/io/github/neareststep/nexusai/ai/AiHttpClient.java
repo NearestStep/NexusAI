@@ -266,13 +266,17 @@ public final class AiHttpClient {
                         ? error
                         : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
                 AiErrorKind kind = AiErrors.classify(failure);
-                if (kind != AiErrorKind.LOCAL_LIMIT) {
+                if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
                     diagnostics.report(kind, AiErrors.detail(failure), gate.isPaused());
                 }
-                logger.log(Level.FINE, "AI request failed", failure);
+                if (kind == AiErrorKind.REJECTED) {
+                    logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
+                } else {
+                    logger.log(Level.FINE, "AI request failed", failure);
+                }
                 created.completeExceptionally(AiErrors.unwrap(failure));
             }
         } catch (RuntimeException e) {

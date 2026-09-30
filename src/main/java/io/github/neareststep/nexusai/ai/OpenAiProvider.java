@@ -178,9 +178,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
-            if (PlayerInput.restatesGuard(formatted)) {
+            if (PlayerInput.restatesGuard(text) || PlayerInput.restatesGuard(formatted)) {
                 throw new AiRequestException(
-                        AiErrorKind.OTHER,
+                        AiErrorKind.REJECTED,
                         response.statusCode(),
                         "The model restated the player-input guard instead of answering.",
                         null
@@ -249,6 +249,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case UNKNOWN_MODEL -> "HTTP " + status + " unknown model from " + host + ": " + truncated;
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
+            case REJECTED -> "Rejected model answer from " + host;
             case OTHER -> html && status == 403
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;

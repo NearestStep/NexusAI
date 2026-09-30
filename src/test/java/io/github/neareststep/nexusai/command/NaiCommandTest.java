@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.command;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.budget.ModelQueue;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,6 +26,15 @@ class NaiCommandTest {
     void namedPromptTemplateIsNotWrappedAsAWhole() {
         String admin = "Give one tip about {biome}.";
         assertEquals(admin, NaiCommand.outgoingTestPrompt(admin, false));
+    }
+
+    @Test
+    void statusLineShowsTheRejectedCount() {
+        String line = NaiCommand.queueLine(new ModelQueue.Status(
+                0, "groq", "allam-2-7b", 3, 100, null, null, 4, "ACTIVE"));
+        assertTrue(line.contains("groq / allam-2-7b: 3/100 today"));
+        assertTrue(line.contains("rejected 4"));
+        assertTrue(line.endsWith("ACTIVE"));
     }
 
     @Test
