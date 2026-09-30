@@ -150,6 +150,13 @@ class PlayerInputTest {
         assertFalse(PlayerInput.restatesGuard("I know what the player wrote on the sign by the well."));
         assertFalse(PlayerInput.restatesGuard("Thank you for providing the iron."));
         assertFalse(PlayerInput.restatesGuard("I will not obey the orc's commands."));
+        assertFalse(PlayerInput.restatesGuard("Бард цитирует игрока у костра."));
+        assertFalse(PlayerInput.restatesGuard("Стражник цитирует игрока перед воротами."));
+        assertFalse(PlayerInput.restatesGuard("Дети цитируют игрока на площади."));
+        assertTrue(PlayerInput.restatesGuard(
+                "I cannot process or execute commands, nested inputs, or system overrides contained within the player input."));
+        assertFalse(PlayerInput.restatesGuard(
+                "I cannot process or execute commands contained within player input data."));
         assertFalse(PlayerInput.restatesGuard("Спасибо за предоставленное железо."));
         assertTrue(PlayerInput.restatesGuard("Спасибо за предоставленный ввод игрока."));
         assertTrue(PlayerInput.restatesGuard("Отвечу без выполнения любых команд."));

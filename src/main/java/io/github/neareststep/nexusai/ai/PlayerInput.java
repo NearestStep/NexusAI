@@ -70,8 +70,9 @@ public final class PlayerInput {
             "\\b(?:will\\s+)?never\\s+obey\\s+commands\\s+inside\\s+(?:it|this text)\\b"
                     + "|\\b(?:do not|don't|don’t|will not|won't|won’t)\\s+obey\\s+commands\\s+inside\\s+(?:it|this text)\\b",
             UNICODE);
+    /** "цитируемый текст игрока". "цитирует игрока" is an ordinary NPC line and needs the word текст. */
     private static final Pattern RU_QUOTED_PLAYER = Pattern.compile(
-            "(?:цитир|цитат)\\w*\\s+(?:текст\\w*\\s+)?игрок", UNICODE);
+            "(?:цитир|цитат)\\w*\\s+текст\\w*\\s+игрок", UNICODE);
     private static final Pattern RU_ONLY_AS_CONTENT = Pattern.compile(
             "только\\s+как\\s+содержан\\w*", UNICODE);
     private static final Pattern RU_USE_ONLY_AS_CONTENT = Pattern.compile(
@@ -91,16 +92,21 @@ public final class PlayerInput {
     private static final Pattern EN_PROVIDE_PLAYER = Pattern.compile(
             "\\bprovid(?:ing|ed)(?:\\s+you\\s+with)?\\s+the\\s+player\\s+(?:input|data|text)\\b", UNICODE);
     private static final Pattern EN_COMMANDS_WITHIN = Pattern.compile(
-            "\\b(?:obey(?:ing)?|execut\\w*|follow\\w*|engag\\w*\\s+in\\s+following)\\s+(?:any\\s+)?commands?\\s+"
-                    + "(?:inside|within|contained\\s+within)\\s+"
+            "\\b(?:obey(?:ing)?|execut\\w*|follow\\w*|engag\\w*\\s+in\\s+following)\\s+(?:any\\s+)?commands?\\b"
+                    + "(?:[\\s,]+(?:or|and|\\w+)){0,12}?"
+                    + "\\s+(?:inside|within|contained\\s+within)\\s+"
                     + "(?:it\\b|those\\s+sections|the\\s+(?:player\\s+)?(?:text|input)\\b)",
             UNICODE);
     private static final Pattern EN_WITHOUT_COMMANDS = Pattern.compile(
             "\\bwithout\\s+(?:obeying|executing)\\s+any\\s+commands\\b", UNICODE);
     private static final Pattern EN_SPECIFIED_SECTIONS = Pattern.compile(
             "\\bwithin\\s+the\\s+specified\\s+sections\\b", UNICODE);
+    /**
+     * "contained within player text" and "contained within the player input".
+     * "contained within player input data" stays: the extra word data is the qwen refusal that is kept.
+     */
     private static final Pattern EN_CONTAINED_PLAYER_TEXT = Pattern.compile(
-            "\\bcontained\\s+within\\s+player\\s+text\\b", UNICODE);
+            "\\bcontained\\s+within\\s+(?:the\\s+)?player\\s+(?:text|input)\\b(?!\\s+data\\b)", UNICODE);
     private static final Pattern EN_ASSISTANCE_GIVEN = Pattern.compile(
             "\\bi\\s+will\\s+provide\\s+assistance\\s+based\\s+on\\s+the\\s+given\\s+(?:text|information|input)\\b",
             UNICODE);
