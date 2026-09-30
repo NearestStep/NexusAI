@@ -33,6 +33,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Son hata: &f{last_error}"
   status-provider-pause: "&7Sağlayıcı duraklaması: &f{provider_pause}"
+  status-moderation: "&7Moderasyon: &f{state} &8(bugün {checks} kontrol, {flags} işaret)"
 
 common:
   "yes": "evet"
@@ -48,3 +49,6 @@ error:
   unknown-model: "bilinmeyen model"
   timeout: "zaman aşımı"
   other: "hata"
+
+moderation:
+  notify: "{prefix}&eİşaretlenen sohbet &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

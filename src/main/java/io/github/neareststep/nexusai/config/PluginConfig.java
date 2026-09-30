@@ -79,6 +79,7 @@ public final class PluginConfig {
     private int modelQueueRemainingThreshold;
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
+    private ModerationSettings moderation = ModerationSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -154,6 +155,7 @@ public final class PluginConfig {
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
+        this.moderation = ModerationSettings.load(config);
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -679,6 +681,10 @@ public final class PluginConfig {
 
     public List<String> getPrewarmPrompts() {
         return prewarmPrompts;
+    }
+
+    public ModerationSettings moderation() {
+        return moderation;
     }
 
     public Map<String, ProviderSettings> providers() {

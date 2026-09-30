@@ -219,4 +219,35 @@ prewarm:
   #   - "Welcome, {player}"
   #   - "Server tip of the day"
 
+# Opt-in chat moderation. Off by default.
+# Public chat is still delivered immediately. The check runs afterwards and never
+# cancels, delays, punishes, or runs a command. There is no command-on-flag.
+# When this is enabled, the message text is sent to the provider below, or to the
+# model-queue when provider and model are both empty. Use a local model (Ollama
+# or LM Studio) if chat must not leave the machine.
+# Each check spends the selected model-queue entry's daily-request-limit in usage.yml.
+# The player-input guard is always appended after system-prompt.
+moderation:
+  enabled: false
+  # Both empty = first available model-queue entry. Set both to pin one endpoint.
+  provider: ""
+  model: ""
+  # Server-wide cap. Further messages in that minute are not checked. Minimum 1.
+  max-checks-per-minute: 30
+  # Seconds before the same player is checked again. 0 = no cooldown.
+  player-cooldown-seconds: 15
+  # Trimmed messages shorter than this are ignored.
+  min-length: 8
+  system-prompt: |
+    Classify the Minecraft chat message in the user turn.
+    Reply with one JSON object and no other text:
+    {"flagged":false,"category":"none","reason":""}
+    Set flagged to true only for toxicity, insult, veiled insult, harassment, or spam.
+    category must be one of: toxicity, insult, veiled insult, harassment, spam, none.
+    reason is one short sentence when flagged, and empty otherwise.
+  # 0 is sent. Negative = omit temperature.
+  temperature: 0
+  # 0 = omit max_tokens.
+  max-tokens: 80
+
 fallback: "..."
