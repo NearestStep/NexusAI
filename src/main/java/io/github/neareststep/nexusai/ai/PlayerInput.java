@@ -23,9 +23,15 @@ public final class PlayerInput {
      */
     public static final String KEY_VERSION = "player-input-guard-v7";
 
-    /** Shown when the reply restates the guard, leaks a boundary, or refuses and then complies. */
+    /** Shown when the reply restates the guard or refuses and then complies. */
     public static final String GUARD_REJECTION =
             "The model restated the player-input guard instead of answering.";
+    /** Shown when the reply leaks a boundary such as {@code §§END§§}. */
+    public static final String MARKER_LEAK =
+            "The model leaked a player-input marker instead of answering.";
+    /** Shown when colour codes were the whole reply, so nothing is left to show. */
+    public static final String EMPTY_REPLY =
+            "The model reply was empty after removing colour codes.";
     /** Shown when the reply is mostly an attack span copied from the wrapped player text. */
     public static final String ECHO_REJECTION =
             "The model echoed player input instead of answering.";
@@ -36,6 +42,15 @@ public final class PlayerInput {
     private static final int UNICODE = Pattern.UNICODE_CHARACTER_CLASS;
     private static final Pattern LEGACY_COLOR = Pattern.compile(
             "(?i)[§&]x(?:[§&][0-9a-f]){6}|[§&][0-9a-fk-or]");
+    /**
+     * Two or more {@code &} or {@code §} glued to {@code end} or {@code player input}.
+     * A colour-code pass would eat {@code &E} or {@code §E} and leave a half-eaten word,
+     * so the run is spaced first. A single code such as {@code &B} is left for the colour pass.
+     */
+    private static final Pattern GLUED_INPUT_BEFORE = Pattern.compile("(?i)([§&]{2,})(player\\s+input\\b)");
+    private static final Pattern GLUED_END_BEFORE = Pattern.compile("(?i)([§&]{2,})(end\\b)");
+    private static final Pattern GLUED_INPUT_AFTER = Pattern.compile("(?i)(\\binput)([§&]{2,})");
+    private static final Pattern GLUED_END_AFTER = Pattern.compile("(?i)(\\bend)([§&]{2,})");
     /**
      * Glued boundary variants such as {@code §§END§§}. A colour-code pass would eat {@code §E}
      * and leave {@code ND}, so these spans are rewritten to a spaced marker first.
@@ -245,10 +260,7 @@ public final class PlayerInput {
      * ({@code §B} is aqua) and {@code A&B} becomes {@code A}.
      */
     public static String sanitize(String raw) {
-        if (raw == null || raw.isEmpty()) {
-            return "";
-        }
-        return LEGACY_COLOR.matcher(raw).replaceAll("").replace("§", "");
+        return removeFormatting(raw);
     }
 
     /**
@@ -258,12 +270,27 @@ public final class PlayerInput {
      * {@code §x§R§R§G§G§B§B} / {@code &x&R&R&G&G&B&B}. Those codes are removed as a unit,
      * then every remaining {@code §} is removed. A bare {@code &} is kept, so
      * {@code rock & stone} and {@code &#FF0000} stay as text.
+     * A run of two or more {@code &} or {@code §} glued to {@code END} or {@code PLAYER INPUT}
+     * is spaced first, so {@code Hello &&&END&&& traveler} stays readable
+     * ({@code Hello &&& END &&& traveler}) instead of losing the {@code E}.
      */
     public static String stripSectionSigns(String raw) {
+        return removeFormatting(raw);
+    }
+
+    private static String removeFormatting(String raw) {
         if (raw == null || raw.isEmpty()) {
             return "";
         }
-        return LEGACY_COLOR.matcher(raw).replaceAll("").replace("§", "");
+        String spaced = separateGluedMarkers(raw);
+        return LEGACY_COLOR.matcher(spaced).replaceAll("").replace("§", "");
+    }
+
+    private static String separateGluedMarkers(String raw) {
+        String spaced = GLUED_INPUT_BEFORE.matcher(raw).replaceAll("$1 $2");
+        spaced = GLUED_END_BEFORE.matcher(spaced).replaceAll("$1 $2");
+        spaced = GLUED_INPUT_AFTER.matcher(spaced).replaceAll("$1 $2");
+        return GLUED_END_AFTER.matcher(spaced).replaceAll("$1 $2");
     }
 
     /**
@@ -339,7 +366,8 @@ public final class PlayerInput {
 
     /**
      * Player-facing reason for a discarded reply, or null when the reply is kept.
-     * Guard restatements, boundary leaks, and refuse-then-comply use {@link #GUARD_REJECTION}.
+     * Guard restatements and refuse-then-comply use {@link #GUARD_REJECTION}.
+     * A boundary leak uses {@link #MARKER_LEAK}.
      * An attack echo uses {@link #ECHO_REJECTION}. A carried injection phrase uses {@link #INJECTION_REJECTION}.
      */
     public static String rejectionReason(String answer, String prompt) {
@@ -347,9 +375,6 @@ public final class PlayerInput {
             return null;
         }
         String text = normalize(answer);
-        if (BOUNDARY.matcher(text).find()) {
-            return GUARD_REJECTION;
-        }
         if (EN_OPENER.matcher(text).find() && EN_OPENER_SUBJECT.matcher(text).find()) {
             return GUARD_REJECTION;
         }
@@ -368,6 +393,9 @@ public final class PlayerInput {
                     || quotesPlayerText(sentence)) {
                 return GUARD_REJECTION;
             }
+        }
+        if (BOUNDARY.matcher(text).find()) {
+            return MARKER_LEAK;
         }
         String echoed = echoReason(text, prompt);
         if (echoed != null) {

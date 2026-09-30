@@ -83,8 +83,10 @@ public final class PrewarmService {
         for (String configured : config.getPrewarmPrompts()) {
             Optional<NamedPrompt> named = catalog.find(configured);
             if (named.isPresent() && named.get().playerDependent()) {
-                logger.info("Prewarm skips \"" + configured
-                        + "\" until a player opens it, because its vars use PlaceholderAPI.");
+                if (named.get().usesPlaceholderApi()) {
+                    logger.info("Prewarm skips \"" + configured
+                            + "\" until a player opens it, because its vars use PlaceholderAPI.");
+                }
                 continue;
             }
             Prepared prepared = prepare(configured);

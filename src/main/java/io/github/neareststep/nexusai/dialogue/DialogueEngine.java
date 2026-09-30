@@ -211,7 +211,8 @@ public final class DialogueEngine {
         if (typed != null && typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.LOCAL_LIMIT) {
             return TalkResult.of(TalkCode.BUSY, request.characterId());
         }
-        if (typed != null && typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.REJECTED) {
+        if (typed != null && (typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.REJECTED
+                || typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.EMPTY_REPLY)) {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
