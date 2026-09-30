@@ -18,6 +18,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 - The model receives the character prompt as the system text, the player-input guard, and the last `dialogue.memory-turns` turns (default 8). Memory is per player and character, trimmed to `dialogue.memory-max-chars`, and dropped after `dialogue.memory-expiry-hours` when `dialogue.persist-memory` is true (`dialogue-memory.yml`). Otherwise it lasts until restart.
 - Dialogue limits are separate from placeholder limits: `dialogue.max-replies-per-session`, `dialogue.message-cooldown-millis` (default 3000), `dialogue.conversations-per-player-per-day`, and `dialogue.max-message-length`. Each line still spends the model queue, key rotation, and the server and player daily caps. Dialogue replies are not taken from the answer pool. A greeting written in `dialogue.greeting` is sent as-is. A generated greeting may be cached for `cache.ttl` when `dialogue.cache-greeting` is true.
 - Player lines are sanitized, wrapped in `§§§ PLAYER INPUT §§§`, and the reply goes through the same guard filter as placeholders.
+- Dialogue messages are translated in every bundled locale.
 
 ### Actions
 
