@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +50,25 @@ class OpenAiProviderTest {
         GenerationOverrides overrides = GenerationOverrides.of(false, null, false, null, false, null, true, "custom-model");
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", overrides));
         assertEquals("custom-model", json.get("model").asText());
+    }
+
+    @Test
+    void knowledgeSitsBetweenTheAdminPromptAndTheFormatInstruction() {
+        PluginConfig config = config("gpt-4o-mini", "Be brief.", 0.7, 256, "low", false, 0, 0, "low");
+        String block = KnowledgeBase.OPEN + "\n[lore]\nThe harbor is old.\n" + KnowledgeBase.CLOSE;
+        GenerationOverrides overrides = KnowledgeComposer.apply(
+                GenerationOverrides.of(true, "You are the harbor keeper.", false, null, false, null).withFormat("chat"),
+                config.getSystemPrompt(),
+                block);
+        String system = OpenAiProvider.buildBody(config, "hello", overrides).getMessages().getFirst().getContent();
+        int admin = system.indexOf("You are the harbor keeper.");
+        int knowledgeAt = system.indexOf(KnowledgeBase.OPEN);
+        int format = system.indexOf("Reply in 1 to 3 sentences");
+        int guard = system.lastIndexOf(PlayerInput.GUARD);
+        assertTrue(admin >= 0 && knowledgeAt > admin, system);
+        assertTrue(format > knowledgeAt, system);
+        assertTrue(guard > format, system);
+        assertTrue(system.endsWith(PlayerInput.GUARD));
     }
 
     @Test

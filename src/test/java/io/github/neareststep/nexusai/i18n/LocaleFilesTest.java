@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.i18n;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -16,6 +17,12 @@ class LocaleFilesTest {
     private static final List<String> REQUIRED = List.of(
             "command.help-test",
             "command.help-prompts",
+            "command.help-prompts-import",
+            "command.prompts-import-ok",
+            "command.prompts-import-fail",
+            "command.status-fallback-model",
+            "command.status-knowledge",
+            "command.status-unpooled",
             "command.prompts-header",
             "command.prompts-line",
             "command.prompts-empty",
@@ -61,5 +68,28 @@ class LocaleFilesTest {
                 assertEquals("нет", no);
             }
         }
+        assertEquals(15, LocaleFiles.BUNDLED.size());
+    }
+
+    @Test
+    void extractionDoesNotOverwriteAnExistingLocaleFile(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        Path lang = dir.resolve("lang");
+        Files.createDirectories(lang);
+        Files.writeString(lang.resolve("en.yml"), "prefix: \"custom\"\n", StandardCharsets.UTF_8);
+        java.util.Map<String, byte[]> bundled = new java.util.LinkedHashMap<>();
+        for (String code : LocaleFiles.BUNDLED) {
+            bundled.put(code, ("prefix: \"" + code + "\"\n").getBytes(StandardCharsets.UTF_8));
+        }
+        List<String> written = LocaleFiles.extractMissing(lang, code -> {
+            byte[] bytes = bundled.get(code);
+            return bytes == null ? null : new java.io.ByteArrayInputStream(bytes);
+        });
+        assertFalse(written.contains("en"));
+        assertEquals("prefix: \"custom\"\n", Files.readString(lang.resolve("en.yml")));
+        assertTrue(written.contains("de"));
+        assertEquals("prefix: \"de\"\n", Files.readString(lang.resolve("de.yml")));
+        List<String> again = LocaleFiles.extractMissing(lang, code -> new java.io.ByteArrayInputStream("prefix: \"nope\"\n".getBytes(StandardCharsets.UTF_8)));
+        assertTrue(again.isEmpty());
+        assertEquals("prefix: \"custom\"\n", Files.readString(lang.resolve("en.yml")));
     }
 }
