@@ -236,4 +236,13 @@ public final class RoutingProvider implements AiProvider {
     private static final class Attempt {
         private AiRequestException error;
     }
+
+    /**
+     * Key ring shared with dialogue calls so a 401 or 429 skip applies to both paths.
+     */
+    public KeyRing sharedRing(String providerId) {
+        ProviderSettings provider = config.provider(providerId);
+        List<String> keys = provider == null ? List.of() : provider.apiKeys();
+        return rings.computeIfAbsent(providerId, ignored -> new KeyRing(keys));
+    }
 }

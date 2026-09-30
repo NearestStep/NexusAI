@@ -82,6 +82,8 @@ public final class PluginConfig {
     private int knowledgeMaxFileChars = 4000;
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
+    private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
+            io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
     private ModerationSettings moderation = ModerationSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
@@ -163,6 +165,7 @@ public final class PluginConfig {
         this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
+        this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
     }
 
@@ -750,6 +753,10 @@ public final class PluginConfig {
         String normalized = normalizeFormat(id);
         FormatPreset configured = formats.get(normalized);
         return configured == null ? FormatPresets.builtin(normalized) : configured;
+    }
+
+    public io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings() {
+        return dialogueSettings;
     }
 
     /**

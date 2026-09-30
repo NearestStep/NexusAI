@@ -72,7 +72,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         return CompletableFuture.supplyAsync(() -> doComplete(prompt, effective), executor);
     }
 
-    static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
+    public static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
         String instruction = config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
