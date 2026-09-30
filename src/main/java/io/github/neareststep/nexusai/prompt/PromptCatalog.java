@@ -33,7 +33,9 @@ public final class PromptCatalog {
             "system-prompt",
             "temperature",
             "max-tokens",
-            "format"
+            "format",
+            "dialogue",
+            "actions"
     );
 
     private static final Set<String> RESERVED = Set.of("config-version");
@@ -83,6 +85,9 @@ public final class PromptCatalog {
             GenerationOverrides overrides = GenerationOverrides.none();
             Map<String, String> vars = Map.of();
             String format = null;
+            io.github.neareststep.nexusai.dialogue.DialogueBinding.Result dialogue =
+                    new io.github.neareststep.nexusai.dialogue.DialogueBinding.Result(
+                            io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
             if (raw instanceof ConfigurationSection section) {
                 vars = readVars(key, section, warnings);
                 ttl = readTtl(key, section, warnings);
@@ -90,9 +95,12 @@ public final class PromptCatalog {
                 maxPromptLength = readMaxLength(key, section, warnings);
                 overrides = readOverrides(key, section, warnings);
                 format = readFormat(key, section, warnings);
+                dialogue = io.github.neareststep.nexusai.dialogue.DialogueBinding.read(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
-            loaded.put(key, new NamedPrompt(key, template, vars, ttl, fallback, maxPromptLength, overrides, format));
+            loaded.put(key, new NamedPrompt(
+                    key, template, vars, ttl, fallback, maxPromptLength, overrides, format,
+                    dialogue.profile(), dialogue.actions()));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));

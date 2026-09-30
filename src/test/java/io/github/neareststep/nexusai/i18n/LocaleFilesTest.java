@@ -34,7 +34,27 @@ class LocaleFilesTest {
             "error.bad-key",
             "error.unknown-model",
             "error.timeout",
-            "error.other"
+            "error.other",
+            "command.help-talk",
+            "command.help-talk-end",
+            "talk.disabled",
+            "talk.players-only",
+            "talk.usage",
+            "talk.unknown-character",
+            "talk.unknown-player",
+            "talk.no-session",
+            "talk.ended",
+            "talk.started",
+            "talk.timeout",
+            "talk.left",
+            "talk.cooldown",
+            "talk.too-long",
+            "talk.replies",
+            "talk.daily",
+            "talk.busy",
+            "talk.failed",
+            "talk.empty",
+            "talk.reply"
     );
 
     @Test

@@ -220,3 +220,37 @@ prewarm:
   #   - "Server tip of the day"
 
 fallback: "..."
+
+# NPC dialogues (/nai talk). Separate from placeholder limits.
+# A reply still spends the model queue, key rotation, and the daily request caps.
+# Dialogue lines are not stored in the answer pool. A generated greeting may be cached.
+dialogue:
+  enabled: true
+  # Player and assistant lines kept for the model. 6 to 8 is the intended range.
+  memory-turns: 8
+  # Write plugins/NexusAI/dialogue-memory.yml. false keeps memory only until restart.
+  persist-memory: false
+  memory-max-chars: 8000
+  # Drop a saved transcript after this many hours without a new line. 0 keeps it.
+  memory-expiry-hours: 168
+  # End a session after this many seconds without a player line. 0 disables the timer.
+  session-timeout-seconds: 120
+  # End a session when the player moves farther than this many blocks from where it started. 0 disables it.
+  leave-radius: 8
+  max-replies-per-session: 12
+  message-cooldown-millis: 3000
+  # 0 means no daily cap. A session counts as one conversation. Each one-shot line counts as one.
+  conversations-per-player-per-day: 20
+  max-message-length: 200
+  # Cache a generated greeting. A greeting written under dialogue.greeting is not a model call.
+  # The cache time is cache.ttl. Later lines in the same conversation are never cached.
+  cache-greeting: true
+
+# Character actions. The model may pick a name through OpenAI tools. It cannot change the command.
+# Placeholders never run these. A provider that rejects tools gets one retry with actions off.
+actions:
+  enabled: true
+  # Append plugins/NexusAI/actions.log. The server log always gets one line too.
+  log: true
+  # How many actions from one model reply may run. The rest are refused and the character is told.
+  max-per-reply: 1

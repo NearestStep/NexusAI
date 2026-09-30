@@ -20,6 +20,9 @@ import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
+import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.dialogue.DialogueListener;
+import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -66,6 +69,7 @@ public final class NexusAI extends JavaPlugin {
     private AiPlaceholderExpansion placeholderExpansion;
     private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
     private volatile ModelQueue modelQueue;
+    private DialogueService dialogueService;
     private boolean loggedMissingKey;
     private boolean loggedMissingPapi;
 
@@ -112,6 +116,11 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onDisable() {
         unregisterPlaceholderExpansion();
+        if (dialogueService != null) {
+            dialogueService.shutdown();
+            NexusAIApi.bind(null);
+            dialogueService = null;
+        }
         stopRuntimeServices(true);
         closeSharedHttpClient();
         shutdownExecutor(scheduler);
@@ -180,6 +189,12 @@ public final class NexusAI extends JavaPlugin {
         poolService.start();
         prewarmService.start();
         prewarmService.scheduleRefresh();
+        if (dialogueService == null) {
+            dialogueService = new DialogueService(this, httpExecutor, scheduler);
+            dialogueService.start();
+            getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
+            NexusAIApi.bind(dialogueService);
+        }
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
@@ -439,6 +454,10 @@ public final class NexusAI extends JavaPlugin {
 
     public ModelQueue getModelQueue() {
         return modelQueue;
+    }
+
+    public DialogueService getDialogueService() {
+        return dialogueService;
     }
 
     private void loadPrompts() {
