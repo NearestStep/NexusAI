@@ -2,9 +2,12 @@ package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
@@ -37,6 +40,7 @@ public final class PoolService {
     private final PoolStore store;
     private final BiConsumer<Long, Runnable> retry;
     private final PromptCatalog catalog;
+    private final KnowledgeBase knowledge;
     private final ConcurrentHashMap<String, AtomicBoolean> replenishing = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> retryPending = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> duplicateStrikes = new ConcurrentHashMap<>();
@@ -64,7 +68,7 @@ public final class PoolService {
             PoolStore store,
             BiConsumer<Long, Runnable> retry
     ) {
-        this(config, pool, httpClient, logger, store, retry, PromptCatalog.empty());
+        this(config, pool, httpClient, logger, store, retry, PromptCatalog.empty(), KnowledgeBase.empty());
     }
 
     public PoolService(
@@ -76,6 +80,19 @@ public final class PoolService {
             BiConsumer<Long, Runnable> retry,
             PromptCatalog catalog
     ) {
+        this(config, pool, httpClient, logger, store, retry, catalog, KnowledgeBase.empty());
+    }
+
+    public PoolService(
+            PluginConfig config,
+            AiPool pool,
+            AiHttpClient httpClient,
+            Logger logger,
+            PoolStore store,
+            BiConsumer<Long, Runnable> retry,
+            PromptCatalog catalog,
+            KnowledgeBase knowledge
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.pool = Objects.requireNonNull(pool, "pool");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
@@ -83,6 +100,7 @@ public final class PoolService {
         this.store = store == null ? PoolStore.disabled() : store;
         this.retry = retry;
         this.catalog = catalog == null ? PromptCatalog.empty() : catalog;
+        this.knowledge = knowledge == null ? KnowledgeBase.empty() : knowledge;
         for (PoolEntry entry : config.getPoolEntries()) {
             entriesByPrompt.put(entry.prompt(), entry);
         }
@@ -235,7 +253,21 @@ public final class PoolService {
         GenerationOverrides entryOverrides = entry == null ? GenerationOverrides.none() : entry.overrides();
         NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
         GenerationOverrides merged = named == null ? entryOverrides : named.overrides().overlay(entryOverrides);
-        return merged.withFormat(formatId(configuredPrompt));
+        merged = merged.withFormat(formatId(configuredPrompt));
+        if (merged.fallbackModel() == null) {
+            FallbackModel fallback = named != null && named.fallbackModel() != null
+                    ? named.fallbackModel()
+                    : config.fallbackModel();
+            if (fallback != null && fallback.configured()) {
+                merged = merged.withFallbackModel(fallback.provider(), fallback.model());
+            }
+        }
+        return KnowledgeComposer.prepare(
+                merged,
+                config.getSystemPrompt(),
+                knowledge,
+                named == null ? List.of() : named.knowledge()
+        ).overrides();
     }
 
     private String formatId(String configuredPrompt) {
