@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 
@@ -31,6 +32,8 @@ public final class NamedPrompt {
     private final Integer maxPromptLength;
     private final GenerationOverrides overrides;
     private final String format;
+    private final List<String> knowledge;
+    private final FallbackModel fallbackModel;
     private final boolean playerDependent;
     private final Pattern resolvedPattern;
 
@@ -43,7 +46,7 @@ public final class NamedPrompt {
             Integer maxPromptLength,
             GenerationOverrides overrides
     ) {
-        this(id, template, vars, ttl, fallback, maxPromptLength, overrides, null);
+        this(id, template, vars, ttl, fallback, maxPromptLength, overrides, null, List.of(), null);
     }
 
     public NamedPrompt(
@@ -56,6 +59,21 @@ public final class NamedPrompt {
             GenerationOverrides overrides,
             String format
     ) {
+        this(id, template, vars, ttl, fallback, maxPromptLength, overrides, format, List.of(), null);
+    }
+
+    public NamedPrompt(
+            String id,
+            String template,
+            Map<String, String> vars,
+            Duration ttl,
+            String fallback,
+            Integer maxPromptLength,
+            GenerationOverrides overrides,
+            String format,
+            List<String> knowledge,
+            FallbackModel fallbackModel
+    ) {
         this.id = Objects.requireNonNull(id, "id");
         this.template = Objects.requireNonNull(template, "template");
         this.vars = vars == null || vars.isEmpty()
@@ -66,6 +84,8 @@ public final class NamedPrompt {
         this.maxPromptLength = maxPromptLength;
         this.overrides = overrides == null ? GenerationOverrides.none() : overrides;
         this.format = format == null || format.isBlank() ? null : format;
+        this.knowledge = knowledge == null || knowledge.isEmpty() ? List.of() : List.copyOf(knowledge);
+        this.fallbackModel = fallbackModel != null && fallbackModel.configured() ? fallbackModel : null;
         this.playerDependent = computePlayerDependent(this.template, this.vars);
         this.resolvedPattern = this.playerDependent ? compileResolved(this.template, this.vars) : null;
     }
@@ -112,6 +132,20 @@ public final class NamedPrompt {
      */
     public String format() {
         return format;
+    }
+
+    /**
+     * Knowledge file names without an extension. Empty when the prompt lists none.
+     */
+    public List<String> knowledge() {
+        return knowledge;
+    }
+
+    /**
+     * @return per-prompt fallback model, or {@code null} to inherit {@code fallback-model} from config.yml
+     */
+    public FallbackModel fallbackModel() {
+        return fallbackModel;
     }
 
     /**

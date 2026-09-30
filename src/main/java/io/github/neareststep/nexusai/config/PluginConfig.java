@@ -77,6 +77,9 @@ public final class PluginConfig {
     private Map<String, ProviderSettings> providers = Map.of();
     private List<QueueEntryConfig> modelQueue = List.of();
     private int modelQueueRemainingThreshold;
+    private FallbackModel fallbackModel = FallbackModel.none();
+    private int knowledgeMaxChars = 6000;
+    private int knowledgeMaxFileChars = 4000;
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
     private ModerationSettings moderation = ModerationSettings.defaults();
@@ -153,6 +156,11 @@ public final class PluginConfig {
             this.modelQueue = loadModelQueue(config);
         }
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
+        this.fallbackModel = FallbackModel.of(
+                config.getString("fallback-model.provider", ""),
+                config.getString("fallback-model.model", ""));
+        this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
+        this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
         this.moderation = ModerationSettings.load(config);
@@ -708,6 +716,22 @@ public final class PluginConfig {
 
     public int modelQueueRemainingThreshold() {
         return modelQueueRemainingThreshold;
+    }
+
+    public FallbackModel fallbackModel() {
+        return fallbackModel == null ? FallbackModel.none() : fallbackModel;
+    }
+
+    public int knowledgeMaxChars() {
+        return knowledgeMaxChars;
+    }
+
+    public int knowledgeMaxFileChars() {
+        return knowledgeMaxFileChars;
+    }
+
+    private static int positiveOrDefault(int value, int fallback) {
+        return value > 0 ? value : fallback;
     }
 
     public String defaultFormatId() {
