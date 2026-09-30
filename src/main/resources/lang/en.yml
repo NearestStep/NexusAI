@@ -65,6 +65,7 @@ talk:
   disabled: "{prefix}&cDialogues are disabled."
   players-only: "{prefix}&cOnly players can talk to a character. From the console: &e/nai talk <player> <id>"
   usage: "{prefix}&cUsage: &e/nai talk <id> [message] &cor &e/nai talk end"
+  console-usage: "{prefix}&cUsage: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&cUnknown character &f{id}&c."
   unknown-player: "{prefix}&cPlayer &f{player} &cis not online."
   no-session: "{prefix}&7You are not in a dialogue."

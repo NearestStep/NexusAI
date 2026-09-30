@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -9,7 +10,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -81,6 +86,39 @@ class AiHttpClientTest {
         CompletableFuture<String> future = client.requestAsync("hello");
         assertTrue(future.isCompletedExceptionally());
         assertEquals(0, calls.get());
+    }
+
+    @Test
+    void testUsesTheQueueWhenTheActiveProviderHasNoKey() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("api.provider", "openai");
+        yaml.set("api.model", "gpt-4o-mini");
+        yaml.set("api.key", "");
+        yaml.set("api.base-url", "https://api.openai.com/v1");
+        yaml.set("fallback", "...");
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "");
+        yaml.set("providers.mock.type", "openai-compatible");
+        yaml.set("providers.mock.url", "https://mock.example/v1");
+        yaml.set("providers.mock.api-key", "mock-key-QA01");
+        yaml.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+        PluginConfig config = new PluginConfig(yaml);
+        assertTrue(config.canSendRequests());
+        AtomicReference<String> seenModel = new AtomicReference<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            seenModel.set(model);
+            assertEquals("mock-ok", model);
+            assertEquals("mock-key-QA01", apiKey);
+            return new ChatExchange("QUEUE-OK", Map.of());
+        };
+        ModelQueue queue = new ModelQueue(
+                config.modelQueue(), 0, 60_000L, 300_000L, null, Logger.getLogger("queue-test"));
+        RoutingProvider routing = new RoutingProvider(
+                config, queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("queue-test"));
+        AiHttpClient client = new AiHttpClient(cache, routing, config, Logger.getLogger("queue-test"));
+        assertEquals("QUEUE-OK", client.testAsync("Reply with exactly the word pong.").join());
+        assertEquals("mock-ok", seenModel.get());
     }
 
     @Test

@@ -4,7 +4,9 @@ import java.util.Arrays;
 import java.util.regex.Pattern;
 
 /**
- * Optional post-processing for holograms and menus: drop markdown, then cap lines and length.
+ * Post-processing for text that reaches placeholders, dialogue replies, the pool, and the cache.
+ * Section signs are removed first so a model cannot apply Minecraft formatting. Server colours
+ * come from format presets and lang files. Markdown is optional. Line and length caps follow.
  */
 public final class AnswerFormatter {
 
@@ -23,7 +25,7 @@ public final class AnswerFormatter {
     }
 
     public static String format(String raw, boolean stripMarkdown, int maxChars, int maxLines) {
-        String text = raw == null ? "" : raw.trim();
+        String text = PlayerInput.stripSectionSigns(raw).trim();
         if (stripMarkdown) {
             text = stripMarkdown(text).trim();
         }

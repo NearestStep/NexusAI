@@ -21,7 +21,7 @@ public final class PlayerInput {
      * Cache-key marker. The guard text is not configurable, so this constant is what changes the key
      * if the guard sentence itself ever changes.
      */
-    public static final String KEY_VERSION = "player-input-guard-v5";
+    public static final String KEY_VERSION = "player-input-guard-v6";
 
     /** Shown when the reply restates the guard, leaks a boundary, or refuses and then complies. */
     public static final String GUARD_REJECTION =
@@ -36,6 +36,14 @@ public final class PlayerInput {
     private static final int UNICODE = Pattern.UNICODE_CHARACTER_CLASS;
     private static final Pattern LEGACY_COLOR = Pattern.compile(
             "(?i)[§&]x(?:[§&][0-9a-f]){6}|[§&][0-9a-fk-or]");
+    /** Section-sign codes only. Ampersand text in a model reply is left alone. */
+    private static final Pattern SECTION_COLOR = Pattern.compile(
+            "(?i)§x(?:§[0-9a-f]){6}|§[0-9a-fk-or]");
+    /**
+     * A Java account name, or the same name with one leading {@code .} used by Floodgate for Bedrock.
+     * The body is 3–16 letters, digits, or underscores.
+     */
+    private static final Pattern TRUSTED_PLAYER_NAME = Pattern.compile("^\\.?[A-Za-z0-9_]{3,16}$");
     /**
      * Delimiter tokens after case, legacy color-code, and {@code &} normalization.
      * A prose phrase such as "player input" is not itself the boundary.
@@ -234,6 +242,39 @@ public final class PlayerInput {
             return "";
         }
         return LEGACY_COLOR.matcher(raw).replaceAll("").replace("§", "");
+    }
+
+    /**
+     * Removes Minecraft section-sign formatting from model output.
+     * A legacy code is {@code §} plus one color or format character, or a hex code
+     * {@code §x§R§R§G§G§B§B}. Those codes are removed as a unit, then every remaining {@code §} is removed.
+     * {@code &} codes are not color codes in the reply and stay as text.
+     */
+    public static String stripSectionSigns(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        return SECTION_COLOR.matcher(raw).replaceAll("").replace("§", "");
+    }
+
+    /**
+     * True for a vanilla Java name, or that name with one leading {@code .} (Bedrock via Floodgate).
+     */
+    public static boolean trustedPlayerName(String name) {
+        return name != null && TRUSTED_PLAYER_NAME.matcher(name).matches();
+    }
+
+    /**
+     * Inserts a server-derived built-in. {@code biome}, {@code world}, {@code time}, and {@code weather}
+     * are the server's own values and are not wrapped. A trusted player name is inserted the same way.
+     * Any other player name is still player-controlled text and is wrapped.
+     */
+    public static String substituteBuiltin(String name, String value) {
+        String raw = value == null ? "" : value;
+        if ("player".equals(name) && !trustedPlayerName(raw)) {
+            return wrap(raw);
+        }
+        return raw;
     }
 
     /**

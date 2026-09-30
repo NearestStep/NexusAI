@@ -12,6 +12,7 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
 import java.util.List;
@@ -145,6 +146,14 @@ class DialogueHttpTest {
                 UUID.randomUUID(),
                 "hello"
         ));
+    }
+
+    @Test
+    void dialogueReplyStripsSectionSignsBeforeItIsShown() {
+        DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
+        String reply = transport.finishText("In the §plains§ biome §cnow", "hello", "simple", "");
+        assertEquals("In the plains biome now", reply);
+        assertFalse(reply.contains("§"));
     }
 
     private static CharacterAction action() {
