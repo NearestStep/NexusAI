@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&cDialogy jsou vypnuté."
   players-only: "{prefix}&cS postavou mohou mluvit jen hráči. Z konzole: &e/nai talk <player> <id>"
   usage: "{prefix}&cPoužití: &e/nai talk <id> [message] &cnebo &e/nai talk end"
+  console-usage: "{prefix}&cPoužití: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&cNeznámá postava &f{id}&c."
   unknown-player: "{prefix}&cHráč &f{player} &cnení online."
   no-session: "{prefix}&7Nejste v dialogu."

@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&cDiyaloglar kapalı."
   players-only: "{prefix}&cBir karakterle yalnızca oyuncular konuşabilir. Konsoldan: &e/nai talk <player> <id>"
   usage: "{prefix}&cKullanım: &e/nai talk <id> [message] &cveya &e/nai talk end"
+  console-usage: "{prefix}&cKullanım: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&cBilinmeyen karakter &f{id}&c."
   unknown-player: "{prefix}&cOyuncu &f{player} &cçevrimiçi değil."
   no-session: "{prefix}&7Bir diyalogda değilsiniz."
