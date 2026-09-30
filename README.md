@@ -144,8 +144,77 @@ Answers whose `content` is an array of parts are joined into one string.
 | `/nai status` | `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, PlaceholderAPI, last error, provider pause, model queue |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
+| `/nai talk <id> [message]` | `nexusai.talk` | Talk to the character `id` from `prompts.yml`. A message is one reply. With no message, a session opens and later chat goes to that character. |
+| `/nai talk end` | `nexusai.talk` | End your dialogue session. |
 
-Alias: `/nexusai`. Defaults: OP. `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`.
+Alias: `/nexusai`. Admin commands default to OP. `nexusai.talk` defaults to true, so a player can talk without `nexusai.command`. From the console, target a player with `/nai talk <player> <id> [message]`. `/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`.
+
+## Dialogues
+
+`/nai talk` uses a named prompt as a character. The prompt text is the system side of the conversation. The player's line is sanitized, wrapped as player input, and is not the prompt.
+
+```yaml
+blacksmith:
+  prompt: |
+    You are Bram, a blacksmith. Answer in one or two short sentences.
+  format: chat
+  dialogue:
+    greeting: "Need something forged?"
+    leave-radius: 6
+    max-replies: 8
+```
+
+Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cache it for `cache.ttl` (`dialogue.cache-greeting`). Later replies are not cached and are not taken from the answer pool.
+
+A session ends when `dialogue.session-timeout-seconds` passes with no line, the player moves farther than `dialogue.leave-radius` blocks from where the session started, they run `/nai talk end`, or they quit. While it is open, their chat is cancelled at the highest priority so it is not broadcast. Listeners that run earlier still see the line.
+
+The model sees the character prompt, the player-input guard, and the last `dialogue.memory-turns` turns (default 8, keep this in the 6–8 range). Memory is kept per player and character, capped by `dialogue.memory-max-chars`, and optionally written to `plugins/NexusAI/dialogue-memory.yml` (`dialogue.persist-memory`). `dialogue.memory-expiry-hours` drops a saved transcript that has gone quiet. `0` keeps it.
+
+These limits are separate from `%ainexus_*%` limits:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `dialogue.max-replies-per-session` | 12 | Model replies in one session. The greeting does not count. |
+| `dialogue.message-cooldown-millis` | 3000 | Minimum gap between lines that call the model. |
+| `dialogue.conversations-per-player-per-day` | 20 | Session starts plus one-shot lines. `0` disables the cap. Resets at local midnight. |
+| `dialogue.max-message-length` | 200 | Characters after color codes are removed. |
+
+Each dialogue call still uses the model queue, key rotation, and `limits.player-requests-per-day` / `limits.requests-per-day`. A per-prompt `dialogue:` block may override turns, timeout, radius, replies, and cooldown.
+
+Citizens can open a session when a player clicks an NPC. Run the command as the clicking player (`-p` on current Citizens builds; leave the slash off unless your build requires it):
+
+```
+/npc command add -p nai talk blacksmith
+```
+
+FancyNpcs and ZNPCs can run that same player command. From the server console, name the player:
+
+```
+nai talk <player> blacksmith
+```
+
+Other plugins can call `io.github.neareststep.nexusai.api.NexusAIApi.talk(player, id, message)`. The future completes with the NPC line. A blank message opens a session and completes with the greeting. Do not join the future on a server region thread.
+
+## Actions
+
+Actions are fixed commands the model may choose by name. They are offered only on `/nai talk`, a session, or `NexusAIApi.talk`, as OpenAI `tools`. Placeholder requests do not include `tools` and cannot run an action. If the provider returns an error that it does not accept tools, that reply is sent again without tools and the text is not scanned for an action name.
+
+```yaml
+  actions:
+    - name: give_iron
+      description: Give the player one iron ingot.
+      command: "give {player} iron_ingot 1"
+      as: console
+      cooldown-seconds: 3600
+      daily-limit: 1
+      permission: nexusai.action.give_iron
+```
+
+`as` is `player` (the default) or `console`. The model cannot add arguments. `{player}` and `{uuid}` are the only tokens filled in, and the player name must match `[A-Za-z0-9_.]{1,32}` or the action is refused. A newline in the command is refused. Permission, cooldown, and the daily cap are checked before the command runs. A refusal is passed back to the character so it can say why. The command itself runs on the global region scheduler (`console`) or the player's entity scheduler (`player`).
+
+`actions.max-per-reply` (default 1) is how many actions from one model reply may run. Every attempt is written to the server log as `action player=… character=… action=… result=…`. With `actions.log: true`, the same line is appended to `plugins/NexusAI/actions.log`.
+
+A console action runs as the server. The model only picks the moment. Put a cooldown and a daily limit on anything that gives items, money, or permissions. An action is not a safe place for a command whose arguments should change.
 
 ## Placeholders
 
@@ -307,7 +376,8 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
 - `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
-- `NaiCommand` — `/nai` admin commands, including `/nai test` and `/nai prompts`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). That API is the same on Paper and Purpur. The call stays Folia-safe, and Folia is not an officially supported target until stable builds exist.
+- `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. That API is the same on Paper and Purpur. The call stays Folia-safe, and Folia is not an officially supported target until stable builds exist.
+- `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
 
 ## License
 
