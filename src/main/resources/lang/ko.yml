@@ -8,7 +8,7 @@ command:
   help-header: "{prefix}&eNexusAI 명령어:"
   help-help: "&7/nai help &8- &f이 도움말 표시"
   help-version: "&7/nai version &8- &f플러그인 버전 표시"
-  help-reload: "&7/nai reload &8- &f설정, 프롬프트, 로케일 다시 로드"
+  help-reload: "&7/nai reload &8- &f설정, 프롬프트, 지식, 언어 파일 다시 로드"
   help-status: "&7/nai status &8- &f상태 표시"
   help-test: "&7/nai test [prompt] &8- &f테스트 요청 한 번 보내기"
   help-prompts: "&7/nai prompts &8- &f이름 있는 프롬프트 목록"
@@ -34,12 +34,12 @@ command:
   status-last-error: "&7마지막 오류: &f{last_error}"
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
 
-  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
-  prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
-  prompts-import-fail: "{prefix}&cImport failed: &f{error}"
-  status-fallback-model: "&7Fallback model: &f{entry}"
-  status-knowledge: "&7Knowledge files: &f{files}"
-  status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport 폴더에서 프롬프트 가져오기"
+  prompts-import-ok: "{prefix}&a가져옴 &f{file}&a. 추가: &f{added}&a. 건너뜀: &f{skipped}&a. 충돌: &f{conflicting}&a."
+  prompts-import-fail: "{prefix}&c가져오기 실패: &f{error}"
+  status-fallback-model: "&7대체 모델: &f{entry}"
+  status-knowledge: "&7지식 파일: &f{files}"
+  status-unpooled: "&7generate_ 가 요청되었지만 풀에 없음: &f{prompts}"
 
 common:
   "yes": "예"

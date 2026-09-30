@@ -8,7 +8,7 @@ command:
   help-header: "{prefix}&eNexusAI 命令："
   help-help: "&7/nai help &8- &f显示此帮助"
   help-version: "&7/nai version &8- &f显示插件版本"
-  help-reload: "&7/nai reload &8- &f重载配置、提示词与语言"
+  help-reload: "&7/nai reload &8- &f重载配置、提示词、知识库与语言文件"
   help-status: "&7/nai status &8- &f显示运行状态"
   help-test: "&7/nai test [prompt] &8- &f发送一次测试请求"
   help-prompts: "&7/nai prompts &8- &f列出已命名的提示词"
@@ -34,12 +34,12 @@ command:
   status-last-error: "&7最近错误：&f{last_error}"
   status-provider-pause: "&7提供商暂停：&f{provider_pause}"
 
-  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
-  prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
-  prompts-import-fail: "{prefix}&cImport failed: &f{error}"
-  status-fallback-model: "&7Fallback model: &f{entry}"
-  status-knowledge: "&7Knowledge files: &f{files}"
-  status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &f从 import 文件夹导入提示词"
+  prompts-import-ok: "{prefix}&a已导入 &f{file}&a。新增：&f{added}&a。跳过：&f{skipped}&a。冲突：&f{conflicting}&a。"
+  prompts-import-fail: "{prefix}&c导入失败：&f{error}"
+  status-fallback-model: "&7备用模型：&f{entry}"
+  status-knowledge: "&7知识库文件：&f{files}"
+  status-unpooled: "&7generate_ 已请求但不在池中：&f{prompts}"
 
 common:
   "yes": "是"

@@ -8,7 +8,7 @@ command:
   help-header: "{prefix}&eNexusAI コマンド:"
   help-help: "&7/nai help &8- &fこのヘルプを表示"
   help-version: "&7/nai version &8- &fプラグインのバージョンを表示"
-  help-reload: "&7/nai reload &8- &f設定、プロンプト、ロケールを再読込"
+  help-reload: "&7/nai reload &8- &f設定、プロンプト、ナレッジ、言語ファイルを再読込"
   help-status: "&7/nai status &8- &fステータスを表示"
   help-test: "&7/nai test [prompt] &8- &fテストリクエストを1回送る"
   help-prompts: "&7/nai prompts &8- &f名前付きプロンプトを表示"
@@ -34,12 +34,12 @@ command:
   status-last-error: "&7最後のエラー: &f{last_error}"
   status-provider-pause: "&7プロバイダー一時停止: &f{provider_pause}"
 
-  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
-  prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
-  prompts-import-fail: "{prefix}&cImport failed: &f{error}"
-  status-fallback-model: "&7Fallback model: &f{entry}"
-  status-knowledge: "&7Knowledge files: &f{files}"
-  status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport フォルダからプロンプトを取り込む"
+  prompts-import-ok: "{prefix}&a取り込み &f{file}&a. 追加: &f{added}&a. スキップ: &f{skipped}&a. 競合: &f{conflicting}&a."
+  prompts-import-fail: "{prefix}&c取り込みに失敗しました: &f{error}"
+  status-fallback-model: "&7フォールバックモデル: &f{entry}"
+  status-knowledge: "&7ナレッジファイル: &f{files}"
+  status-unpooled: "&7generate_ が要求されましたがプールにありません: &f{prompts}"
 
 common:
   "yes": "はい"

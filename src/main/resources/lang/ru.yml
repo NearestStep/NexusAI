@@ -8,7 +8,7 @@ command:
   help-header: "{prefix}&eКоманды NexusAI:"
   help-help: "&7/nai help &8- &fПоказать эту справку"
   help-version: "&7/nai version &8- &fПоказать версию плагина"
-  help-reload: "&7/nai reload &8- &fПерезагрузить конфиг, промпты и локаль"
+  help-reload: "&7/nai reload &8- &fПерезагрузить конфиг, промпты, знания и языковые файлы"
   help-status: "&7/nai status &8- &fПоказать статус"
   help-test: "&7/nai test [prompt] &8- &fОдин тестовый запрос"
   help-prompts: "&7/nai prompts &8- &fСписок именованных промптов"
