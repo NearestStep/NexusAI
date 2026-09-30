@@ -23,6 +23,16 @@ public final class PlayerInput {
      */
     public static final String KEY_VERSION = "player-input-guard-v5";
 
+    /** Shown when the reply restates the guard, leaks a boundary, or refuses and then complies. */
+    public static final String GUARD_REJECTION =
+            "The model restated the player-input guard instead of answering.";
+    /** Shown when the reply is mostly an attack span copied from the wrapped player text. */
+    public static final String ECHO_REJECTION =
+            "The model echoed player input instead of answering.";
+    /** Shown when the reply repeats an injection phrase that was in the wrapped player text. */
+    public static final String INJECTION_REJECTION =
+            "The model repeated an injection phrase from player input instead of answering.";
+
     private static final int UNICODE = Pattern.UNICODE_CHARACTER_CLASS;
     private static final Pattern LEGACY_COLOR = Pattern.compile(
             "(?i)[§&]x(?:[§&][0-9a-f]){6}|[§&][0-9a-fk-or]");
@@ -262,19 +272,28 @@ public final class PlayerInput {
      * the reply, or when the reply repeats an injection phrase that was in the span.
      */
     public static boolean restatesGuard(String answer, String prompt) {
+        return rejectionReason(answer, prompt) != null;
+    }
+
+    /**
+     * Player-facing reason for a discarded reply, or null when the reply is kept.
+     * Guard restatements, boundary leaks, and refuse-then-comply use {@link #GUARD_REJECTION}.
+     * An attack echo uses {@link #ECHO_REJECTION}. A carried injection phrase uses {@link #INJECTION_REJECTION}.
+     */
+    public static String rejectionReason(String answer, String prompt) {
         if (answer == null || answer.isBlank()) {
-            return false;
+            return null;
         }
         String text = normalize(answer);
         if (BOUNDARY.matcher(text).find()) {
-            return true;
+            return GUARD_REJECTION;
         }
         if (EN_OPENER.matcher(text).find() && EN_OPENER_SUBJECT.matcher(text).find()) {
-            return true;
+            return GUARD_REJECTION;
         }
         if (RU_OPENER.matcher(text).find()
                 && (RU_SUBJECT.matcher(text).find() || EN_OPENER_SUBJECT.matcher(text).find())) {
-            return true;
+            return GUARD_REJECTION;
         }
         for (String sentence : SENTENCE.split(text)) {
             if (sentence.isBlank()) {
@@ -285,13 +304,17 @@ public final class PlayerInput {
                     || coOccurs(EN_SUBJECT, EN_NOT_INSTRUCTIONS, sentence)
                     || coOccurs(RU_SUBJECT, RU_NOT_INSTRUCTIONS, sentence)
                     || quotesPlayerText(sentence)) {
-                return true;
+                return GUARD_REJECTION;
             }
         }
-        if (echoesPlayerInput(text, prompt)) {
-            return true;
+        String echoed = echoReason(text, prompt);
+        if (echoed != null) {
+            return echoed;
         }
-        return compliesAfterRefusal(text);
+        if (compliesAfterRefusal(text)) {
+            return GUARD_REJECTION;
+        }
+        return null;
     }
 
     /**
@@ -459,20 +482,20 @@ public final class PlayerInput {
      * phrase from the span shows up in the reply. Quoting a sign or an order, including a reply
      * that is only that sign, stays: those spans do not carry an attack marker.
      */
-    private static boolean echoesPlayerInput(String normalizedAnswer, String prompt) {
+    private static String echoReason(String normalizedAnswer, String prompt) {
         if (prompt == null || prompt.isBlank() || normalizedAnswer.isEmpty()) {
-            return false;
+            return null;
         }
         int from = 0;
         while (from < prompt.length()) {
             int open = prompt.indexOf(OPEN, from);
             if (open < 0) {
-                return false;
+                return null;
             }
             int start = open + OPEN.length();
             int close = prompt.indexOf(CLOSE, start);
             if (close < 0) {
-                return false;
+                return null;
             }
             String span = normalize(prompt.substring(start, close)).strip();
             from = close + CLOSE.length();
@@ -482,13 +505,13 @@ public final class PlayerInput {
             boolean copied = span.length() >= ECHO_MIN_CHARS && normalizedAnswer.contains(span);
             if (copied && span.length() * 100 > normalizedAnswer.length() * ECHO_DOMINANCE_PERCENT
                     && ATTACK_ECHO.matcher(span).find()) {
-                return true;
+                return ECHO_REJECTION;
             }
             if (injectionCarried(span, normalizedAnswer)) {
-                return true;
+                return INJECTION_REJECTION;
             }
         }
-        return false;
+        return null;
     }
 
     private static boolean injectionCarried(String span, String answer) {

@@ -178,13 +178,12 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
-            if (PlayerInput.restatesGuard(text, prompt) || PlayerInput.restatesGuard(formatted, prompt)) {
-                throw new AiRequestException(
-                        AiErrorKind.REJECTED,
-                        response.statusCode(),
-                        "The model restated the player-input guard instead of answering.",
-                        null
-                );
+            String reason = PlayerInput.rejectionReason(text, prompt);
+            if (reason == null) {
+                reason = PlayerInput.rejectionReason(formatted, prompt);
+            }
+            if (reason != null) {
+                throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
             }
             return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {

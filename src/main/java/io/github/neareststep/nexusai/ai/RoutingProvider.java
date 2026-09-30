@@ -126,8 +126,8 @@ public final class RoutingProvider implements AiProvider {
                     if (error.kind() == AiErrorKind.REJECTED) {
                         queue.recordRejection(choice.index());
                         logger.info("Rejected answer from " + choice.provider() + " / " + model
-                                + " because it restated the player-input guard or leaked a boundary marker. "
-                                + "Trying the next model-queue entry. No cooldown.");
+                                + ". " + error.getMessage()
+                                + " Trying the next model-queue entry. No cooldown.");
                         break;
                     }
                     if (!probe && !key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
