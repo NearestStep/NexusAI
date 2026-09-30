@@ -174,6 +174,20 @@ public final class NamedPrompt {
         return playerDependent;
     }
 
+    /**
+     * {@code true} when a var that appears in the template contains a PlaceholderAPI placeholder.
+     * Built-in tokens such as {@code {time}} do not count.
+     */
+    public boolean usesPlaceholderApi() {
+        for (Map.Entry<String, String> entry : vars.entrySet()) {
+            String value = entry.getValue();
+            if (value != null && value.indexOf('%') >= 0 && template.contains('{' + entry.getKey() + '}')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public String render(UnaryOperator<String> placeholderResolver) {
         return render(placeholderResolver, Map.of());
     }

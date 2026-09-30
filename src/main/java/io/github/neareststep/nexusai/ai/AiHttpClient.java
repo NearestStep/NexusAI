@@ -167,6 +167,22 @@ public final class AiHttpClient {
         return gate.isBlocked(admissionKey);
     }
 
+    /**
+     * {@code true} when an empty-after-sanitising reply is holding {@code admissionKey}
+     * until {@link #resetBackoff()}.
+     */
+    public boolean backoffHeldUntilReset(String admissionKey) {
+        return gate.heldUntilReset(admissionKey);
+    }
+
+    /**
+     * Clears per-prompt backoff, including an empty-reply hold.
+     * Used when configuration is reloaded.
+     */
+    public void resetBackoff() {
+        gate.resetBackoff();
+    }
+
     public long admissionDelayMillis(String admissionKey) {
         return gate.blockedForMillis(admissionKey);
     }
@@ -269,6 +285,10 @@ public final class AiHttpClient {
             boolean clearPause
     ) {
         try {
+            if (error == null && (value == null || value.isBlank() || PlayerInput.stripSectionSigns(value).isBlank())) {
+                error = new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null);
+                value = null;
+            }
             if (error == null && value != null && !value.isBlank()) {
                 if (writeCache && cacheKey != null) {
                     if (cacheTtl != null) {

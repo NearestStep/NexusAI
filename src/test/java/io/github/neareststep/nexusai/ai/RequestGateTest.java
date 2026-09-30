@@ -33,6 +33,21 @@ class RequestGateTest {
     }
 
     @Test
+    void emptyReplyHoldsUntilResetEvenAfterTheBackoffWindow() {
+        RequestGate gate = gate(100, 1_000, 3_000, 60_000, 300_000);
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertTrue(gate.isBlocked("tip"));
+        assertTrue(gate.heldUntilReset("tip"));
+        assertFalse(gate.isPaused());
+        clock.addAndGet(60L * 60_000L);
+        assertTrue(gate.isBlocked("tip"));
+        gate.resetBackoff();
+        assertFalse(gate.isBlocked("tip"));
+        assertFalse(gate.heldUntilReset("tip"));
+        assertTrue(gate.tryAdmit(null, "tip", false).isEmpty());
+    }
+
+    @Test
     void aContentRejectionDoesNotBackOffOrPause() {
         RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
         gate.recordFailure("tip", AiErrorKind.REJECTED);

@@ -117,6 +117,25 @@ public final class RequestGate {
         return failureEpochByKey.getOrDefault(admissionKey, 0L);
     }
 
+    /**
+     * Drops per-prompt backoff, including an empty-reply hold.
+     * {@code /nai reload} builds a new gate and calls this so a changed prompt can be sent again.
+     */
+    public void resetBackoff() {
+        backoffByKey.clear();
+        failureEpochByKey.clear();
+    }
+
+    /**
+     * {@code true} when {@code admissionKey} is held until {@link #resetBackoff()}
+     * and the configured error backoff will not release it.
+     */
+    public boolean heldUntilReset(String admissionKey) {
+        Objects.requireNonNull(admissionKey, "admissionKey");
+        Backoff backoff = backoffByKey.get(admissionKey);
+        return backoff != null && backoff.untilReset && clock.getAsLong() < backoff.untilMillis;
+    }
+
     public long blockedForMillis(String admissionKey) {
         Objects.requireNonNull(admissionKey, "admissionKey");
         long now = clock.getAsLong();
@@ -166,6 +185,10 @@ public final class RequestGate {
         }
         long now = clock.getAsLong();
         failureEpochByKey.merge(admissionKey, 1L, Long::sum);
+        if (kind == AiErrorKind.EMPTY_REPLY) {
+            backoffByKey.put(admissionKey, new Backoff(Long.MAX_VALUE, 1, true));
+            return;
+        }
         backoffByKey.compute(admissionKey, (key, previous) -> {
             int attempt = previous == null ? 1 : previous.attempt + 1;
             long multiplier = 1L << Math.min(attempt - 1, 10);
@@ -199,10 +222,16 @@ public final class RequestGate {
     private static final class Backoff {
         private final long untilMillis;
         private final int attempt;
+        private final boolean untilReset;
 
         private Backoff(long untilMillis, int attempt) {
+            this(untilMillis, attempt, false);
+        }
+
+        private Backoff(long untilMillis, int attempt, boolean untilReset) {
             this.untilMillis = untilMillis;
             this.attempt = attempt;
+            this.untilReset = untilReset;
         }
     }
 }

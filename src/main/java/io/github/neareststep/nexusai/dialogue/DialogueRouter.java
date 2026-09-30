@@ -119,6 +119,11 @@ public final class DialogueRouter {
                 } catch (AiRequestException error) {
                     last = error;
                     now = clock.getAsLong();
+                    if (error.kind() == AiErrorKind.EMPTY_REPLY) {
+                        logger.warning(error.getMessage());
+                        last = error;
+                        break;
+                    }
                     if (error.kind() == AiErrorKind.REJECTED) {
                         currentQueue.recordRejection(choice.index());
                         logger.info("Rejected dialogue answer from " + choice.provider() + " / " + model
@@ -141,6 +146,9 @@ public final class DialogueRouter {
                     break;
                 }
             }
+        }
+        if (last != null && last.kind() == AiErrorKind.EMPTY_REPLY) {
+            throw last;
         }
         if (last != null && last.kind() != AiErrorKind.REJECTED && last.kind() != AiErrorKind.LOCAL_LIMIT) {
             admission.failure(admissionKey, last);
