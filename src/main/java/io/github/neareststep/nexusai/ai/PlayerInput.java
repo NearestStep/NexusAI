@@ -38,20 +38,31 @@ public final class PlayerInput {
                     + "|\\bend\\s*§+"
                     + "|[\"«»]\\s*player input\\s*[\"«»]",
             UNICODE);
+    /**
+     * A reference to the wrapped player text. Ordinary words such as "instructions" are not enough.
+     */
     private static final Pattern EN_SUBJECT = Pattern.compile(
-            "\\b(?:player inputs?|player data|the input|these rules|instructions?)\\b", UNICODE);
+            "\\b(?:player inputs?|player data|the input between)\\b", UNICODE);
     private static final Pattern EN_NEG_VERB = Pattern.compile(
             "\\b(?:will not|won't|won’t|cannot|can't|can’t|not|never)\\s+(?:\\w+\\s+){0,6}?(?:follow\\w*|repeat\\w*|mention\\w*|reveal\\w*)\\b",
             UNICODE);
+    private static final Pattern EN_DISCARD = Pattern.compile(
+            "\\b(?:disregard\\w*|ignor(?:e|es|ed|ing)\\b|skip(?:s|ped|ping)?\\b|treat\\w*\\s+(?:\\w+\\s+){0,6}?as data)\\b",
+            UNICODE);
+    /** Guard wording: the player text "is not instructions", not a refusal to reveal system instructions. */
+    private static final Pattern EN_NOT_INSTRUCTIONS = Pattern.compile("\\bnot\\s+instructions\\b", UNICODE);
     private static final Pattern EN_OPENER = Pattern.compile("\\bas an ai\\b", UNICODE);
-    private static final Pattern EN_OPENER_SUBJECT = Pattern.compile(
-            "\\b(?:player inputs?|player data|these rules)\\b", UNICODE);
+    private static final Pattern EN_OPENER_SUBJECT = EN_SUBJECT;
     private static final Pattern RU_SUBJECT = Pattern.compile(
-            "(?:ввод(?:е|а|ом|у)?\\s+игрок|данн(?:ые|ых|ым|ыми)\\s+игрок|эти(?:х|м|ми)?\\s+правил|инструкци(?:я|и|ю|ей|ям|ями|ях)?)",
+            "(?:ввод(?:е|а|ом|у)?\\s+игрок|данн(?:ые|ых|ым|ыми)\\s+игрок|текст(?:е|а|ом|у)?\\s+игрок)",
             UNICODE);
     private static final Pattern RU_NEG_VERB = Pattern.compile(
             "(?:нельзя|никогда|не|буду|стану|могу|можем|следует|стоит)\\s+(?:\\S+\\s+){0,4}?(?:следова\\w*|повтор\\w*|упомин\\w*|раскры\\w*)",
             UNICODE);
+    private static final Pattern RU_DISCARD = Pattern.compile(
+            "игнорир\\w*|не\\s+учитыва\\w*|пропуска\\w*|пропуст\\w*|пропущ\\w*",
+            UNICODE);
+    private static final Pattern RU_NOT_INSTRUCTIONS = Pattern.compile("не\\s+инструкц\\w*", UNICODE);
     private static final Pattern RU_OPENER = Pattern.compile(
             "(?:^|\\s)как\\s+(?:ии\\b|искусственн\\w+\\s+интеллект|языков\\w+\\s+модел)"
                     + "|(?:^|\\s)я\\s+(?:—\\s*|-\\s*)?(?:ии\\b|искусственн\\w+\\s+интеллект|языков\\w+\\s+модел)",
@@ -134,7 +145,7 @@ public final class PlayerInput {
     }
 
     /**
-     * True when {@code answer} leaks a player-input boundary, talks about the instructions,
+     * True when {@code answer} leaks a player-input boundary, restates the player-data rule,
      * or refuses and then promises the requested output. The check is lexical: no model call.
      * Case, legacy color codes, and {@code &} are normalized before the boundary test.
      * A normal answer that merely uses one of these words is kept.
@@ -158,7 +169,10 @@ public final class PlayerInput {
             if (sentence.isBlank()) {
                 continue;
             }
-            if (coOccurs(EN_SUBJECT, EN_NEG_VERB, sentence) || coOccurs(RU_SUBJECT, RU_NEG_VERB, sentence)) {
+            if (coOccurs(EN_SUBJECT, EN_NEG_VERB, sentence) || coOccurs(RU_SUBJECT, RU_NEG_VERB, sentence)
+                    || coOccurs(EN_SUBJECT, EN_DISCARD, sentence) || coOccurs(RU_SUBJECT, RU_DISCARD, sentence)
+                    || coOccurs(EN_SUBJECT, EN_NOT_INSTRUCTIONS, sentence)
+                    || coOccurs(RU_SUBJECT, RU_NOT_INSTRUCTIONS, sentence)) {
                 return true;
             }
         }
