@@ -7,7 +7,7 @@ import io.github.neareststep.nexusai.config.FormatPresets;
  * so existing {@code pool.yml} rows still match. Any other format is part of the key.
  * Player-input boundaries are inside that resolved text, so a wrapped value does not share a row
  * with the same prompt from before the boundary existed. The guard sentence itself is versioned
- * on the cache key ({@code player-input-guard-v3}), not as a second pool prefix: a prompt with no
+ * on the cache key ({@code player-input-guard-v4}), not as a second pool prefix: a prompt with no
  * player span is unchanged by the guard, and prefixing those rows would orphan 0.6.0 answers.
  */
 public final class PoolKeys {
