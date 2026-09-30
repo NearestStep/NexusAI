@@ -130,7 +130,7 @@ class PrewarmServiceTest {
 
         service.warmForPlayer("Steve");
 
-        String expected = "Welcome, " + PlayerInput.wrap("Steve");
+        String expected = "Welcome, Steve";
         await(() -> expected.equals(seen.get()), 2, TimeUnit.SECONDS);
         assertEquals(expected, seen.get());
         assertEquals("ok", cache.get(client.cacheKey(expected)).orElseThrow());
