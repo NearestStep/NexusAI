@@ -31,6 +31,11 @@ config-version: 1
 #                       does not apply to text stored in this file.
 #   model, system-prompt, temperature, max-tokens
 #                       same meaning as the api section / a pool entry override
+#   fallback-model      provider and model tried once after the model queue fails for this call.
+#                       Omit it to use fallback-model from config.yml.
+#   knowledge           file names from plugins/NexusAI/knowledge without .md or .txt
+#
+# Answer order: model-queue, then fallback-model, then a pooled answer, then fallback text.
 #
 # pool.entries[].prompt and prewarm.prompts may use an id.
 # /nai reload reads this file again. /nai prompts lists the ids. /nai test <id> sends that prompt.

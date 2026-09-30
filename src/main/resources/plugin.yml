@@ -10,7 +10,7 @@ softdepend: [PlaceholderAPI]
 commands:
   nai:
     description: NexusAI commands
-    usage: /nai <help|version|reload|status|test|prompts|talk>
+    usage: /nai <help|version|reload|status|test|prompts|prompts import|talk>
     aliases: [nexusai]
 
 permissions:
@@ -26,6 +26,9 @@ permissions:
   nexusai.test:
     description: Send one AI test request
     default: op
+  nexusai.import:
+    description: Import prompt definitions from plugins/NexusAI/import into prompts.yml
+    default: op
   nexusai.talk:
-    description: Talk to a character with /nai talk
-    default: true
+    description: Talk to a character with /nai talk. Defaults to op; grant it to players explicitly.
+    default: op

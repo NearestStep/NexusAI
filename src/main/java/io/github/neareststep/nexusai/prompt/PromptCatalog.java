@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -35,7 +37,9 @@ public final class PromptCatalog {
             "max-tokens",
             "format",
             "dialogue",
-            "actions"
+            "actions",
+            "knowledge",
+            "fallback-model"
     );
 
     private static final Set<String> RESERVED = Set.of("config-version");
@@ -88,6 +92,8 @@ public final class PromptCatalog {
             io.github.neareststep.nexusai.dialogue.DialogueBinding.Result dialogue =
                     new io.github.neareststep.nexusai.dialogue.DialogueBinding.Result(
                             io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
+            List<String> knowledge = List.of();
+            FallbackModel fallbackModel = null;
             if (raw instanceof ConfigurationSection section) {
                 vars = readVars(key, section, warnings);
                 ttl = readTtl(key, section, warnings);
@@ -96,11 +102,13 @@ public final class PromptCatalog {
                 overrides = readOverrides(key, section, warnings);
                 format = readFormat(key, section, warnings);
                 dialogue = io.github.neareststep.nexusai.dialogue.DialogueBinding.read(key, section, warnings);
+                knowledge = readKnowledge(key, section, warnings);
+                fallbackModel = readFallbackModel(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
             loaded.put(key, new NamedPrompt(
                     key, template, vars, ttl, fallback, maxPromptLength, overrides, format,
-                    dialogue.profile(), dialogue.actions()));
+                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions()));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));
@@ -337,6 +345,61 @@ public final class PromptCatalog {
         }
         return GenerationOverrides.of(
                 systemSet, system, temperatureSet, temperature, maxTokensSet, maxTokens, modelSet, model);
+    }
+
+    private static List<String> readKnowledge(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("knowledge")) {
+            return List.of();
+        }
+        Object raw = section.get("knowledge");
+        List<?> items;
+        if (raw instanceof String text) {
+            items = List.of(text);
+        } else if (raw instanceof List<?> list) {
+            items = list;
+        } else {
+            warnings.add("Prompt '" + id + "' knowledge must be a list of file names. It was ignored.");
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        for (Object item : items) {
+            if (item == null) {
+                continue;
+            }
+            String name = String.valueOf(item).trim();
+            if (!KnowledgeBase.validName(name)) {
+                warnings.add("Prompt '" + id + "' has an invalid knowledge file '" + name + "'. It was ignored.");
+                continue;
+            }
+            if (!names.contains(name)) {
+                names.add(name);
+            }
+        }
+        return List.copyOf(names);
+    }
+
+    private static FallbackModel readFallbackModel(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("fallback-model")) {
+            return null;
+        }
+        ConfigurationSection model = section.getConfigurationSection("fallback-model");
+        if (model == null) {
+            warnings.add("Prompt '" + id + "' fallback-model must set provider and model. It was ignored.");
+            return null;
+        }
+        String provider = model.getString("provider", "");
+        String name = model.getString("model", "");
+        FallbackModel parsed = FallbackModel.of(provider, name);
+        if (!parsed.configured()) {
+            warnings.add("Prompt '" + id + "' fallback-model must set provider and model. It was ignored.");
+            return null;
+        }
+        for (String key : model.getKeys(false)) {
+            if (!key.equals("provider") && !key.equals("model")) {
+                warnings.add("Prompt '" + id + "' fallback-model has unknown setting '" + key + "'. It was ignored.");
+            }
+        }
+        return parsed;
     }
 
     private static String readFormat(String id, ConfigurationSection section, List<String> warnings) {

@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.dialogue.CharacterAction;
@@ -33,6 +34,8 @@ public final class NamedPrompt {
     private final Integer maxPromptLength;
     private final GenerationOverrides overrides;
     private final String format;
+    private final List<String> knowledge;
+    private final FallbackModel fallbackModel;
     private final boolean playerDependent;
     private final Pattern resolvedPattern;
 
@@ -62,7 +65,7 @@ public final class NamedPrompt {
             String format
     ) {
         this(id, template, vars, ttl, fallback, maxPromptLength, overrides, format,
-                io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
+                List.of(), null, DialogueProfile.absent(), List.of());
     }
 
     public NamedPrompt(
@@ -74,8 +77,10 @@ public final class NamedPrompt {
             Integer maxPromptLength,
             GenerationOverrides overrides,
             String format,
-            io.github.neareststep.nexusai.dialogue.DialogueProfile dialogue,
-            List<io.github.neareststep.nexusai.dialogue.CharacterAction> actions
+            List<String> knowledge,
+            FallbackModel fallbackModel,
+            DialogueProfile dialogue,
+            List<CharacterAction> actions
     ) {
         this.id = Objects.requireNonNull(id, "id");
         this.template = Objects.requireNonNull(template, "template");
@@ -87,9 +92,9 @@ public final class NamedPrompt {
         this.maxPromptLength = maxPromptLength;
         this.overrides = overrides == null ? GenerationOverrides.none() : overrides;
         this.format = format == null || format.isBlank() ? null : format;
-        this.dialogue = dialogue == null
-                ? io.github.neareststep.nexusai.dialogue.DialogueProfile.absent()
-                : dialogue;
+        this.knowledge = knowledge == null || knowledge.isEmpty() ? List.of() : List.copyOf(knowledge);
+        this.fallbackModel = fallbackModel != null && fallbackModel.configured() ? fallbackModel : null;
+        this.dialogue = dialogue == null ? DialogueProfile.absent() : dialogue;
         this.actions = actions == null || actions.isEmpty() ? List.of() : List.copyOf(actions);
         this.playerDependent = computePlayerDependent(this.template, this.vars);
         this.resolvedPattern = this.playerDependent ? compileResolved(this.template, this.vars) : null;
@@ -145,6 +150,20 @@ public final class NamedPrompt {
 
     public List<io.github.neareststep.nexusai.dialogue.CharacterAction> actions() {
         return actions;
+    }
+
+    /**
+     * Knowledge file names without an extension. Empty when the prompt lists none.
+     */
+    public List<String> knowledge() {
+        return knowledge;
+    }
+
+    /**
+     * @return per-prompt fallback model, or {@code null} to inherit {@code fallback-model} from config.yml
+     */
+    public FallbackModel fallbackModel() {
+        return fallbackModel;
     }
 
     /**

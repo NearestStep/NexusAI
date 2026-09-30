@@ -6,11 +6,14 @@ import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
+import io.github.neareststep.nexusai.prompt.PromptImporter;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
@@ -21,6 +24,9 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -28,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * Handles {@code /nai} admin subcommands.
@@ -71,22 +78,43 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "command.no-permission");
             return true;
         }
-        if (args.length > 1 && !"test".equals(sub)) {
+        if (args.length > 1 && !"test".equals(sub) && !"prompts".equals(sub)) {
             messages.send(sender, "command.extra-args");
             return true;
         }
         switch (sub) {
             case "help" -> sendHelp(sender, messages);
             case "version" -> messages.send(sender, "command.version", Map.of(
-                    "version", plugin.getPluginMeta().getVersion()
+                    "version", plugin.getPluginMeta().getVersion(),
+                    "authors", formatAuthors(plugin.getPluginMeta().getAuthors())
             ));
             case "reload" -> handleReload(sender, messages);
             case "status" -> handleStatus(sender, messages);
             case "test" -> handleTest(sender, messages, args);
-            case "prompts" -> handlePrompts(sender, messages);
+            case "prompts" -> handlePrompts(sender, messages, args);
             default -> messages.send(sender, "command.unknown");
         }
         return true;
+    }
+
+    /**
+     * Joins {@code authors} from plugin.yml. Names are not hardcoded here.
+     */
+    static String formatAuthors(List<String> authors) {
+        if (authors == null || authors.isEmpty()) {
+            return "";
+        }
+        StringBuilder joined = new StringBuilder();
+        for (String author : authors) {
+            if (author == null || author.isBlank()) {
+                continue;
+            }
+            if (!joined.isEmpty()) {
+                joined.append(", ");
+            }
+            joined.append(author.trim());
+        }
+        return joined.toString();
     }
 
     private void sendHelp(CommandSender sender, MessageService messages) {
@@ -103,6 +131,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "command.help-test");
         }
         messages.send(sender, "command.help-prompts");
+        if (sender.hasPermission("nexusai.import")) {
+            messages.send(sender, "command.help-prompts-import");
+        }
         if (sender.hasPermission("nexusai.talk") || sender.hasPermission("nexusai.command")) {
             messages.send(sender, "command.help-talk");
             messages.send(sender, "command.help-talk-end");
@@ -202,6 +233,12 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 "pool_state", config.isPoolEnabled() ? enabled : disabled,
                 "pool_entries", String.valueOf(config.getPoolEntries().size())
         ));
+        java.util.List<String> unpooled = plugin.getUnpooledGenerateLog().prompts();
+        if (!unpooled.isEmpty()) {
+            messages.send(sender, "command.status-unpooled", Map.of(
+                    "prompts", String.join(", ", unpooled)
+            ));
+        }
         messages.send(sender, "command.status-cache", Map.of(
                 "cache_size", String.valueOf(plugin.getAiCache().size())
         ));
@@ -226,6 +263,15 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 messages.send(sender, "command.status-queue-line", Map.of("entry", queueLine(row)));
             }
         }
+        FallbackModel fallback = config.fallbackModel();
+        String fallbackEntry = messages.raw("common.none");
+        if (fallback.configured() && queue != null) {
+            fallbackEntry = queueLine(queue.fallbackStatus(fallback.provider(), fallback.model(), System.currentTimeMillis()));
+        }
+        messages.send(sender, "command.status-fallback-model", Map.of("entry", fallbackEntry));
+        messages.send(sender, "command.status-knowledge", Map.of(
+                "files", String.valueOf(plugin.getKnowledgeBase().size())
+        ));
     }
 
     static String queueLine(ModelQueue.Status row) {
@@ -290,7 +336,11 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 return;
             }
             prompt = resolved.text();
-            overrides = resolved.overrides();
+            overrides = KnowledgeComposer.prepare(
+                    resolved.overrides(),
+                    plugin.getPluginConfig().getSystemPrompt(),
+                    plugin.getKnowledgeBase(),
+                    resolved.knowledge()).overrides();
         } else if (args.length > 1) {
             prompt = outgoingTestPrompt(prompt, true);
         }
@@ -317,7 +367,15 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 }, plugin.getLogger()));
     }
 
-    private void handlePrompts(CommandSender sender, MessageService messages) {
+    private void handlePrompts(CommandSender sender, MessageService messages, String[] args) {
+        if (args.length >= 2 && "import".equals(args[1].toLowerCase(Locale.ROOT))) {
+            handleImport(sender, messages, args);
+            return;
+        }
+        if (args.length > 1) {
+            messages.send(sender, "command.extra-args");
+            return;
+        }
         List<String> ids = plugin.getPromptCatalog().ids();
         if (ids.isEmpty()) {
             messages.send(sender, "command.prompts-empty");
@@ -327,6 +385,56 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         for (String id : ids) {
             messages.send(sender, "command.prompts-line", Map.of("id", id));
         }
+    }
+
+    /**
+     * Import writes {@code prompts.yml}. Listing ids stays on {@code nexusai.command}.
+     * {@code nexusai.import} is separate so an operator can list prompts without being allowed to rewrite the file.
+     */
+    private void handleImport(CommandSender sender, MessageService messages, String[] args) {
+        if (!sender.hasPermission("nexusai.import")) {
+            messages.send(sender, "command.no-permission");
+            return;
+        }
+        if (args.length < 3 || args.length > 4) {
+            messages.send(sender, "command.extra-args");
+            return;
+        }
+        boolean overwrite = false;
+        if (args.length == 4) {
+            if (!"--overwrite".equals(args[3])) {
+                messages.send(sender, "command.prompts-import-fail", Map.of("error", "unknown option " + args[3]));
+                return;
+            }
+            overwrite = true;
+        }
+        PromptImporter.Report report = PromptImporter.importFile(plugin.getDataFolder().toPath(), args[2], overwrite);
+        if (!report.success()) {
+            messages.send(sender, "command.prompts-import-fail", Map.of(
+                    "error", report.error() == null ? "import failed" : report.error()
+            ));
+            return;
+        }
+        for (String warning : report.warnings()) {
+            plugin.getLogger().warning(warning);
+        }
+        if (report.changed()) {
+            try {
+                plugin.reloadPlugin();
+            } catch (Exception e) {
+                String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                plugin.getMessageService().send(sender, "command.reload-fail", Map.of("error", error));
+                return;
+            }
+        }
+        MessageService current = plugin.getMessageService();
+        String none = current.raw("common.none");
+        current.send(sender, "command.prompts-import-ok", Map.of(
+                "file", report.fileName(),
+                "added", report.added().isEmpty() ? none : String.join(", ", report.added()),
+                "skipped", report.skipped().isEmpty() ? none : String.join(", ", report.skipped()),
+                "conflicting", report.conflicting().isEmpty() ? none : String.join(", ", report.conflicting())
+        ));
     }
 
     /**
@@ -415,6 +523,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             }
             return ids;
         }
+        if (args.length >= 2 && "prompts".equals(args[0].toLowerCase(Locale.ROOT))) {
+            return completePrompts(sender, args);
+        }
         if (args.length == 2 && "test".equals(args[0].toLowerCase(Locale.ROOT)) && sender.hasPermission("nexusai.test")) {
             String prefix = args[1].toLowerCase(Locale.ROOT);
             List<String> ids = new ArrayList<>();
@@ -453,5 +564,46 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             out.add(sub);
         }
         return out;
+    }
+
+    private List<String> completePrompts(CommandSender sender, String[] args) {
+        String action = args[1].toLowerCase(Locale.ROOT);
+        if (args.length == 2) {
+            if (!sender.hasPermission("nexusai.import")) {
+                return List.of();
+            }
+            return "import".startsWith(action) ? List.of("import") : List.of();
+        }
+        if (!sender.hasPermission("nexusai.import") || !"import".equals(args[1].toLowerCase(Locale.ROOT))) {
+            return List.of();
+        }
+        if (args.length == 3) {
+            return importFileNames(args[2]);
+        }
+        if (args.length == 4 && "--overwrite".startsWith(args[3])) {
+            return List.of("--overwrite");
+        }
+        return List.of();
+    }
+
+    private List<String> importFileNames(String prefix) {
+        Path folder = plugin.getDataFolder().toPath().resolve("import");
+        if (!Files.isDirectory(folder)) {
+            return List.of();
+        }
+        String needle = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+        try (Stream<Path> files = Files.list(folder)) {
+            List<String> names = new ArrayList<>();
+            for (Path path : files.filter(Files::isRegularFile).sorted().toList()) {
+                String name = path.getFileName().toString();
+                String lower = name.toLowerCase(Locale.ROOT);
+                if ((lower.endsWith(".yml") || lower.endsWith(".yaml")) && lower.startsWith(needle)) {
+                    names.add(name);
+                }
+            }
+            return names;
+        } catch (IOException e) {
+            return List.of();
+        }
     }
 }

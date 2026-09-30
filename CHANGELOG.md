@@ -2,7 +2,39 @@
 
 ## Unreleased (1.0.0)
 
-One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `NexusAI-0.7.0-SNAPSHOT.jar` with this build. `api-version` is **1.20.6**. Existing `config.yml`, `prompts.yml`, and `pool.yml` keys and values are unchanged.
+One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `NexusAI-0.7.0-SNAPSHOT.jar` with this build. `api-version` is **1.20.6**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. New keys are added only when they are missing.
+
+### Fallback model
+
+- Answer order is model-queue, then `fallback-model`, then a pooled answer, then fallback text.
+- `fallback-model` in `config.yml` is `provider` and `model`. Leave either blank to disable it. A prompt may set `fallback-model` and that replaces the global one for that prompt.
+- The fallback model is called once, only when every queue entry was unavailable or failed or was rejected for this call. A queue row with the same provider and model keeps that row's daily cap and cooldown and is not called twice. A model that is not in the queue has its own cooldown. It is skipped when every queue row of that provider is already at its daily cap. The reply uses the same player-input filter as the queue. `/nai status` shows the global fallback model.
+
+### Knowledge
+
+- `plugins/NexusAI/knowledge/` holds `.md` and `.txt` files. `example.md` is created on first start and is never overwritten.
+- A prompt lists `knowledge: [lore, rules]` (names without the extension). The text is inserted in the system message after the admin system prompt and before the format instruction, inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`. The player-input guard stays last.
+- `knowledge.max-chars` caps one request. `knowledge.max-file-chars` caps one file. Truncation logs one warning. An unknown file logs a warning when prompts load. `/nai reload` reads the folder again. The cache key includes a hash of the injected text. There is no vector search.
+
+### Prompt import
+
+- `/nai prompts import <file> [--overwrite]` reads `plugins/NexusAI/import/<file>` and merges prompt definitions into `prompts.yml`. Ids and fields are validated like the loader. New ids are added. Existing ids are reported as conflicting and are not replaced unless `--overwrite` is set. Invalid ids are skipped.
+- The path must stay inside the import folder. `prompts.yml` is copied to `.bak` (or `.bak.<timestamp>` when that backup exists) before it changes, then prompts are reloaded.
+- Permission is `nexusai.import` (default OP), in addition to `nexusai.command`. Listing ids stays on `nexusai.command` because import rewrites `prompts.yml`.
+
+### Unpooled generate placeholders
+
+- `%ainexus_generate_<prompt>%` logs one warning when that prompt is not in `pool.entries` or the pool is disabled. The warning names the placeholder, says `generate_` only serves pooled answers, and includes a `pool.entries` example. It is logged once per prompt until `/nai reload`. `/nai status` lists those prompts. There is no stack trace.
+
+### Version command
+
+- `/nai version` also prints the authors from `plugin.yml` (`PluginMeta.getAuthors()`). The message is `command.version` with `{version}` and `{authors}`.
+
+### Language files
+
+- On enable, missing bundled `lang/*.yml` files are copied to `plugins/NexusAI/lang/`. An existing file is never overwritten.
+- The new command strings (prompt import, fallback model, knowledge files, and unpooled `generate_`) are translated in all 15 bundled locales. Keys and `{placeholders}` are unchanged.
+- A locale is loaded from the data-folder file, then missing keys are filled from the bundled file of that locale, then from bundled English. A custom locale with no bundled file falls back to English. `/nai reload` reads the files again. When the active locale is missing keys, one info line says how many were filled.
 
 ### Compatibility
 
@@ -14,7 +46,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 ### Dialogues
 
 - `/nai talk <id> [message]` talks to a character whose id is a prompt in `prompts.yml`. A message is one reply. With no message, a session opens: the player's later chat lines go to that character and are not broadcast. The session ends on `dialogue.session-timeout-seconds`, when the player walks farther than `dialogue.leave-radius`, on `/nai talk end`, or on quit. The console form is `/nai talk <player> <id> [message]`, so an NPC plugin can run the command as the player or from the console.
-- `nexusai.talk` defaults to true. Admin subcommands still need `nexusai.command`. The `/nai` command node no longer blocks the command before the plugin sees it, so a player can talk without being op.
+- `nexusai.talk` defaults to op. An admin grants it to the players who should talk. They do not need `nexusai.command`. The `/nai` command node has no permission of its own, so that grant is enough to run `/nai talk`. Admin subcommands still need `nexusai.command`.
 - The model receives the character prompt as the system text, the player-input guard, and the last `dialogue.memory-turns` turns (default 8). Memory is per player and character, trimmed to `dialogue.memory-max-chars`, and dropped after `dialogue.memory-expiry-hours` when `dialogue.persist-memory` is true (`dialogue-memory.yml`). Otherwise it lasts until restart.
 - Dialogue limits are separate from placeholder limits: `dialogue.max-replies-per-session`, `dialogue.message-cooldown-millis` (default 3000), `dialogue.conversations-per-player-per-day`, and `dialogue.max-message-length`. Each line still spends the model queue, key rotation, and the server and player daily caps. Dialogue replies are not taken from the answer pool. A greeting written in `dialogue.greeting` is sent as-is. A generated greeting may be cached for `cache.ttl` when `dialogue.cache-greeting` is true.
 - Player lines are sanitized, wrapped in `§§§ PLAYER INPUT §§§`, and the reply goes through the same guard filter as placeholders.
