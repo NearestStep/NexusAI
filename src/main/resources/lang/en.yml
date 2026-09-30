@@ -12,6 +12,8 @@ command:
   help-status: "&7/nai status &8- &fShow runtime status"
   help-test: "&7/nai test [prompt] &8- &fSend one test request"
   help-prompts: "&7/nai prompts &8- &fList named prompts"
+  help-talk: "&7/nai talk <id> [message] &8- &fTalk to a character. No message opens a session."
+  help-talk-end: "&7/nai talk end &8- &fEnd your dialogue session"
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
   prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
   prompts-import-fail: "{prefix}&cImport failed: &f{error}"
@@ -57,6 +59,27 @@ error:
   unknown-model: "unknown model"
   timeout: "timeout"
   other: "error"
+
+# Dialogue keys.
+talk:
+  disabled: "{prefix}&cDialogues are disabled."
+  players-only: "{prefix}&cOnly players can talk to a character. From the console: &e/nai talk <player> <id>"
+  usage: "{prefix}&cUsage: &e/nai talk <id> [message] &cor &e/nai talk end"
+  unknown-character: "{prefix}&cUnknown character &f{id}&c."
+  unknown-player: "{prefix}&cPlayer &f{player} &cis not online."
+  no-session: "{prefix}&7You are not in a dialogue."
+  ended: "{prefix}&7Dialogue ended."
+  started: "{prefix}&7You are talking to &f{id}&7. Type in chat. &e/nai talk end &7stops it."
+  timeout: "{prefix}&7The conversation ended."
+  left: "{prefix}&7You walked away."
+  cooldown: "{prefix}&7Wait a moment."
+  too-long: "{prefix}&cThat message is too long. Max &f{max}&c characters."
+  replies: "{prefix}&7This conversation is over."
+  daily: "{prefix}&cYou have reached today's conversation limit."
+  busy: "{prefix}&7The character is busy. Try again later."
+  failed: "{prefix}&cNo reply: &f{error}"
+  empty: "{prefix}&7Say a little more."
+  reply: "{prefix}&f{character}&7: &f{reply}"
 
 moderation:
   notify: "{prefix}&eFlagged chat &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

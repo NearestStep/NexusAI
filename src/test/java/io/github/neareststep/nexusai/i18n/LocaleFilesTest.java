@@ -43,7 +43,27 @@ class LocaleFilesTest {
             "error.bad-key",
             "error.unknown-model",
             "error.timeout",
-            "error.other"
+            "error.other",
+            "command.help-talk",
+            "command.help-talk-end",
+            "talk.disabled",
+            "talk.players-only",
+            "talk.usage",
+            "talk.unknown-character",
+            "talk.unknown-player",
+            "talk.no-session",
+            "talk.ended",
+            "talk.started",
+            "talk.timeout",
+            "talk.left",
+            "talk.cooldown",
+            "talk.too-long",
+            "talk.replies",
+            "talk.daily",
+            "talk.busy",
+            "talk.failed",
+            "talk.empty",
+            "talk.reply"
     );
 
     @Test
@@ -74,6 +94,15 @@ class LocaleFilesTest {
             if (file.getFileName().toString().equals("ru.yml")) {
                 assertEquals("нет ошибки", yaml.getString("common.none"));
                 assertEquals("нет", no);
+            }
+            if (file.getFileName().toString().equals("ko.yml")) {
+                assertFalse(yaml.getString("command.help-talk").contains("Talk to a character"),
+                        "ko.yml help-talk still English");
+                assertFalse(yaml.getString("talk.disabled").contains("Dialogues are disabled"),
+                        "ko.yml talk.disabled still English");
+                assertTrue(yaml.getString("talk.too-long").contains("{max}"), "ko.yml {max}");
+                assertTrue(yaml.getString("talk.reply").contains("{character}"), "ko.yml {character}");
+                assertTrue(yaml.getString("talk.reply").contains("{reply}"), "ko.yml {reply}");
             }
             if (!file.getFileName().toString().equals("en.yml")) {
                 assertFalse(yaml.getString("command.help-prompts-import").contains("Import prompts from the import folder"),

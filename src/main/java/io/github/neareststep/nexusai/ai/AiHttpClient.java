@@ -337,4 +337,33 @@ public final class AiHttpClient {
         return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION
                 + '\u0000' + knowledgeHash + '\u0000' + prompt;
     }
+
+    /**
+     * Shared admission for dialogue calls. Placeholder requests keep using {@link #requestAsync}.
+     */
+    public Optional<String> tryAdmit(UUID playerId, String admissionKey) {
+        return gate.tryAdmit(playerId, admissionKey, false);
+    }
+
+    public void recordAdmissionSuccess(String admissionKey) {
+        gate.recordSuccess(admissionKey, gate.pauseStamp(), gate.failureEpoch(admissionKey), true);
+    }
+
+    public void recordAdmissionFailure(String admissionKey, Throwable error) {
+        AiErrorKind kind = AiErrors.classify(error);
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
+            return;
+        }
+        AiRequestException typed = AiErrors.find(error);
+        long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
+        gate.recordFailure(admissionKey, kind, retryAfter, true);
+        diagnostics.report(kind, AiErrors.detail(error), gate.isPaused());
+    }
+
+    public io.github.neareststep.nexusai.ai.KeyRing sharedRing(String providerId) {
+        if (provider instanceof RoutingProvider routing) {
+            return routing.sharedRing(providerId);
+        }
+        return new io.github.neareststep.nexusai.ai.KeyRing(java.util.List.of());
+    }
 }

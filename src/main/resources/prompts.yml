@@ -58,3 +58,24 @@ config-version: 1
 # sign_name:
 #   prompt: "A short shop name for {player}"
 #   format: name
+#
+# Character for /nai talk. dialogue: and actions: are optional.
+# The prompt text is the character. Player chat is wrapped as player input and is not the prompt.
+# Actions are fixed commands. The model only chooses the name. {player} and {uuid} are filled here.
+# as: player (default) or console. Console runs as the server, so keep the command fixed and limited.
+# blacksmith:
+#   prompt: |
+#     You are Bram, a blacksmith. Answer in one or two short sentences.
+#   format: chat
+#   dialogue:
+#     greeting: "Need something forged?"
+#     leave-radius: 6
+#     max-replies: 8
+#   actions:
+#     - name: give_iron
+#       description: Give the player one iron ingot.
+#       command: "give {player} iron_ingot 1"
+#       as: console
+#       cooldown-seconds: 3600
+#       daily-limit: 1
+#       permission: nexusai.action.give_iron

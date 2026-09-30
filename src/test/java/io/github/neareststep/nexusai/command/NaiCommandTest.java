@@ -2,7 +2,10 @@ package io.github.neareststep.nexusai.command;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
+
+import java.nio.file.Path;
 
 import java.util.List;
 
@@ -46,6 +49,15 @@ class NaiCommandTest {
         assertEquals("mo00Wy", NaiCommand.formatAuthors(List.of(" mo00Wy ", " ", "")));
         assertEquals("", NaiCommand.formatAuthors(List.of()));
         assertEquals("", NaiCommand.formatAuthors(null));
+    }
+
+    @Test
+    void talkPermissionDefaultsToOpAndTheCommandNodeDoesNotBlockIt() {
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(
+                Path.of("src/main/resources/plugin.yml").toFile());
+        assertEquals("op", yaml.getString("permissions.nexusai.talk.default"));
+        assertFalse(yaml.contains("commands.nai.permission"),
+                "a command-level permission would block players who were granted nexusai.talk");
     }
 
     @Test
