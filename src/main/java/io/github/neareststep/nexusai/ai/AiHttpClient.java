@@ -72,8 +72,26 @@ public final class AiHttpClient {
             Duration cacheTtl
     ) {
         Objects.requireNonNull(prompt, "prompt");
+        return requestAsync(prompt, playerId, overrides, cacheTtl, "");
+    }
+
+    /**
+     * @param knowledgeHash cache-key fragment for injected knowledge, or empty when the prompt has none
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl,
+            String knowledgeHash
+    ) {
+        Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        String key = cacheKey(effective.model(config.getModel()), prompt, effective.formatOr(config.defaultFormatId()));
+        String key = cacheKey(
+                effective.model(config.getModel()),
+                prompt,
+                effective.formatOr(config.defaultFormatId()),
+                knowledgeHash);
         Optional<String> cached = cache.get(key);
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
@@ -302,9 +320,22 @@ public final class AiHttpClient {
     }
 
     public String cacheKey(String model, String prompt, String format) {
+        return cacheKey(model, prompt, format, "");
+    }
+
+    /**
+     * Knowledge text is not part of the user prompt, so its hash is a separate cache-key field.
+     * An empty hash keeps the historical key used by prompts that attach no knowledge.
+     */
+    public String cacheKey(String model, String prompt, String format, String knowledgeHash) {
         String effectiveModel = model == null || model.isBlank() ? config.getModel() : model;
         String effectiveFormat = config.normalizeFormat(format);
-        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION + '\u0000' + prompt;
+        String base = effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION + '\u0000' + prompt;
+        if (knowledgeHash == null || knowledgeHash.isBlank()) {
+            return base;
+        }
+        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION
+                + '\u0000' + knowledgeHash + '\u0000' + prompt;
     }
 
     /**
