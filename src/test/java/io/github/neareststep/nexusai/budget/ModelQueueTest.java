@@ -80,6 +80,21 @@ class ModelQueueTest {
         assertEquals(0, reloaded.requestsToday(0));
     }
 
+    @Test
+    void aRejectedAnswerDoesNotCoolTheRow() throws Exception {
+        ModelQueue queue = queue(
+                Files.createTempDirectory("nexusai-usage").resolve("usage.yml"),
+                new AtomicReference<>(LocalDate.of(2026, 9, 29)),
+                Logger.getLogger("queue-reject"),
+                ZoneId.of("UTC"),
+                0);
+        queue.recordRejection(0);
+        queue.recordRejection(0);
+        assertEquals(2, queue.status(1_000L).getFirst().rejected());
+        assertEquals("ACTIVE", queue.status(1_000L).getFirst().state());
+        assertEquals("openai", queue.select(1_000L).orElseThrow().provider());
+    }
+
     private static ModelQueue queue(Path file, AtomicReference<LocalDate> day, Logger logger, ZoneId zone, int limit) {
         return new ModelQueue(
                 List.of(

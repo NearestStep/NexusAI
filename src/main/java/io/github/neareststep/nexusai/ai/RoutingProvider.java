@@ -123,6 +123,13 @@ public final class RoutingProvider implements AiProvider {
                 } catch (AiRequestException error) {
                     last = error;
                     now = clock.getAsLong();
+                    if (error.kind() == AiErrorKind.REJECTED) {
+                        queue.recordRejection(choice.index());
+                        logger.info("Rejected answer from " + choice.provider() + " / " + model
+                                + " because it restated the player-input guard or leaked a boundary marker. "
+                                + "Trying the next model-queue entry. No cooldown.");
+                        break;
+                    }
                     if (!probe && !key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
                         long skipFor = error.kind() == AiErrorKind.BAD_KEY
                                 ? config.getAuthPauseSeconds() * 1000L
