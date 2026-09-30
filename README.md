@@ -141,7 +141,7 @@ Answers whose `content` is an array of parts are joined into one string.
 | Command | Permission | Description |
 |---------|------------|-------------|
 | `/nai help` | `nexusai.command` | Show command help |
-| `/nai version` | `nexusai.command` | Show plugin version |
+| `/nai version` | `nexusai.command` | Show the plugin version and the authors from `plugin.yml` |
 | `/nai reload` | `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache/pool/prewarm |
 | `/nai status` | `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, fallback model |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |

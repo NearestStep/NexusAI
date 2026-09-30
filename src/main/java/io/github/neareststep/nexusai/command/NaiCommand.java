@@ -72,7 +72,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         switch (sub) {
             case "help" -> sendHelp(sender, messages);
             case "version" -> messages.send(sender, "command.version", Map.of(
-                    "version", plugin.getPluginMeta().getVersion()
+                    "version", plugin.getPluginMeta().getVersion(),
+                    "authors", formatAuthors(plugin.getPluginMeta().getAuthors())
             ));
             case "reload" -> handleReload(sender, messages);
             case "status" -> handleStatus(sender, messages);
@@ -81,6 +82,26 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             default -> messages.send(sender, "command.unknown");
         }
         return true;
+    }
+
+    /**
+     * Joins {@code authors} from plugin.yml. Names are not hardcoded here.
+     */
+    static String formatAuthors(List<String> authors) {
+        if (authors == null || authors.isEmpty()) {
+            return "";
+        }
+        StringBuilder joined = new StringBuilder();
+        for (String author : authors) {
+            if (author == null || author.isBlank()) {
+                continue;
+            }
+            if (!joined.isEmpty()) {
+                joined.append(", ");
+            }
+            joined.append(author.trim());
+        }
+        return joined.toString();
     }
 
     private void sendHelp(CommandSender sender, MessageService messages) {
