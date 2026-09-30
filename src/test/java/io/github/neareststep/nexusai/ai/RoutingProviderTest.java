@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -140,6 +141,57 @@ class RoutingProviderTest {
         assertEquals(List.of("gpt-4o-mini", "gpt-4o-mini", "llama"), models);
         assertTrue(harness.queue().status(5_000L).getFirst().state().startsWith("COOLDOWN"));
         assertEquals(3, calls.get());
+    }
+
+    @Test
+    void contentRejectionTriesTheNextEntryWithoutCooldown() {
+        AtomicLong clock = new AtomicLong(8_000L);
+        List<String> models = new ArrayList<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            models.add(model);
+            if ("gpt-4o-mini".equals(model)) {
+                throw new AiRequestException(
+                        AiErrorKind.REJECTED,
+                        200,
+                        "The model restated the player-input guard instead of answering.",
+                        null);
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                clock,
+                http);
+        assertEquals("ok", harness.provider().complete("ping").join());
+        assertEquals(List.of("gpt-4o-mini", "llama"), models);
+        ModelQueue.Status first = harness.queue().status(clock.get()).getFirst();
+        assertEquals(1, first.rejected());
+        assertEquals("ACTIVE", first.state());
+        assertEquals(0, harness.queue().status(clock.get()).get(1).rejected());
+    }
+
+    @Test
+    void everyContentRejectionStaysSelectable() {
+        AtomicLong clock = new AtomicLong(8_000L);
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            throw new AiRequestException(
+                    AiErrorKind.REJECTED,
+                    200,
+                    "The model restated the player-input guard instead of answering.",
+                    null);
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                clock,
+                http);
+        AiRequestException error = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.REJECTED, error.kind());
+        assertFalse(error.getMessage().contains("Retry after"));
+        for (ModelQueue.Status row : harness.queue().status(clock.get())) {
+            assertEquals(1, row.rejected());
+            assertFalse(row.state().startsWith("COOLDOWN"));
+        }
+        assertEquals(2, harness.queue().selectable(clock.get()).size());
     }
 
     @Test

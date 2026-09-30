@@ -35,7 +35,7 @@ public final class AiDiagnostics {
      * @param paused {@code true} only when this failure actually paused requests to the provider
      */
     public void report(AiErrorKind kind, String detail, boolean paused) {
-        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT) {
+        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
             return;
         }
         String message = format(kind, detail, paused);
@@ -61,6 +61,7 @@ public final class AiDiagnostics {
             case UNKNOWN_MODEL -> "AI provider does not recognize the configured model.";
             case TIMEOUT -> "AI provider request timed out.";
             case LOCAL_LIMIT -> "Local rate limit reached.";
+            case REJECTED -> "AI answer rejected.";
             case OTHER -> "AI provider request failed.";
         };
         if (paused && kind.pausesProvider()) {

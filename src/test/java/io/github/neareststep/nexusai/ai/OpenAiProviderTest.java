@@ -181,7 +181,7 @@ class OpenAiProviderTest {
             yaml.set("api.base-url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
             OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-guard"));
             CompletionException error = assertThrows(CompletionException.class, () -> provider.complete("ping").join());
-            assertEquals(AiErrorKind.OTHER, AiErrors.classify(error));
+            assertEquals(AiErrorKind.REJECTED, AiErrors.classify(error));
             assertTrue(AiErrors.detail(error).contains("player-input guard"));
         } finally {
             server.stop(0);

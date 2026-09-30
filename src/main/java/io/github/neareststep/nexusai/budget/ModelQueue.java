@@ -257,6 +257,17 @@ public final class ModelQueue {
         cooldown(index, until, hold);
     }
 
+    /**
+     * Counts one discarded answer. Does not cool the row down and does not record a provider error.
+     */
+    public synchronized void recordRejection(int index) {
+        Slot slot = slot(index);
+        if (slot == null) {
+            return;
+        }
+        slot.rejected.incrementAndGet();
+    }
+
     public synchronized void cooldown(int index, long untilMillis, Hold hold) {
         Slot slot = slot(index);
         if (slot == null) {
@@ -294,6 +305,7 @@ public final class ModelQueue {
                     slot.dailyLimit,
                     slot.remainingRequests,
                     slot.remainingTokens,
+                    slot.rejected.get(),
                     state
             ));
         }
@@ -387,6 +399,7 @@ public final class ModelQueue {
                 slot.unavailableUntil = 0L;
                 slot.hold = Hold.NONE;
             }
+            slot.rejected.set(0);
         }
         for (AtomicInteger count : providerCounts.values()) {
             count.set(0);
@@ -468,6 +481,7 @@ public final class ModelQueue {
             int dailyLimit,
             Long remainingRequests,
             Long remainingTokens,
+            int rejected,
             String state
     ) {
     }
@@ -478,6 +492,7 @@ public final class ModelQueue {
         private final String model;
         private final int dailyLimit;
         private final AtomicInteger requests = new AtomicInteger();
+        private final AtomicInteger rejected = new AtomicInteger();
         private volatile long unavailableUntil;
         private volatile Hold hold = Hold.NONE;
         private volatile Long remainingRequests;

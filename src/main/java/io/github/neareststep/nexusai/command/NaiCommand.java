@@ -158,7 +158,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
     }
 
-    private static String queueLine(ModelQueue.Status row) {
+    static String queueLine(ModelQueue.Status row) {
         String limit = row.dailyLimit() > 0 ? Integer.toString(row.dailyLimit()) : "-";
         StringBuilder line = new StringBuilder();
         line.append(row.provider()).append(" / ").append(row.model())
@@ -175,6 +175,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 line.append(' ').append(row.remainingTokens()).append(" tokens");
             }
         }
+        line.append(", rejected ").append(row.rejected());
         line.append(", ").append(row.state());
         return line.toString();
     }

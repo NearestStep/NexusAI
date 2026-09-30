@@ -33,6 +33,15 @@ class RequestGateTest {
     }
 
     @Test
+    void aContentRejectionDoesNotBackOffOrPause() {
+        RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
+        gate.recordFailure("tip", AiErrorKind.REJECTED);
+        assertFalse(gate.isBlocked("tip"));
+        assertFalse(gate.isPaused());
+        assertEquals(0L, gate.failureEpoch("tip"));
+    }
+
+    @Test
     void providerErrorBacksOffOnlyThatPrompt() {
         RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
         gate.recordFailure("tip", AiErrorKind.OTHER);
