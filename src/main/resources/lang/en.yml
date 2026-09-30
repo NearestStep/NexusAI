@@ -53,7 +53,7 @@ error:
   timeout: "timeout"
   other: "error"
 
-# Dialogue keys. Other locales may still use this English text until they are translated.
+# Dialogue keys.
 talk:
   disabled: "{prefix}&cDialogues are disabled."
   players-only: "{prefix}&cOnly players can talk to a character. From the console: &e/nai talk <player> <id>"
