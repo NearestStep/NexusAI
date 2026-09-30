@@ -27,6 +27,19 @@ public final class AiPool {
     }
 
     /**
+     * The next stored answer without removing it. Used when a live call cannot answer
+     * and a cached placeholder still has a pooled line to show.
+     */
+    public Optional<String> peek(String prompt) {
+        Objects.requireNonNull(prompt, "prompt");
+        ConcurrentLinkedDeque<String> queue = pools.get(prompt);
+        if (queue == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(queue.peekFirst());
+    }
+
+    /**
      * @return {@code false} when this prompt has already accepted the same finished text, including after it was polled
      */
     public boolean add(String prompt, String answer) {

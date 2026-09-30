@@ -13,6 +13,7 @@ import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.ConfigMerger;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.moderation.ChatModerationListener;
 import io.github.neareststep.nexusai.moderation.FoliaStaffNotifier;
@@ -24,7 +25,9 @@ import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.pool.PoolStore;
+import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -70,10 +73,12 @@ public final class NexusAI extends JavaPlugin {
     private HttpClient sharedHttpClient;
     private AiPlaceholderExpansion placeholderExpansion;
     private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
+    private volatile KnowledgeBase knowledgeBase = KnowledgeBase.empty();
     private volatile ModelQueue modelQueue;
     private volatile OpenAiProvider openAiProvider;
     private volatile ModerationService moderationService;
     private ChatModerationListener moderationListener;
+    private UnpooledGenerateLog unpooledGenerateLog;
     private boolean loggedMissingKey;
     private boolean loggedMissingPapi;
 
@@ -86,6 +91,8 @@ public final class NexusAI extends JavaPlugin {
         if (!new File(getDataFolder(), "prompts.yml").isFile()) {
             saveResource("prompts.yml", false);
         }
+        prepareDataFolders();
+        this.unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
         migrateConfigs();
         if (!mergeMissingConfig()) {
             getLogger().warning("config.yml has a syntax error. The file was left unchanged, "
@@ -96,6 +103,7 @@ public final class NexusAI extends JavaPlugin {
         }
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
+        loadKnowledge();
         loadPrompts();
         logCredentialState();
         logMissingEnvVars();
@@ -145,8 +153,10 @@ public final class NexusAI extends JavaPlugin {
         }
         reloadConfig();
         pluginConfig.reload(getConfig());
+        loadKnowledge();
         applyPrompts(parsed);
         messageService.reload(pluginConfig.getLocale());
+        getUnpooledGenerateLog().reset();
 
         stopRuntimeServices(true);
         startRuntimeServices();
@@ -182,9 +192,9 @@ public final class NexusAI extends JavaPlugin {
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
                 (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS),
-                promptCatalog);
+                promptCatalog, knowledgeBase);
         this.prewarmService = new PrewarmService(
-                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger(), promptCatalog);
+                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger(), promptCatalog, knowledgeBase);
 
         poolService.start();
         prewarmService.start();
@@ -449,6 +459,17 @@ public final class NexusAI extends JavaPlugin {
         return promptCatalog;
     }
 
+    public KnowledgeBase getKnowledgeBase() {
+        return knowledgeBase == null ? KnowledgeBase.empty() : knowledgeBase;
+    }
+
+    public UnpooledGenerateLog getUnpooledGenerateLog() {
+        if (unpooledGenerateLog == null) {
+            unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
+        }
+        return unpooledGenerateLog;
+    }
+
     public ModelQueue getModelQueue() {
         return modelQueue;
     }
@@ -507,6 +528,17 @@ public final class NexusAI extends JavaPlugin {
         for (String warning : parsed.warnings()) {
             getLogger().warning(warning);
         }
+        for (String id : promptCatalog.ids()) {
+            NamedPrompt prompt = promptCatalog.find(id).orElse(null);
+            if (prompt == null) {
+                continue;
+            }
+            for (String name : prompt.knowledge()) {
+                if (!knowledgeBase.contains(name)) {
+                    getLogger().warning("Prompt '" + id + "' lists unknown knowledge file '" + name + "'.");
+                }
+            }
+        }
         List<String> poolPrompts = new ArrayList<>();
         for (PoolEntry entry : pluginConfig.getPoolEntries()) {
             poolPrompts.add(entry.prompt());
@@ -515,6 +547,40 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning(warning);
         }
         for (String warning : promptCatalog.unknownIdReferences("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void prepareDataFolders() {
+        File knowledge = new File(getDataFolder(), "knowledge");
+        File imports = new File(getDataFolder(), "import");
+        if (!knowledge.isDirectory() && !knowledge.mkdirs()) {
+            getLogger().warning("Could not create the knowledge folder.");
+        }
+        if (!imports.isDirectory() && !imports.mkdirs()) {
+            getLogger().warning("Could not create the import folder.");
+        }
+        try {
+            KnowledgeBase.ensureExample(knowledge.toPath());
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+        }
+    }
+
+    private void loadKnowledge() {
+        List<String> warnings = new ArrayList<>();
+        try {
+            KnowledgeBase.ensureExample(new File(getDataFolder(), "knowledge").toPath());
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+        }
+        this.knowledgeBase = KnowledgeBase.load(
+                new File(getDataFolder(), "knowledge").toPath(),
+                pluginConfig.knowledgeMaxChars(),
+                pluginConfig.knowledgeMaxFileChars(),
+                warnings,
+                getLogger());
+        for (String warning : warnings) {
             getLogger().warning(warning);
         }
     }
