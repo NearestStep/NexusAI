@@ -161,7 +161,7 @@ public final class RequestGate {
      */
     public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds, boolean armPause) {
         Objects.requireNonNull(admissionKey, "admissionKey");
-        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT) {
+        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
             return;
         }
         long now = clock.getAsLong();

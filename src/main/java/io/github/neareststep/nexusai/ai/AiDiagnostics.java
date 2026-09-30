@@ -28,10 +28,17 @@ public final class AiDiagnostics {
     }
 
     public void report(AiErrorKind kind, String detail) {
-        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT) {
+        report(kind, detail, false);
+    }
+
+    /**
+     * @param paused {@code true} only when this failure actually paused requests to the provider
+     */
+    public void report(AiErrorKind kind, String detail, boolean paused) {
+        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
             return;
         }
-        String message = format(kind, detail);
+        String message = format(kind, detail, paused);
         lastError = message;
         long now = clock.getAsLong();
         Long previous = lastLoggedAt.get(kind);
@@ -46,16 +53,20 @@ public final class AiDiagnostics {
         return lastError;
     }
 
-    static String format(AiErrorKind kind, String detail) {
+    static String format(AiErrorKind kind, String detail, boolean paused) {
         String lead = switch (kind) {
-            case RATE_LIMIT -> "AI provider rate limit. Requests to this provider are paused.";
-            case QUOTA -> "AI provider quota or billing limit. Requests to this provider are paused.";
-            case BAD_KEY -> "AI provider rejected the API key. Requests to this provider are paused.";
+            case RATE_LIMIT -> "AI provider rate limit.";
+            case QUOTA -> "AI provider quota or billing limit.";
+            case BAD_KEY -> "AI provider rejected the API key (invalid or unauthorized).";
             case UNKNOWN_MODEL -> "AI provider does not recognize the configured model.";
             case TIMEOUT -> "AI provider request timed out.";
             case LOCAL_LIMIT -> "Local rate limit reached.";
+            case REJECTED -> "AI answer rejected.";
             case OTHER -> "AI provider request failed.";
         };
+        if (paused && kind.pausesProvider()) {
+            lead = lead + " Requests to this provider are paused.";
+        }
         if (detail == null || detail.isBlank()) {
             return lead;
         }

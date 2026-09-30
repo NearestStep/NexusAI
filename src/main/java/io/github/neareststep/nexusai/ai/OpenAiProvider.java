@@ -6,6 +6,7 @@ import io.github.neareststep.nexusai.ai.dto.ChatCompletionRequest;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionResponse;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -15,6 +16,7 @@ import java.net.http.HttpTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -25,7 +27,7 @@ import java.util.logging.Logger;
  * OpenAI-compatible chat completions client.
  * Logging of classified failures happens in {@link AiDiagnostics}; this class only throws.
  */
-public final class OpenAiProvider implements AiProvider {
+public final class OpenAiProvider implements AiProvider, ChatCaller {
 
     private final PluginConfig config;
     private final ExecutorService executor;
@@ -73,6 +75,11 @@ public final class OpenAiProvider implements AiProvider {
     static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
+        String instruction = config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
+        if (instruction != null && !instruction.isBlank()) {
+            system = system == null ? instruction : system + "\n\n" + instruction;
+        }
+        system = PlayerInput.appendGuard(system);
         Double temperature = effective.temperature(config.getTemperature());
         Integer maxTokens = effective.maxTokens(config.getMaxTokens());
         String model = effective.model(config.getModel());
@@ -92,18 +99,31 @@ public final class OpenAiProvider implements AiProvider {
             }
         }
         List<ChatCompletionRequest.Message> messages = new ArrayList<>(2);
-        if (system != null) {
-            messages.add(new ChatCompletionRequest.Message("system", system));
-        }
+        messages.add(new ChatCompletionRequest.Message("system", system));
         messages.add(new ChatCompletionRequest.Message("user", prompt));
         return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
     }
 
-    private String doComplete(String prompt, GenerationOverrides overrides) {
-        URI parsedUri = URI.create(config.getBaseUrl() + "/chat/completions");
+    /**
+     * Synchronous completion against an explicit endpoint. Used by {@link RoutingProvider}.
+     * {@code model} replaces the queue model when the prompt did not set its own.
+     */
+    public ChatExchange exchange(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model
+    ) {
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        if (model != null && !model.isBlank()) {
+            effective = effective.withModel(model);
+        }
+        String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
+        URI parsedUri = URI.create(trimSlash(root) + "/chat/completions");
         logger.log(Level.FINE, "POST {0}", parsedUri);
         try {
-            ChatCompletionRequest body = buildBody(config, prompt, overrides);
+            ChatCompletionRequest body = buildBody(config, prompt, effective);
             byte[] json = objectMapper.writeValueAsBytes(body);
 
             HttpRequest.Builder builder = HttpRequest.newBuilder()
@@ -112,22 +132,24 @@ public final class OpenAiProvider implements AiProvider {
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .header("User-Agent", "NexusAI (Paper-plugin; Java-HttpClient)");
-            if (config.hasApiKey()) {
-                builder.header("Authorization", "Bearer " + config.getApiKey());
+            if (apiKey != null && !apiKey.isBlank()) {
+                builder.header("Authorization", "Bearer " + apiKey);
             }
             HttpRequest request = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body() == null ? "" : response.body();
             boolean htmlBody = looksLikeHtml(responseBody);
+            Map<String, List<String>> headers = response.headers().map();
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw httpError(
                         response.statusCode(),
-                        responseBody,
+                        SecretMask.redact(responseBody, List.of(apiKey)),
                         htmlBody,
                         parsedUri,
-                        retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null))
+                        retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null)),
+                        headers
                 );
             }
             if (htmlBody) {
@@ -148,12 +170,22 @@ public final class OpenAiProvider implements AiProvider {
             if (text == null || text.isBlank()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            return AnswerFormatter.format(
+            String formatted = AnswerFormatter.format(
                     text,
                     config.isStripMarkdown(),
                     config.getMaxAnswerChars(),
                     config.getMaxAnswerLines()
             );
+            formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
+            formatted = SecretMask.redact(formatted, List.of(apiKey));
+            String reason = PlayerInput.rejectionReason(text, prompt);
+            if (reason == null) {
+                reason = PlayerInput.rejectionReason(formatted, prompt);
+            }
+            if (reason != null) {
+                throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
+            }
+            return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
             throw e;
         } catch (HttpTimeoutException e) {
@@ -169,8 +201,20 @@ public final class OpenAiProvider implements AiProvider {
         } catch (Exception e) {
             AiErrorKind kind = AiErrors.classify(e);
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            throw new AiRequestException(kind, 0, message, e);
+            throw new AiRequestException(kind, 0, SecretMask.redact(message, List.of(apiKey)), e);
         }
+    }
+
+    private String doComplete(String prompt, GenerationOverrides overrides) {
+        return exchange(prompt, overrides, config.getBaseUrl(), config.getApiKey(), null).text();
+    }
+
+    private static String trimSlash(String url) {
+        String trimmed = url.trim();
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 
     static long retryAfterSeconds(String header) {
@@ -184,7 +228,14 @@ public final class OpenAiProvider implements AiProvider {
         }
     }
 
-    private static AiRequestException httpError(int status, String body, boolean html, URI uri, long retryAfterSeconds) {
+    private static AiRequestException httpError(
+            int status,
+            String body,
+            boolean html,
+            URI uri,
+            long retryAfterSeconds,
+            Map<String, List<String>> headers
+    ) {
         String truncated = truncate(body);
         AiErrorKind kind = AiErrors.classifyHttp(status, body, html);
         String host = uri.getHost() == null ? uri.toString() : uri.getHost();
@@ -197,11 +248,12 @@ public final class OpenAiProvider implements AiProvider {
             case UNKNOWN_MODEL -> "HTTP " + status + " unknown model from " + host + ": " + truncated;
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
+            case REJECTED -> "Rejected model answer from " + host;
             case OTHER -> html && status == 403
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;
         };
-        return new AiRequestException(kind, status, message, null, retryAfterSeconds);
+        return new AiRequestException(kind, status, message, null, retryAfterSeconds, headers);
     }
 
     private static boolean looksLikeHtml(String body) {

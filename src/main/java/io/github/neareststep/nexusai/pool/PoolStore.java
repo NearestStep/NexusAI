@@ -1,5 +1,8 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.config.ConfigVersions;
+import io.github.neareststep.nexusai.config.YamlStrings;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -9,7 +12,6 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -33,6 +35,10 @@ public final class PoolStore {
     private final Object scheduleLock = new Object();
     private final Object ioLock = new Object();
     private ScheduledFuture<?> pending;
+    /** Set when pool.yml cannot be parsed, so a later save does not destroy the original bytes. */
+    private volatile boolean refuseOverwrite;
+    /** The invalid-file warning is logged once until a later read succeeds. */
+    private volatile boolean invalidNoted;
 
     public PoolStore(File file, ScheduledExecutorService scheduler, Duration delay, Logger logger, boolean enabled) {
         this.file = file;
@@ -62,8 +68,11 @@ public final class PoolStore {
         if (!enabled || file == null || !file.isFile()) {
             return;
         }
+        YamlConfiguration yaml = readYaml();
+        if (yaml == null) {
+            return;
+        }
         try {
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
             List<Map<?, ?>> rows = yaml.getMapList("pools");
             for (Map<?, ?> row : rows) {
                 Object promptValue = row.get("prompt");
@@ -71,9 +80,12 @@ public final class PoolStore {
                     continue;
                 }
                 String prompt = String.valueOf(promptValue);
-                Integer limit = limits.get(prompt);
+                Object formatValue = row.get("format");
+                String format = formatValue == null ? null : String.valueOf(formatValue);
+                String memory = PoolKeys.memory(format, prompt);
+                Integer limit = limits.get(memory);
                 if (limit == null && dynamicLimits != null) {
-                    limit = dynamicLimits.apply(prompt);
+                    limit = dynamicLimits.apply(memory);
                 }
                 if (limit == null) {
                     continue;
@@ -82,10 +94,10 @@ public final class PoolStore {
                 if (answers.size() > limit) {
                     answers = new ArrayList<>(answers.subList(0, limit));
                 }
-                pool.replace(prompt, answers);
+                pool.replace(memory, answers);
             }
         } catch (RuntimeException e) {
-            logger.log(Level.WARNING, "Failed to load answer pool from " + file.getName(), e);
+            noteUnreadable(e);
         }
     }
 
@@ -119,8 +131,11 @@ public final class PoolStore {
         if (!enabled || file == null || !file.isFile()) {
             return List.of();
         }
+        YamlConfiguration yaml = readYaml();
+        if (yaml == null) {
+            return List.of();
+        }
         try {
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
             List<Map<?, ?>> rows = yaml.getMapList("pools");
             List<String> prompts = new ArrayList<>();
             for (Map<?, ?> row : rows) {
@@ -131,9 +146,49 @@ public final class PoolStore {
             }
             return prompts;
         } catch (RuntimeException e) {
-            logger.log(Level.WARNING, "Failed to read answer pool from " + file.getName(), e);
+            noteUnreadable(e);
             return List.of();
         }
+    }
+
+    /**
+     * Parses {@code pool.yml} without {@link YamlConfiguration#loadConfiguration(File)}, which logs a
+     * severe stack trace on invalid YAML. A parse failure is one warning and leaves the file alone.
+     */
+    private YamlConfiguration readYaml() {
+        if (!enabled || file == null || !file.isFile()) {
+            return null;
+        }
+        try {
+            String raw = Files.readString(file.toPath());
+            YamlConfiguration yaml = new YamlConfiguration();
+            try {
+                yaml.loadFromString(raw);
+            } catch (InvalidConfigurationException e) {
+                noteUnreadable(e);
+                return null;
+            }
+            refuseOverwrite = false;
+            invalidNoted = false;
+            return yaml;
+        } catch (IOException | RuntimeException e) {
+            noteUnreadable(e);
+            return null;
+        }
+    }
+
+    private void noteUnreadable(Exception error) {
+        refuseOverwrite = true;
+        logger.log(Level.FINE, "Answer pool file could not be parsed: " + file.getAbsolutePath(), error);
+        if (invalidNoted) {
+            return;
+        }
+        invalidNoted = true;
+        String detail = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        detail = detail.replace('\r', ' ').replace('\n', ' ').replaceAll(" +", " ").strip();
+        logger.warning("pool.yml at " + file.getAbsolutePath()
+                + " could not be parsed (" + detail
+                + "). The file was left untouched and the answer pool is empty until the file is fixed and reloaded.");
     }
 
     public void saveNow(AiPool pool, Map<String, Integer> limits) {
@@ -141,9 +196,14 @@ public final class PoolStore {
             return;
         }
         synchronized (ioLock) {
+            if (refuseOverwrite) {
+                return;
+            }
             try {
-                YamlConfiguration yaml = new YamlConfiguration();
-                List<Map<String, Object>> rows = new ArrayList<>();
+                StringBuilder yaml = new StringBuilder();
+                yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
+                yaml.append("pools:\n");
+                boolean any = false;
                 for (Map.Entry<String, Integer> entry : limits.entrySet()) {
                     List<String> answers = pool.copy(entry.getKey());
                     int limit = Math.max(0, entry.getValue());
@@ -153,18 +213,28 @@ public final class PoolStore {
                     if (answers.isEmpty()) {
                         continue;
                     }
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("prompt", entry.getKey());
-                    row.put("answers", answers);
-                    rows.add(row);
+                    any = true;
+                    PoolKeys.Parsed parsed = PoolKeys.parse(entry.getKey());
+                    yaml.append("  - prompt: ").append(YamlStrings.quote(parsed.prompt())).append('\n');
+                    if (!io.github.neareststep.nexusai.config.FormatPresets.SIMPLE.equals(parsed.format())) {
+                        yaml.append("    format: ").append(YamlStrings.quote(parsed.format())).append('\n');
+                    }
+                    yaml.append("    answers:\n");
+                    for (String answer : answers) {
+                        yaml.append("      - ").append(YamlStrings.quote(answer)).append('\n');
+                    }
                 }
-                yaml.set("pools", rows);
+                if (!any) {
+                    yaml.setLength(0);
+                    yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
+                    yaml.append("pools: []\n");
+                }
                 File parent = file.getParentFile();
                 if (parent != null) {
                     parent.mkdirs();
                 }
                 File temporary = new File(parent == null ? new File(".") : parent, file.getName() + ".tmp");
-                yaml.save(temporary);
+                java.nio.file.Files.writeString(temporary.toPath(), yaml.toString(), java.nio.charset.StandardCharsets.UTF_8);
                 moveIntoPlace(temporary);
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Failed to save answer pool to " + file.getName(), e);

@@ -32,8 +32,11 @@ public final class PromptCatalog {
             "model",
             "system-prompt",
             "temperature",
-            "max-tokens"
+            "max-tokens",
+            "format"
     );
+
+    private static final Set<String> RESERVED = Set.of("config-version");
 
     private final Map<String, NamedPrompt> prompts;
 
@@ -62,7 +65,7 @@ public final class PromptCatalog {
 
         Map<String, NamedPrompt> loaded = new LinkedHashMap<>();
         for (String key : yaml.getKeys(false)) {
-            if (key == null || key.isBlank()) {
+            if (key == null || key.isBlank() || RESERVED.contains(key)) {
                 continue;
             }
             if (!ID.matcher(key).matches()) {
@@ -79,15 +82,17 @@ public final class PromptCatalog {
             Integer maxPromptLength = null;
             GenerationOverrides overrides = GenerationOverrides.none();
             Map<String, String> vars = Map.of();
+            String format = null;
             if (raw instanceof ConfigurationSection section) {
                 vars = readVars(key, section, warnings);
                 ttl = readTtl(key, section, warnings);
                 fallback = readFallback(section);
                 maxPromptLength = readMaxLength(key, section, warnings);
                 overrides = readOverrides(key, section, warnings);
+                format = readFormat(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
-            loaded.put(key, new NamedPrompt(key, template, vars, ttl, fallback, maxPromptLength, overrides));
+            loaded.put(key, new NamedPrompt(key, template, vars, ttl, fallback, maxPromptLength, overrides, format));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));
@@ -124,12 +129,22 @@ public final class PromptCatalog {
     }
 
     public ResolvedPrompt resolve(String raw, PluginConfig config, UnaryOperator<String> placeholders) {
+        return resolve(raw, config, placeholders, Map.of());
+    }
+
+    public ResolvedPrompt resolve(
+            String raw,
+            PluginConfig config,
+            UnaryOperator<String> placeholders,
+            Map<String, String> context
+    ) {
         String prompt = raw == null ? "" : raw;
         NamedPrompt named = prompts.get(prompt);
+        Map<String, String> values = context == null ? Map.of() : context;
         if (named == null) {
-            return ResolvedPrompt.literal(prompt, config);
+            return ResolvedPrompt.literal(io.github.neareststep.nexusai.context.ContextVariables.apply(prompt, java.util.Set.of(), values), config);
         }
-        return ResolvedPrompt.named(named, named.render(placeholders), config);
+        return ResolvedPrompt.named(named, named.render(placeholders, values), config);
     }
 
     /**
@@ -314,6 +329,23 @@ public final class PromptCatalog {
         }
         return GenerationOverrides.of(
                 systemSet, system, temperatureSet, temperature, maxTokensSet, maxTokens, modelSet, model);
+    }
+
+    private static String readFormat(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("format")) {
+            return null;
+        }
+        Object raw = section.get("format");
+        if (raw == null || String.valueOf(raw).isBlank()) {
+            warnings.add("Prompt '" + id + "' has an empty format. The default format will be used.");
+            return null;
+        }
+        String format = io.github.neareststep.nexusai.config.FormatPresets.normalize(String.valueOf(raw));
+        if (!io.github.neareststep.nexusai.config.FormatPresets.known(format)) {
+            warnings.add("Prompt '" + id + "' has unknown format '" + raw + "'. The default format will be used.");
+            return null;
+        }
+        return format;
     }
 
     private static void warnUnknownSettings(String id, ConfigurationSection section, List<String> warnings) {

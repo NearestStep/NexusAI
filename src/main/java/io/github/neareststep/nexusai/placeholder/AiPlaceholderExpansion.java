@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
+import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
@@ -110,7 +111,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         if (!resolved.usable()) {
             return resolved.fallback();
         }
-        Optional<String> answer = pool.poll(resolved.text());
+        Optional<String> answer = pool.poll(resolved.poolKey());
         poolService.onConsume(raw, resolved.text());
         if (answer.isEmpty()) {
             return resolved.fallback();
@@ -128,7 +129,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             return resolved.fallback();
         }
 
-        String key = httpClient.cacheKey(resolved.model(), resolved.text());
+        String key = httpClient.cacheKey(resolved.model(), resolved.text(), resolved.formatId());
         return cache.get(key).orElseGet(() -> {
             if (!config.canSendRequests()) {
                 return resolved.fallback();
@@ -148,6 +149,10 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     }
 
     private ResolvedPrompt resolve(Player player, String raw) {
-        return prompts.resolve(raw, config, template -> VarSubstitutor.resolve(player, template));
+        return prompts.resolve(
+                raw,
+                config,
+                template -> VarSubstitutor.resolve(player, template),
+                ContextVariables.capture(player));
     }
 }
