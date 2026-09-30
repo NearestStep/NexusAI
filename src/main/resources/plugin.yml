@@ -27,3 +27,9 @@ permissions:
   nexusai.test:
     description: Send one AI test request
     default: op
+  nexusai.moderation.notify:
+    description: Receive chat moderation flags
+    default: op
+  nexusai.moderation.bypass:
+    description: Skip chat moderation checks
+    default: false
