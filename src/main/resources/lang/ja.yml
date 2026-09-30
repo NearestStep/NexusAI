@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7最後のエラー: &f{last_error}"
   status-provider-pause: "&7プロバイダー一時停止: &f{provider_pause}"
+  status-moderation: "&7モデレーション: &f{state} &8(本日の検査 {checks}、フラグ {flags})"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport フォルダからプロンプトを取り込む"
   prompts-import-ok: "{prefix}&a取り込み &f{file}&a. 追加: &f{added}&a. スキップ: &f{skipped}&a. 競合: &f{conflicting}&a."
@@ -77,3 +78,6 @@ talk:
   failed: "{prefix}&c返信なし: &f{error}"
   empty: "{prefix}&7もう少し書いてください。"
   reply: "{prefix}&f{character}&7: &f{reply}"
+
+moderation:
+  notify: "{prefix}&eフラグされたチャット &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

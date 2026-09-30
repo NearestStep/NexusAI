@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7마지막 오류: &f{last_error}"
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
+  status-moderation: "&7모더레이션: &f{state} &8(오늘 검사 {checks}, 표시 {flags})"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport 폴더에서 프롬프트 가져오기"
   prompts-import-ok: "{prefix}&a가져옴 &f{file}&a. 추가: &f{added}&a. 건너뜀: &f{skipped}&a. 충돌: &f{conflicting}&a."
@@ -77,3 +78,6 @@ talk:
   failed: "{prefix}&c응답 없음: &f{error}"
   empty: "{prefix}&7조금 더 적어 주세요."
   reply: "{prefix}&f{character}&7: &f{reply}"
+
+moderation:
+  notify: "{prefix}&e표시된 채팅 &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

@@ -45,6 +45,8 @@ public final class ModelQueue {
     private final Logger logger;
     private final Object ioLock = new Object();
     private LocalDate day;
+    private int moderationChecks;
+    private int moderationFlags;
 
     public ModelQueue(
             List<QueueEntryConfig> entries,
@@ -331,6 +333,28 @@ public final class ModelQueue {
     /**
      * Counts one discarded answer. Does not cool the row down and does not record a provider error.
      */
+    public synchronized int moderationChecks() {
+        roll(clock.getAsLong());
+        return moderationChecks;
+    }
+
+    public synchronized int moderationFlags() {
+        roll(clock.getAsLong());
+        return moderationFlags;
+    }
+
+    public synchronized void recordModerationCheck() {
+        roll(clock.getAsLong());
+        moderationChecks++;
+        save();
+    }
+
+    public synchronized void recordModerationFlag() {
+        roll(clock.getAsLong());
+        moderationFlags++;
+        save();
+    }
+
     public synchronized void recordRejection(int index) {
         reject(slot(index));
     }
@@ -455,6 +479,8 @@ public final class ModelQueue {
                     rows.add(row);
                 }
                 yaml.set("entries", rows);
+                yaml.set("moderation.checks", moderationChecks);
+                yaml.set("moderation.flags", moderationFlags);
                 if (!fallbackSlots.isEmpty()) {
                     List<Map<String, Object>> fallbackRows = new ArrayList<>();
                     for (Slot slot : fallbackSlots.values()) {
@@ -522,6 +548,8 @@ public final class ModelQueue {
                 }
             }
         }
+        this.moderationChecks = Math.max(0, yaml.getInt("moderation.checks", 0));
+        this.moderationFlags = Math.max(0, yaml.getInt("moderation.flags", 0));
         for (Map<?, ?> row : yaml.getMapList("fallback")) {
             Object provider = row.get("provider");
             Object model = row.get("model");
@@ -575,6 +603,8 @@ public final class ModelQueue {
         for (AtomicInteger count : providerCounts.values()) {
             count.set(0);
         }
+        moderationChecks = 0;
+        moderationFlags = 0;
         save();
     }
 

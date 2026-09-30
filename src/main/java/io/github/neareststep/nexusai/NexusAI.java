@@ -15,7 +15,12 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.limit.RateLimiter;
+import io.github.neareststep.nexusai.moderation.ChatModerationListener;
+import io.github.neareststep.nexusai.moderation.FoliaStaffNotifier;
+import io.github.neareststep.nexusai.moderation.ModerationLog;
+import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
+import io.github.neareststep.nexusai.config.ModerationSettings;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
@@ -74,6 +79,9 @@ public final class NexusAI extends JavaPlugin {
     private volatile KnowledgeBase knowledgeBase = KnowledgeBase.empty();
     private volatile ModelQueue modelQueue;
     private DialogueService dialogueService;
+    private volatile OpenAiProvider openAiProvider;
+    private volatile ModerationService moderationService;
+    private ChatModerationListener moderationListener;
     private UnpooledGenerateLog unpooledGenerateLog;
     private boolean loggedMissingKey;
     private boolean loggedMissingPapi;
@@ -117,6 +125,7 @@ public final class NexusAI extends JavaPlugin {
         startRuntimeServices();
         registerPlaceholderExpansion();
         registerCommands();
+        registerModerationListener();
 
         getLogger().info("NexusAI enabled.");
     }
@@ -205,9 +214,11 @@ public final class NexusAI extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
             NexusAIApi.bind(dialogueService);
         }
+        startModeration();
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        this.moderationService = null;
         if (modelQueue != null) {
             modelQueue.save();
         }
@@ -343,6 +354,7 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
         OpenAiProvider http = new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        this.openAiProvider = http;
         this.modelQueue = new ModelQueue(
                 config.modelQueue(),
                 config.modelQueueRemainingThreshold(),
@@ -479,6 +491,44 @@ public final class NexusAI extends JavaPlugin {
 
     public DialogueService getDialogueService() {
         return dialogueService;
+    }
+
+    public ModerationService getModerationService() {
+        return moderationService;
+    }
+
+    private void startModeration() {
+        ModerationSettings settings = pluginConfig.moderation();
+        if (settings.enabled() && settings.provider().isEmpty() != settings.model().isEmpty()) {
+            getLogger().warning("moderation.provider and moderation.model must both be set or both be empty. "
+                    + "Using the model queue.");
+        }
+        if (settings.enabled() && settings.pinned() && pluginConfig.provider(settings.provider()) == null) {
+            getLogger().warning("moderation.provider '" + settings.provider()
+                    + "' is not defined. Chat checks will be skipped until it is.");
+        }
+        if (settings.enabled()) {
+            getLogger().info("Chat moderation is enabled. Public chat is delivered immediately; "
+                    + "the check runs afterwards and never punishes or runs commands.");
+        }
+        this.moderationService = new ModerationService(
+                settings,
+                pluginConfig,
+                modelQueue,
+                openAiProvider,
+                httpExecutor,
+                new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger()),
+                new FoliaStaffNotifier(this),
+                getLogger()
+        );
+    }
+
+    private void registerModerationListener() {
+        if (moderationListener != null) {
+            return;
+        }
+        this.moderationListener = new ChatModerationListener(this);
+        getServer().getPluginManager().registerEvents(moderationListener, this);
     }
 
     private void loadPrompts() {
