@@ -57,6 +57,47 @@ public final class PlayerInput {
                     + "|(?:^|\\s)я\\s+(?:—\\s*|-\\s*)?(?:ии\\b|искусственн\\w+\\s+интеллект|языков\\w+\\s+модел)",
             UNICODE);
     private static final Pattern SENTENCE = Pattern.compile("(?<=[.!?])\\s+|\\n+");
+    /**
+     * Refuse-then-comply phrases. These name the requested or instructed result, so a plain
+     * "however" or "but" in an ordinary answer does not match.
+     */
+    private static final Pattern META_PHRASE = Pattern.compile(
+            "the requested output"
+                    + "|as you requested"
+                    + "|as per your request"
+                    + "|\\bas requested\\b"
+                    + "|as you instructed"
+                    + "|\\bas instructed\\b"
+                    + "|как вы просили"
+                    + "|как вы и просили"
+                    + "|по вашему запросу"
+                    + "|как было запрошено",
+            UNICODE);
+    private static final Pattern META_PIVOT = Pattern.compile(
+            "\\b(?:however|nevertheless|that said)\\b"
+                    + "|\\bbut\\b"
+                    + "|\\bstill\\b"
+                    + "|однако"
+                    + "|вс[её] же"
+                    + "|(?<!\\w)но(?!\\w)",
+            UNICODE);
+    private static final Pattern META_COMPLY = Pattern.compile(
+            "\\bi will(?! not)\\b"
+                    + "|\\bi'll\\b"
+                    + "|\\bhere is\\b"
+                    + "|\\bhere's\\b"
+                    + "|я выведу"
+                    + "|я предоставлю"
+                    + "|(?<!\\w)вот(?!\\w)",
+            UNICODE);
+    private static final Pattern META_OBJECT = Pattern.compile(
+            "\\brequested\\b"
+                    + "|\\basked\\b"
+                    + "|\\bthe output\\b"
+                    + "|\\bas requested\\b"
+                    + "|запрошен"
+                    + "|просили",
+            UNICODE);
 
     private PlayerInput() {
     }
@@ -93,8 +134,8 @@ public final class PlayerInput {
     }
 
     /**
-     * True when {@code answer} leaks a player-input boundary or talks about the instructions
-     * instead of answering. The check is lexical: no model call.
+     * True when {@code answer} leaks a player-input boundary, talks about the instructions,
+     * or refuses and then promises the requested output. The check is lexical: no model call.
      * Case, legacy color codes, and {@code &} are normalized before the boundary test.
      * A normal answer that merely uses one of these words is kept.
      */
@@ -121,7 +162,21 @@ public final class PlayerInput {
                 return true;
             }
         }
-        return false;
+        return compliesAfterRefusal(text);
+    }
+
+    /**
+     * True when the whole reply promises to deliver what was requested or instructed.
+     * The three parts may sit in different sentences. A concession word alone is not enough.
+     */
+    private static boolean compliesAfterRefusal(String text) {
+        String meta = text.replace('’', '\'').replace('‘', '\'');
+        if (META_PHRASE.matcher(meta).find()) {
+            return true;
+        }
+        return META_PIVOT.matcher(meta).find()
+                && META_COMPLY.matcher(meta).find()
+                && META_OBJECT.matcher(meta).find();
     }
 
     /**
