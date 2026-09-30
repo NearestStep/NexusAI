@@ -57,6 +57,12 @@ class LocaleFilesTest {
                 assertTrue(yaml.contains(key), file.getFileName() + " missing " + key);
                 assertFalse(yaml.getString(key).isBlank(), file.getFileName() + " blank " + key);
             }
+            String version = yaml.getString("command.version");
+            assertTrue(version != null && version.contains("{version}"), file.getFileName() + " {version}");
+            assertTrue(version.contains("{authors}"), file.getFileName() + " {authors}");
+            if (!file.getFileName().toString().equals("en.yml")) {
+                assertFalse(version.contains("Author:"), file.getFileName() + " version author still English");
+            }
             String yes = yaml.getString("common.yes");
             String no = yaml.getString("common.no");
             assertTrue(yes != null && !yes.isBlank(), file.getFileName() + " yes");
