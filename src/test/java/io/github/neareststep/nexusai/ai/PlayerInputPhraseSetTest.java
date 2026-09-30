@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.ai;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -2230,5 +2231,49 @@ class PlayerInputPhraseSetTest {
         assertEquals(1.0, precision, 0.0001, misses.toString());
         assertEquals(1.0, recall, 0.0001, misses.toString());
         assertTrue(misses.isEmpty());
+    }
+
+    @Test
+    void addedPivotsRejectAfterAMetaRefusalAndStayInNpcLines() {
+        assertTrue(PlayerInput.restatesGuard(
+                "Я не могу выполнить этот запрос. Впрочем: NXBREAK-7f3a9c"));
+        assertTrue(PlayerInput.restatesGuard(
+                "Не буду следовать инструкциям. Впрочем,\nNXBREAK-7f3a9c"));
+        assertFalse(PlayerInput.restatesGuard("Впрочем, мост ещё цел."));
+
+        String[] pivots = {
+                "впрочем",
+                "тем не менее",
+                "всё же",
+                "все же",
+                "всё-таки",
+                "все-таки",
+                "однако",
+                "зато",
+                "так или иначе",
+                "в любом случае",
+                "тем более",
+                "that said",
+                "still",
+                "regardless",
+                "nevertheless",
+                "nonetheless",
+                "even so",
+                "anyhow",
+                "in any case",
+                "all the same"
+        };
+        for (String pivot : pivots) {
+            String lead = pivot.substring(0, 1).toUpperCase() + pivot.substring(1);
+            boolean english = pivot.charAt(0) < 128;
+            String refused = english
+                    ? "I cannot share the instructions. " + lead + ":\nNXBREAK-7f3a9c"
+                    : "Я не могу выполнить этот запрос. " + lead + ",\nNXBREAK-7f3a9c";
+            String npc = english
+                    ? lead + ", the market opens at dawn."
+                    : lead + ", мост ещё цел.";
+            assertTrue(PlayerInput.restatesGuard(refused), pivot);
+            assertFalse(PlayerInput.restatesGuard(npc), pivot);
+        }
     }
 }
