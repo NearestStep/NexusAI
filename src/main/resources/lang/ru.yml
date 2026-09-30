@@ -39,6 +39,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Последняя ошибка: &f{last_error}"
   status-provider-pause: "&7Пауза провайдера: &f{provider_pause}"
+  status-moderation: "&7Модерация: &f{state} &8(проверок сегодня: {checks}, срабатываний: {flags})"
 
 common:
   "yes": "да"
@@ -54,3 +55,6 @@ error:
   unknown-model: "неизвестная модель"
   timeout: "таймаут"
   other: "ошибка"
+
+moderation:
+  notify: "{prefix}&eОтмечено сообщение &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"
