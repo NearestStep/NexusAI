@@ -29,6 +29,7 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 ### Language files
 
 - On enable, missing bundled `lang/*.yml` files are copied to `plugins/NexusAI/lang/`. An existing file is never overwritten.
+- The new command strings (prompt import, fallback model, knowledge files, and unpooled `generate_`) are translated in all 15 bundled locales. Keys and `{placeholders}` are unchanged.
 - A locale is loaded from the data-folder file, then missing keys are filled from the bundled file of that locale, then from bundled English. A custom locale with no bundled file falls back to English. `/nai reload` reads the files again. When the active locale is missing keys, one info line says how many were filled.
 
 ### Compatibility

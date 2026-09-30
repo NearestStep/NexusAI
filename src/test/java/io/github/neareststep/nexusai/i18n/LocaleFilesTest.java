@@ -67,6 +67,21 @@ class LocaleFilesTest {
                 assertEquals("нет ошибки", yaml.getString("common.none"));
                 assertEquals("нет", no);
             }
+            if (!file.getFileName().toString().equals("en.yml")) {
+                assertFalse(yaml.getString("command.help-prompts-import").contains("Import prompts from the import folder"),
+                        file.getFileName() + " help-prompts-import still English");
+                assertFalse(yaml.getString("command.status-unpooled").contains("requested but not pooled"),
+                        file.getFileName() + " status-unpooled still English");
+                assertTrue(yaml.getString("command.prompts-import-ok").contains("{file}"), file.getFileName() + " {file}");
+                assertTrue(yaml.getString("command.prompts-import-ok").contains("{added}"), file.getFileName() + " {added}");
+                assertTrue(yaml.getString("command.prompts-import-ok").contains("{skipped}"), file.getFileName() + " {skipped}");
+                assertTrue(yaml.getString("command.prompts-import-ok").contains("{conflicting}"), file.getFileName() + " {conflicting}");
+                assertTrue(yaml.getString("command.prompts-import-fail").contains("{error}"), file.getFileName() + " {error}");
+                assertTrue(yaml.getString("command.status-fallback-model").contains("{entry}"), file.getFileName() + " {entry}");
+                assertTrue(yaml.getString("command.status-knowledge").contains("{files}"), file.getFileName() + " {files}");
+                assertTrue(yaml.getString("command.status-unpooled").contains("{prompts}"), file.getFileName() + " {prompts}");
+                assertTrue(yaml.getString("command.status-unpooled").contains("generate_"), file.getFileName() + " generate_");
+            }
         }
         assertEquals(15, LocaleFiles.BUNDLED.size());
     }
