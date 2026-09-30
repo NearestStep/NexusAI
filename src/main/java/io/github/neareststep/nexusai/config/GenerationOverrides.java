@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class GenerationOverrides {
 
     private static final GenerationOverrides NONE = new GenerationOverrides(
-            false, null, false, null, false, null, false, null, false, null);
+            false, null, false, null, false, null, false, null, false, null, false, null, null);
 
     private final boolean systemPromptSet;
     private final String systemPrompt;
@@ -21,6 +21,9 @@ public final class GenerationOverrides {
     private final String model;
     private final boolean formatSet;
     private final String format;
+    private final boolean fallbackSet;
+    private final String fallbackProvider;
+    private final String fallbackModel;
 
     private GenerationOverrides(
             boolean systemPromptSet,
@@ -32,7 +35,10 @@ public final class GenerationOverrides {
             boolean modelSet,
             String model,
             boolean formatSet,
-            String format
+            String format,
+            boolean fallbackSet,
+            String fallbackProvider,
+            String fallbackModel
     ) {
         this.systemPromptSet = systemPromptSet;
         this.systemPrompt = systemPrompt;
@@ -44,6 +50,9 @@ public final class GenerationOverrides {
         this.model = model;
         this.formatSet = formatSet;
         this.format = format;
+        this.fallbackSet = fallbackSet;
+        this.fallbackProvider = fallbackProvider;
+        this.fallbackModel = fallbackModel;
     }
 
     public static GenerationOverrides none() {
@@ -84,12 +93,15 @@ public final class GenerationOverrides {
                 modelSet,
                 model,
                 false,
+                null,
+                false,
+                null,
                 null
         );
     }
 
     public boolean isEmpty() {
-        return !systemPromptSet && !temperatureSet && !maxTokensSet && !modelSet && !formatSet;
+        return !systemPromptSet && !temperatureSet && !maxTokensSet && !modelSet && !formatSet && !fallbackSet;
     }
 
     public boolean modelOverridden() {
@@ -110,7 +122,10 @@ public final class GenerationOverrides {
                 true,
                 model,
                 formatSet,
-                format
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel
         );
     }
 
@@ -128,8 +143,65 @@ public final class GenerationOverrides {
                 modelSet,
                 model,
                 true,
-                FormatPresets.normalize(format)
+                FormatPresets.normalize(format),
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel
         );
+    }
+
+    public GenerationOverrides withSystemPrompt(String system) {
+        return new GenerationOverrides(
+                true,
+                system,
+                temperatureSet,
+                temperature,
+                maxTokensSet,
+                maxTokens,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel
+        );
+    }
+
+    /**
+     * Per-call fallback model. A blank provider or model clears nothing and returns this instance.
+     */
+    public GenerationOverrides withFallbackModel(String provider, String modelName) {
+        FallbackModel parsed = FallbackModel.of(provider, modelName);
+        if (!parsed.configured()) {
+            return this;
+        }
+        return new GenerationOverrides(
+                systemPromptSet,
+                systemPrompt,
+                temperatureSet,
+                temperature,
+                maxTokensSet,
+                maxTokens,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                true,
+                parsed.provider(),
+                parsed.model()
+        );
+    }
+
+    /**
+     * @return the per-call fallback model, or {@code null} when this call inherits "none"
+     */
+    public FallbackModel fallbackModel() {
+        if (!fallbackSet) {
+            return null;
+        }
+        FallbackModel parsed = FallbackModel.of(fallbackProvider, fallbackModel);
+        return parsed.configured() ? parsed : null;
     }
 
     public String formatOr(String fallback) {
@@ -159,7 +231,10 @@ public final class GenerationOverrides {
                 onTop.modelSet || modelSet,
                 onTop.modelSet ? onTop.model : model,
                 onTop.formatSet || formatSet,
-                onTop.formatSet ? onTop.format : format
+                onTop.formatSet ? onTop.format : format,
+                onTop.fallbackSet || fallbackSet,
+                onTop.fallbackSet ? onTop.fallbackProvider : fallbackProvider,
+                onTop.fallbackSet ? onTop.fallbackModel : fallbackModel
         );
     }
 
@@ -213,17 +288,20 @@ public final class GenerationOverrides {
                 && maxTokensSet == that.maxTokensSet
                 && modelSet == that.modelSet
                 && formatSet == that.formatSet
+                && fallbackSet == that.fallbackSet
                 && Objects.equals(systemPrompt, that.systemPrompt)
                 && Objects.equals(temperature, that.temperature)
                 && Objects.equals(maxTokens, that.maxTokens)
                 && Objects.equals(model, that.model)
-                && Objects.equals(format, that.format);
+                && Objects.equals(format, that.format)
+                && Objects.equals(fallbackProvider, that.fallbackProvider)
+                && Objects.equals(fallbackModel, that.fallbackModel);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
                 systemPromptSet, systemPrompt, temperatureSet, temperature, maxTokensSet, maxTokens,
-                modelSet, model, formatSet, format);
+                modelSet, model, formatSet, format, fallbackSet, fallbackProvider, fallbackModel);
     }
 }

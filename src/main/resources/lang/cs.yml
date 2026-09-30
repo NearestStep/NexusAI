@@ -34,6 +34,13 @@ command:
   status-last-error: "&7Poslední chyba: &f{last_error}"
   status-provider-pause: "&7Pauza poskytovatele: &f{provider_pause}"
 
+  help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImport prompts from the import folder"
+  prompts-import-ok: "{prefix}&aImported &f{file}&a. Added: &f{added}&a. Skipped: &f{skipped}&a. Conflicting: &f{conflicting}&a."
+  prompts-import-fail: "{prefix}&cImport failed: &f{error}"
+  status-fallback-model: "&7Fallback model: &f{entry}"
+  status-knowledge: "&7Knowledge files: &f{files}"
+  status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
+
 common:
   "yes": "ano"
   "no": "ne"
