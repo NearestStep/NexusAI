@@ -79,6 +79,8 @@ public final class PluginConfig {
     private int modelQueueRemainingThreshold;
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
+    private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
+            io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -154,6 +156,7 @@ public final class PluginConfig {
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
+        this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -720,6 +723,10 @@ public final class PluginConfig {
         String normalized = normalizeFormat(id);
         FormatPreset configured = formats.get(normalized);
         return configured == null ? FormatPresets.builtin(normalized) : configured;
+    }
+
+    public io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings() {
+        return dialogueSettings;
     }
 
     /**

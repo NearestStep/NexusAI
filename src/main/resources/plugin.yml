@@ -9,14 +9,13 @@ softdepend: [PlaceholderAPI]
 
 commands:
   nai:
-    description: NexusAI admin commands
-    usage: /nai <help|version|reload|status|test|prompts>
+    description: NexusAI commands
+    usage: /nai <help|version|reload|status|test|prompts|talk>
     aliases: [nexusai]
-    permission: nexusai.command
 
 permissions:
   nexusai.command:
-    description: Access /nai base commands
+    description: Access /nai admin commands
     default: op
   nexusai.reload:
     description: Reload NexusAI configuration
@@ -27,3 +26,6 @@ permissions:
   nexusai.test:
     description: Send one AI test request
     default: op
+  nexusai.talk:
+    description: Talk to a character with /nai talk
+    default: true

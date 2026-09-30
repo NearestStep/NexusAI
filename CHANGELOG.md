@@ -11,6 +11,22 @@ One jar for Paper and Purpur 1.20.6 through 26.2 on Java 21 or newer. Replace `N
 - `{biome}` is read through `Keyed.getKey()`. `Biome` is an enum on 1.20.6 and a registry interface on newer servers, and a direct `Biome.getKey()` call compiled against the enum fails on the interface. The other Bukkit methods this plugin calls keep the same descriptors from 1.20.6 through 26.2 (region schedulers, world time and weather, commands, and configuration).
 - CI boots official stable Paper builds 1.20.6, 1.21.1, 1.21.4, and 1.21.8 on Java 21, and 26.2 on Java 25, with PlaceholderAPI 2.12.3. It checks that NexusAI enables and `/nai status` works against a mock OpenAI-compatible endpoint.
 
+### Dialogues
+
+- `/nai talk <id> [message]` talks to a character whose id is a prompt in `prompts.yml`. A message is one reply. With no message, a session opens: the player's later chat lines go to that character and are not broadcast. The session ends on `dialogue.session-timeout-seconds`, when the player walks farther than `dialogue.leave-radius`, on `/nai talk end`, or on quit. The console form is `/nai talk <player> <id> [message]`, so an NPC plugin can run the command as the player or from the console.
+- `nexusai.talk` defaults to true. Admin subcommands still need `nexusai.command`. The `/nai` command node no longer blocks the command before the plugin sees it, so a player can talk without being op.
+- The model receives the character prompt as the system text, the player-input guard, and the last `dialogue.memory-turns` turns (default 8). Memory is per player and character, trimmed to `dialogue.memory-max-chars`, and dropped after `dialogue.memory-expiry-hours` when `dialogue.persist-memory` is true (`dialogue-memory.yml`). Otherwise it lasts until restart.
+- Dialogue limits are separate from placeholder limits: `dialogue.max-replies-per-session`, `dialogue.message-cooldown-millis` (default 3000), `dialogue.conversations-per-player-per-day`, and `dialogue.max-message-length`. Each line still spends the model queue, key rotation, and the server and player daily caps. Dialogue replies are not taken from the answer pool. A greeting written in `dialogue.greeting` is sent as-is. A generated greeting may be cached for `cache.ttl` when `dialogue.cache-greeting` is true.
+- Player lines are sanitized, wrapped in `§§§ PLAYER INPUT §§§`, and the reply goes through the same guard filter as placeholders.
+
+### Actions
+
+- A character may list `actions`. Each action has a name, a description, a fixed command, `as: player` or `as: console`, a per-player cooldown, a daily limit, and an optional permission. The model sees them as OpenAI `tools` and may return only the name. `{player}` and `{uuid}` are filled by the server. Arguments from the model are ignored.
+- Actions run only from `/nai talk`, an open session, or `NexusAIApi.talk`. Placeholder parsing never offers tools and never runs an action. If the provider rejects `tools`, that reply is retried once without tools and no action name is read from the text.
+- A refused action (permission, cooldown, daily cap, unsafe player name) is not run. The character is told the refusal and can say so. Every attempt is written to the server log with the player, character, action, and result. When `actions.log` is true, the same line is also appended to `plugins/NexusAI/actions.log`. `actions.max-per-reply` caps how many actions one reply may run.
+- Console actions run with the server's privileges. The command text is the admin's template, but the model chooses when it runs. Give every action a cooldown and a daily limit. Do not put an open-ended economy or permission command in an action.
+- `NexusAIApi.talk(player, id, message)` returns a `CompletableFuture`. A blank message opens a session and completes with the greeting. Do not join that future on a region thread.
+
 ## 0.7.0-SNAPSHOT
 
 Config schema version 1. Replace `NexusAI-0.6.0-SNAPSHOT.jar` with this build. `api-version` stays **26.2**. Existing `config.yml`, `prompts.yml`, and `pool.yml` values are kept. On startup the plugin migrates a missing `config-version` (0.6.0) to 1 and writes `<file>.bak` first.
