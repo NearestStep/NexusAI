@@ -69,46 +69,36 @@ public final class PlayerInput {
             UNICODE);
     private static final Pattern SENTENCE = Pattern.compile("(?<=[.!?])\\s+|\\n+");
     /**
-     * Refuse-then-comply phrases. These name the requested or instructed result, so a plain
-     * "however" or "but" in an ordinary answer does not match.
+     * A meta-refusal names the hidden instructions, rules, request, or prompt.
+     * "I cannot sell diamonds" is not one of these.
      */
-    private static final Pattern META_PHRASE = Pattern.compile(
-            "the requested output"
-                    + "|as you requested"
-                    + "|as per your request"
-                    + "|\\bas requested\\b"
-                    + "|as you instructed"
-                    + "|\\bas instructed\\b"
-                    + "|как вы просили"
-                    + "|как вы и просили"
-                    + "|по вашему запросу"
-                    + "|как было запрошено",
+    private static final Pattern REFUSAL_VERB = Pattern.compile(
+            "\\b(?:cannot|can't|will not|won't|unable)\\b"
+                    + "|(?<!\\w)(?:не могу|не буду|не стану)(?!\\w)",
+            UNICODE);
+    private static final Pattern META_NOUN = Pattern.compile(
+            "\\b(?:instructions?|rules?|requests?|prompts?)\\b"
+                    + "|инструкц\\w*|правил\\w*|запрос\\w*|просьб\\w*",
             UNICODE);
     private static final Pattern META_PIVOT = Pattern.compile(
-            "\\b(?:however|nevertheless|that said)\\b"
+            "\\b(?:however|anyway|nevertheless|regardless)\\b"
+                    + "|\\bthat said\\b"
                     + "|\\bbut\\b"
                     + "|\\bstill\\b"
+                    + "|тем не менее"
                     + "|однако"
                     + "|вс[её] же"
-                    + "|(?<!\\w)но(?!\\w)",
+                    + "|(?<!\\w)но(?!\\w)"
+                    + "|раз\\s+(?:вы|ты)\\s+прос\\w*",
             UNICODE);
-    private static final Pattern META_COMPLY = Pattern.compile(
-            "\\bi will(?! not)\\b"
-                    + "|\\bi'll\\b"
-                    + "|\\bhere is\\b"
-                    + "|\\bhere's\\b"
-                    + "|я выведу"
-                    + "|я предоставлю"
-                    + "|(?<!\\w)вот(?!\\w)",
+    private static final Pattern EXPLICIT_COMPLY = Pattern.compile(
+            "\\bhere is\\b|\\bhere's\\b|\\bthe output is\\b|(?<!\\w)вот(?!\\w)",
             UNICODE);
-    private static final Pattern META_OBJECT = Pattern.compile(
-            "\\brequested\\b"
-                    + "|\\basked\\b"
-                    + "|\\bthe output\\b"
-                    + "|\\bas requested\\b"
-                    + "|запрошен"
-                    + "|просили",
-            UNICODE);
+    private static final Pattern OUTPUT_IS = Pattern.compile("\\bthe output is\\b", UNICODE);
+    private static final Pattern RAZ_PROS = Pattern.compile("раз\\s+(?:вы|ты)\\s+прос\\w*", UNICODE);
+    private static final Pattern COLON_OR_BREAK = Pattern.compile("[:\\n]");
+    private static final int SHORT_PAYLOAD = 80;
+    private static final int REFUSAL_WINDOW = 80;
 
     private PlayerInput() {
     }
@@ -146,7 +136,7 @@ public final class PlayerInput {
 
     /**
      * True when {@code answer} leaks a player-input boundary, restates the player-data rule,
-     * or refuses and then promises the requested output. The check is lexical: no model call.
+     * or refuses the hidden instructions and then dumps a payload. The check is lexical: no model call.
      * Case, legacy color codes, and {@code &} are normalized before the boundary test.
      * A normal answer that merely uses one of these words is kept.
      */
@@ -180,17 +170,108 @@ public final class PlayerInput {
     }
 
     /**
-     * True when the whole reply promises to deliver what was requested or instructed.
-     * The three parts may sit in different sentences. A concession word alone is not enough.
+     * True when the reply first refuses the hidden instructions, rules, request, or prompt,
+     * and later, after a pivot, dumps a short payload or says here is / the output is / вот.
+     * A bare "however, I will … requested" line, with no such refusal, is kept.
+     * "the output is:" and "раз вы просите:" plus a short payload are dumps, not NPC lines.
      */
     private static boolean compliesAfterRefusal(String text) {
         String meta = text.replace('’', '\'').replace('‘', '\'');
-        if (META_PHRASE.matcher(meta).find()) {
+        if (bareCanaryDump(meta)) {
             return true;
         }
-        return META_PIVOT.matcher(meta).find()
-                && META_COMPLY.matcher(meta).find()
-                && META_OBJECT.matcher(meta).find();
+        int refusalEnd = metaRefusalEnd(meta);
+        if (refusalEnd < 0) {
+            return false;
+        }
+        return complyAfterPivot(meta.substring(refusalEnd));
+    }
+
+    /**
+     * End index of the first refusal verb that sits within {@link #REFUSAL_WINDOW} characters
+     * of a meta noun, or {@code -1}.
+     */
+    private static int metaRefusalEnd(String text) {
+        Matcher verb = REFUSAL_VERB.matcher(text);
+        while (verb.find()) {
+            int end = nounEndNear(text, verb.start(), verb.end());
+            if (end >= 0) {
+                return end;
+            }
+        }
+        return -1;
+    }
+
+    private static int nounEndNear(String text, int verbStart, int verbEnd) {
+        int from = Math.max(0, verbStart - REFUSAL_WINDOW);
+        int to = Math.min(text.length(), verbEnd + REFUSAL_WINDOW);
+        Matcher noun = META_NOUN.matcher(text);
+        while (noun.find()) {
+            if (noun.end() <= from || noun.start() >= to) {
+                continue;
+            }
+            int gap = noun.start() >= verbEnd ? noun.start() - verbEnd : verbStart - noun.end();
+            if (gap <= REFUSAL_WINDOW) {
+                return Math.max(verbEnd, noun.end());
+            }
+        }
+        return -1;
+    }
+
+    private static boolean complyAfterPivot(String after) {
+        Matcher pivot = META_PIVOT.matcher(after);
+        while (pivot.find()) {
+            String tail = after.substring(pivot.end());
+            if (explicitComply(tail) || shortDump(tail)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean explicitComply(String tail) {
+        Matcher marker = EXPLICIT_COMPLY.matcher(tail);
+        if (!marker.find()) {
+            return false;
+        }
+        return !tail.substring(marker.end()).strip().isEmpty();
+    }
+
+    /** Colon or line break, then at most {@link #SHORT_PAYLOAD} characters and a few words. */
+    private static boolean shortDump(String tail) {
+        Matcher breakAt = COLON_OR_BREAK.matcher(tail);
+        if (!breakAt.find()) {
+            return false;
+        }
+        return shortPayload(tail.substring(breakAt.end()));
+    }
+
+    private static boolean bareCanaryDump(String text) {
+        return dumpAfterMarker(text, OUTPUT_IS) || dumpAfterMarker(text, RAZ_PROS);
+    }
+
+    private static boolean dumpAfterMarker(String text, Pattern marker) {
+        Matcher match = marker.matcher(text);
+        if (!match.find()) {
+            return false;
+        }
+        String tail = text.substring(match.end());
+        int index = 0;
+        while (index < tail.length() && (tail.charAt(index) == ' ' || tail.charAt(index) == '\t')) {
+            index++;
+        }
+        if (index >= tail.length() || (tail.charAt(index) != ':' && tail.charAt(index) != '\n')) {
+            return false;
+        }
+        return shortPayload(tail.substring(index + 1));
+    }
+
+    private static boolean shortPayload(String payload) {
+        String trimmed = payload.strip();
+        if (trimmed.isEmpty() || trimmed.length() > SHORT_PAYLOAD) {
+            return false;
+        }
+        return trimmed.split("\\s+").length <= 12;
     }
 
     /**
