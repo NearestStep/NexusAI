@@ -33,6 +33,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Ultimo errore: &f{last_error}"
   status-provider-pause: "&7Pausa del provider: &f{provider_pause}"
+  status-moderation: "&7Moderazione: &f{state} &8({checks} controlli, {flags} segnalazioni oggi)"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImporta i prompt dalla cartella import"
   prompts-import-ok: "{prefix}&aImportato &f{file}&a. Aggiunti: &f{added}&a. Saltati: &f{skipped}&a. Conflitti: &f{conflicting}&a."
@@ -55,3 +56,6 @@ error:
   unknown-model: "modello sconosciuto"
   timeout: "timeout"
   other: "errore"
+
+moderation:
+  notify: "{prefix}&eMessaggio segnalato &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

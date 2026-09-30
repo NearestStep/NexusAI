@@ -41,6 +41,7 @@ command:
   status-provider-pause: "&7Provider pause: &f{provider_pause}"
   status-queue-header: "&7Model queue:"
   status-queue-line: "&7- &f{entry}"
+  status-moderation: "&7Moderation: &f{state} &8({checks} checks, {flags} flags today)"
 
 common:
   "yes": "yes"
@@ -56,3 +57,6 @@ error:
   unknown-model: "unknown model"
   timeout: "timeout"
   other: "error"
+
+moderation:
+  notify: "{prefix}&eFlagged chat &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"
