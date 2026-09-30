@@ -64,6 +64,19 @@ public final class AiErrors {
         return null;
     }
 
+    /**
+     * True when the failure was decided locally because no API key is configured.
+     * No HTTP status was returned, so this is not a provider rejection.
+     */
+    public static boolean localMissingKey(Throwable error) {
+        AiRequestException typed = find(error);
+        if (typed == null || typed.status() != 0) {
+            return false;
+        }
+        String message = typed.getMessage();
+        return message != null && message.contains("API key is not configured");
+    }
+
     public static String detail(Throwable error) {
         AiRequestException typed = find(error);
         if (typed != null && typed.getMessage() != null && !typed.getMessage().isBlank()) {

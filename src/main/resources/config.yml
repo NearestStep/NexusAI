@@ -10,8 +10,10 @@
 #
 # config-version is the schema. NexusAI migrates older files (including 0.6.0 files
 # that have no version) and writes <file>.bak before it changes anything.
-# Appending missing default keys does the same: config.yml.bak, or config.yml.bak.<timestamp>
-# when that backup already exists. The backup path is written to the server log.
+# Appending missing default keys does the same, but one startup writes only one backup
+# of config.yml even when migration and missing keys both change it.
+# When that backup already exists, the copy is config.yml.bak.<timestamp>.
+# The backup path is written to the server log.
 
 config-version: 1
 
@@ -106,7 +108,8 @@ fallback-model:
 # Server lore from plugins/NexusAI/knowledge/*.md and *.txt. No vector search.
 # A prompt lists file names without the extension: knowledge: [lore, rules]
 # The text is added to the system message after the admin system prompt and before the format instruction.
-# The player-input guard stays last. max-chars is the cap for one request. max-file-chars is the cap for one file.
+# When the request contains wrapped player input, the player-input guard stays last.
+# max-chars is the cap for one request. max-file-chars is the cap for one file.
 # Longer text is truncated and one warning is logged. /nai reload reads the folder again.
 # The example file is created once and is never overwritten.
 knowledge:
@@ -249,7 +252,8 @@ prewarm:
 # model-queue when provider and model are both empty. Use a local model (Ollama
 # or LM Studio) if chat must not leave the machine.
 # Each check spends the selected model-queue entry's daily-request-limit in usage.yml.
-# The player-input guard is always appended after system-prompt.
+# The player-input guard is appended after system-prompt only when the request
+# contains wrapped player input. Moderation wraps the chat line, so the guard is sent.
 moderation:
   enabled: false
   # Both empty = first available model-queue entry. Set both to pin one endpoint.

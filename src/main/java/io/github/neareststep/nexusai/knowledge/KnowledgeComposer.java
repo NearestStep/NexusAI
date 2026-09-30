@@ -6,8 +6,8 @@ import java.util.List;
 
 /**
  * Puts knowledge into the system prompt after the admin text.
- * {@code OpenAiProvider} then appends the format instruction and the player-input guard,
- * so the guard stays last.
+ * {@code OpenAiProvider} then appends the format instruction and, when the request
+ * contains wrapped player input, the player-input guard, so the guard stays last.
  */
 public final class KnowledgeComposer {
 

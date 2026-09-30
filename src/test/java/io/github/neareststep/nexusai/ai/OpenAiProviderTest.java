@@ -33,11 +33,12 @@ class OpenAiProviderTest {
         PluginConfig config = config("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
         assertEquals("gpt-4o-mini", json.get("model").asText());
-        assertEquals(2, json.get("messages").size());
-        assertEquals("system", json.get("messages").get(0).get("role").asText());
-        assertEquals(PlayerInput.GUARD, json.get("messages").get(0).get("content").asText());
-        assertEquals("user", json.get("messages").get(1).get("role").asText());
-        assertEquals("hi", json.get("messages").get(1).get("content").asText());
+        assertEquals(1, json.get("messages").size());
+        assertEquals("user", json.get("messages").get(0).get("role").asText());
+        assertEquals("hi", json.get("messages").get(0).get("content").asText());
+        assertFalse(json.toString().contains(PlayerInput.GUARD));
+        JsonNode guarded = mapper.valueToTree(OpenAiProvider.buildBody(config, PlayerInput.wrap("hi"), GenerationOverrides.none()));
+        assertEquals(PlayerInput.GUARD, guarded.get("messages").get(0).get("content").asText());
         assertFalse(json.has("temperature"));
         assertFalse(json.has("max_tokens"));
         assertFalse(json.has("max_completion_tokens"));
@@ -60,7 +61,7 @@ class OpenAiProviderTest {
                 GenerationOverrides.of(true, "You are the harbor keeper.", false, null, false, null).withFormat("chat"),
                 config.getSystemPrompt(),
                 block);
-        String system = OpenAiProvider.buildBody(config, "hello", overrides).getMessages().getFirst().getContent();
+        String system = OpenAiProvider.buildBody(config, PlayerInput.wrap("hello"), overrides).getMessages().getFirst().getContent();
         int admin = system.indexOf("You are the harbor keeper.");
         int knowledgeAt = system.indexOf(KnowledgeBase.OPEN);
         int format = system.indexOf("Reply in 1 to 3 sentences");
@@ -77,8 +78,8 @@ class OpenAiProviderTest {
         GenerationOverrides overrides = GenerationOverrides.of(true, "Pool system", true, 0.0, true, 32);
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", overrides));
         assertEquals("system", json.get("messages").get(0).get("role").asText());
-        assertTrue(json.get("messages").get(0).get("content").asText().startsWith("Pool system"));
-        assertTrue(json.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
+        assertEquals("Pool system", json.get("messages").get(0).get("content").asText());
+        assertFalse(json.get("messages").get(0).get("content").asText().contains(PlayerInput.GUARD));
         assertEquals("user", json.get("messages").get(1).get("role").asText());
         assertEquals(0.0, json.get("temperature").asDouble());
         assertEquals(32, json.get("max_tokens").asInt());
@@ -100,8 +101,8 @@ class OpenAiProviderTest {
         assertTrue(oJson.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR);
         assertFalse(oJson.has("max_tokens"));
         assertFalse(oJson.has("temperature"));
-        assertTrue(oJson.get("messages").get(0).get("content").asText().startsWith("system"));
-        assertTrue(oJson.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
+        assertEquals("system", oJson.get("messages").get(0).get("content").asText());
+        assertFalse(oJson.toString().contains(PlayerInput.GUARD));
     }
 
     @Test

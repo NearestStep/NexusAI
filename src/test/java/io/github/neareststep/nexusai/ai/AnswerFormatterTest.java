@@ -36,9 +36,14 @@ class AnswerFormatterTest {
         assertEquals("Hello", AnswerFormatter.format("§cHello", false, 0, 0));
         assertEquals("Hello", AnswerFormatter.format("§c§lHello", false, 0, 0));
         assertEquals("hex", AnswerFormatter.format("§x§f§f§0§0§0§0hex", false, 0, 0));
-        assertEquals("A&B", AnswerFormatter.format("A&B", false, 0, 0));
+        assertEquals("A", AnswerFormatter.format("A&B", false, 0, 0));
+        assertEquals("rock & stone", AnswerFormatter.format("rock & stone", false, 0, 0));
+        assertEquals("AMPRED &#FF0000AMPHASH AMPHEX AMPBOLD", AnswerFormatter.format(
+                "&cAMPRED &#FF0000AMPHASH &x&f&f&0&0&0&0AMPHEX &lAMPBOLD", false, 0, 0));
         assertFalse(AnswerFormatter.format("§ksecret", false, 0, 0).contains("§"));
+        assertFalse(AnswerFormatter.format("&ksecret", false, 0, 0).contains("&k"));
         assertEquals("Hello", PlayerInput.stripSectionSigns("§cHello"));
+        assertEquals("Hello", PlayerInput.stripSectionSigns("&cHello"));
     }
 
     @Test
