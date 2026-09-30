@@ -13,7 +13,10 @@ import java.util.Set;
 
 /**
  * Built-in prompt tokens that do not need PlaceholderAPI.
- * User {@code vars:} of the same name win. Values are read on the player's region thread.
+ * User {@code vars:} of the same name win and stay wrapped as player input.
+ * Server values ({@code biome}, {@code world}, {@code time}, {@code weather}) are inserted raw.
+ * A trusted player name is inserted raw; any other name is wrapped.
+ * Values are read on the player's region thread.
  */
 public final class ContextVariables {
 
@@ -67,7 +70,7 @@ public final class ContextVariables {
             if (value == null) {
                 continue;
             }
-            result = result.replace('{' + name + '}', PlayerInput.wrap(value));
+            result = result.replace('{' + name + '}', PlayerInput.substituteBuiltin(name, value));
         }
         return result;
     }

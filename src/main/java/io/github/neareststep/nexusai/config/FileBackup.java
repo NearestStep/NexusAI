@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -8,7 +9,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Copies a config file to {@code <file>.bak} before a migration rewrites it.
+ * Copies a config file to {@code <file>.bak} before a rewrite.
  * When that backup already exists, the new copy is {@code <file>.bak.<timestamp>}.
  */
 public final class FileBackup {
@@ -31,5 +32,16 @@ public final class FileBackup {
         }
         Files.copy(source, bak);
         return bak;
+    }
+
+    /**
+     * Copies {@code source} to a backup, then replaces its bytes with {@code yaml}.
+     *
+     * @return the backup path
+     */
+    public static Path replace(Path source, String yaml) throws IOException {
+        Path backup = backup(source);
+        Files.writeString(source, yaml == null ? "" : yaml, StandardCharsets.UTF_8);
+        return backup;
     }
 }

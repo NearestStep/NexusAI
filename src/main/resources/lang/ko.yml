@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&c대화가 비활성화되어 있습니다."
   players-only: "{prefix}&c캐릭터와 대화할 수 있는 것은 플레이어뿐입니다. 콘솔: &e/nai talk <player> <id>"
   usage: "{prefix}&c사용법: &e/nai talk <id> [message] &c또는 &e/nai talk end"
+  console-usage: "{prefix}&c사용법: &e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&c알 수 없는 캐릭터 &f{id}&c."
   unknown-player: "{prefix}&c플레이어 &f{player} &c이(가) 온라인이 아닙니다."
   no-session: "{prefix}&7대화 중이 아닙니다."

@@ -66,10 +66,9 @@ public final class ConfigMigrator {
             if (!outcome.changed()) {
                 return List.of();
             }
-            Path backup = FileBackup.backup(file);
-            Files.writeString(file, outcome.yaml(), StandardCharsets.UTF_8);
+            Path backup = FileBackup.replace(file, outcome.yaml());
             String note = file.getFileName() + " migrated from version " + outcome.fromVersion()
-                    + " to " + outcome.toVersion() + " (backup " + backup.getFileName() + "): "
+                    + " to " + outcome.toVersion() + " (backup " + backup.toAbsolutePath() + "): "
                     + String.join("; ", outcome.changes());
             log.info(note);
             return List.copyOf(outcome.changes());

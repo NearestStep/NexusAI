@@ -4,8 +4,11 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
 
+import io.github.neareststep.nexusai.command.NaiCommand;
+
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -177,6 +180,101 @@ class PluginConfigTest {
         PoolEntry entry = pluginConfig.getPoolEntries().get(0);
         assertTrue(entry.hasVars());
         assertEquals("%player_name%", entry.vars().get("player_name"));
+    }
+
+    @Test
+    void queueProviderWithAKeyAllowsRequestsWhenTheActiveProviderHasNone() {
+        withClearedApiKey(() -> {
+            PluginConfig config = new PluginConfig(keyedQueueYaml());
+            assertFalse(config.hasApiKey());
+            assertTrue(config.canSendRequests());
+            assertEquals("openai: no, mock: yes", config.providerKeyPresence("yes", "no"));
+            assertEquals("openai: no, mock: yes", NaiCommand.statusApiKeyText(config, "yes", "no"));
+        });
+    }
+
+    @Test
+    void missingKeyStaysABlockerOnlyWhenNoTargetCanSend() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = baseYaml();
+            yaml.set("providers.openai.type", "openai-compatible");
+            yaml.set("providers.openai.url", "https://api.openai.com/v1");
+            yaml.set("providers.openai.api-key", "");
+            yaml.set("providers.ollama.type", "openai-compatible");
+            yaml.set("providers.ollama.url", "http://localhost:11434/v1");
+            yaml.set("providers.ollama.api-key", "");
+            yaml.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            PluginConfig blocked = new PluginConfig(yaml);
+            assertFalse(blocked.canSendRequests());
+            assertEquals("no", NaiCommand.statusApiKeyText(blocked, "yes", "no"));
+        });
+    }
+
+    @Test
+    void fallbackModelAndPinnedModerationAndLocalQueueAllowRequests() {
+        withClearedApiKey(() -> {
+            YamlConfiguration fallback = keyedQueueYaml();
+            fallback.set("providers.mock.api-key", "");
+            fallback.set("fallback-model.provider", "mock");
+            fallback.set("fallback-model.model", "mock-fallback");
+            fallback.set("providers.mock.api-key", "fallback-key-ZZ99");
+            fallback.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            assertTrue(new PluginConfig(fallback).canSendRequests());
+
+            YamlConfiguration moderation = keyedQueueYaml();
+            moderation.set("providers.mock.api-key", "");
+            moderation.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            moderation.set("moderation.enabled", true);
+            moderation.set("moderation.provider", "mock");
+            moderation.set("moderation.model", "mock-mod");
+            moderation.set("providers.mock.api-key", "mod-key-ZZ99");
+            PluginConfig pinned = new PluginConfig(moderation);
+            assertTrue(pinned.canSendRequests());
+            assertTrue(pinned.providerKeyPresence("yes", "no").contains("mock: yes"));
+
+            YamlConfiguration local = keyedQueueYaml();
+            local.set("providers.mock.api-key", "");
+            local.set("providers.mock.url", "http://127.0.0.1:18090/v1");
+            local.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+            assertTrue(new PluginConfig(local).canSendRequests());
+
+            YamlConfiguration activeKey = keyedQueueYaml();
+            activeKey.set("api.provider", "mock");
+            activeKey.set("providers.mock.api-key", "mock-key-QA01");
+            PluginConfig keyed = new PluginConfig(activeKey);
+            assertTrue(keyed.hasApiKey());
+            assertEquals("****QA01", NaiCommand.statusApiKeyText(keyed, "yes", "no"));
+
+            YamlConfiguration disabledPin = keyedQueueYaml();
+            disabledPin.set("providers.mock.api-key", "mod-key-ZZ99");
+            disabledPin.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            disabledPin.set("moderation.enabled", false);
+            disabledPin.set("moderation.provider", "mock");
+            disabledPin.set("moderation.model", "mock-mod");
+            assertFalse(new PluginConfig(disabledPin).canSendRequests());
+        });
+    }
+
+    private static YamlConfiguration keyedQueueYaml() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "");
+        yaml.set("providers.mock.type", "openai-compatible");
+        yaml.set("providers.mock.url", "https://mock.example/v1");
+        yaml.set("providers.mock.api-key", "mock-key-QA01");
+        yaml.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+        return yaml;
+    }
+
+    private static void withClearedApiKey(Runnable body) {
+        Function<String, String> previous = PluginConfig.environment;
+        PluginConfig.environment = name -> null;
+        try {
+            body.run();
+        } finally {
+            PluginConfig.environment = previous;
+        }
     }
 
     private static boolean hasEnvKey() {

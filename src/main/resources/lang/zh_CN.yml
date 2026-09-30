@@ -63,6 +63,7 @@ talk:
   disabled: "{prefix}&c对话已禁用。"
   players-only: "{prefix}&c只有玩家可以与角色对话。控制台用法：&e/nai talk <player> <id>"
   usage: "{prefix}&c用法：&e/nai talk <id> [message] &c或 &e/nai talk end"
+  console-usage: "{prefix}&c用法：&e/nai talk <player> <id> [message]"
   unknown-character: "{prefix}&c未知角色 &f{id}&c。"
   unknown-player: "{prefix}&c玩家 &f{player} &c不在线。"
   no-session: "{prefix}&7你不在对话中。"
