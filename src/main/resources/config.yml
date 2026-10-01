@@ -319,3 +319,7 @@ actions:
   log: true
   # How many actions from one model reply may run. The rest are refused and the character is told.
   max-per-reply: 1
+
+# Enable only if you are sure that no plugin consuming NexusAI placeholders parses MiniMessage or hex colours. Legacy § and & codes are always removed.
+sanitize:
+  allow-markup: false

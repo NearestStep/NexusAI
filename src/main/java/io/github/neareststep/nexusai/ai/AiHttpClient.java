@@ -296,7 +296,7 @@ public final class AiHttpClient {
             boolean clearPause
     ) {
         try {
-            if (error == null && (value == null || value.isBlank() || PlayerInput.stripSectionSigns(value).isBlank())) {
+            if (error == null && (value == null || value.isBlank() || PlayerInput.stripSectionSigns(value, config.allowMarkup()).isBlank())) {
                 error = new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null);
                 value = null;
             }
