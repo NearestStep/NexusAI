@@ -18,6 +18,15 @@ public final class AiPool {
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<String>> pools = new ConcurrentHashMap<>();
     /** Answers already accepted for a prompt. Survives {@link #poll(String)} until {@link #replace}. */
     private final ConcurrentHashMap<String, Set<String>> remembered = new ConcurrentHashMap<>();
+    private final boolean allowMarkup;
+
+    public AiPool() {
+        this(false);
+    }
+
+    public AiPool(boolean allowMarkup) {
+        this.allowMarkup = allowMarkup;
+    }
 
     public Optional<String> poll(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
@@ -56,7 +65,7 @@ public final class AiPool {
     public boolean add(String prompt, String answer, boolean allowRepeat) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(answer, "answer");
-        answer = PlayerInput.stripSectionSigns(answer).trim();
+        answer = cleanText(answer);
         if (answer.isEmpty()) {
             return false;
         }
@@ -81,11 +90,15 @@ public final class AiPool {
         return pools.keySet();
     }
 
-    private static Optional<String> clean(String raw) {
+    private String cleanText(String answer) {
+        return PlayerInput.stripSectionSigns(answer, allowMarkup).trim();
+    }
+
+    private Optional<String> clean(String raw) {
         if (raw == null) {
             return Optional.empty();
         }
-        String cleaned = PlayerInput.stripSectionSigns(raw).trim();
+        String cleaned = cleanText(raw);
         return cleaned.isEmpty() ? Optional.empty() : Optional.of(cleaned);
     }
 
@@ -107,7 +120,7 @@ public final class AiPool {
                 if (answer == null) {
                     continue;
                 }
-                String cleaned = PlayerInput.stripSectionSigns(answer).trim();
+                String cleaned = cleanText(answer);
                 if (!cleaned.isEmpty()) {
                     seen.add(cleaned);
                     queue.addLast(cleaned);

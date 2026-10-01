@@ -206,16 +206,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                 return new ChatExchange(text, headers);
             }
             boolean lengthLimited = LengthCutoff.isLength(choice.getFinishReason());
-            String source = lengthLimited ? LengthCutoff.trim(text) : text;
+            boolean allowMarkup = config.allowMarkup();
+            String source = lengthLimited ? LengthCutoff.trim(text, allowMarkup) : text;
             String formatted = AnswerFormatter.format(
                     source,
                     config.isStripMarkdown(),
                     config.getMaxAnswerChars(),
-                    config.getMaxAnswerLines()
+                    config.getMaxAnswerLines(),
+                    allowMarkup
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
-            if (PlayerInput.stripSectionSigns(text).isBlank()) {
+            if (PlayerInput.stripSectionSigns(text, allowMarkup).isBlank()) {
                 throw new AiRequestException(
                         AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null);
             }
