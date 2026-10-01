@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.github.neareststep"
-version = "0.7.0-SNAPSHOT"
+version = "1.0.0"
 
 java {
     toolchain {
@@ -19,13 +19,15 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
+    // 1.20.6 is the oldest server this jar runs on. Newer Paper APIs are class file 69
+    // (Java 25) and would not load on Java 21. Biome and other calls stay on the 1.20.6 shape.
+    compileOnly("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
     compileOnly("me.clip:placeholderapi:2.11.6")
 
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
     implementation("com.github.ben-manes.caffeine:caffeine:3.2.0")
 
-    testImplementation("io.papermc.paper:paper-api:26.2.build.+")
+    testImplementation("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -62,10 +64,11 @@ tasks {
 
     compileJava {
         options.encoding = "UTF-8"
-        options.release.set(25)
+        options.release.set(21)
     }
 
     compileTestJava {
         options.encoding = "UTF-8"
+        options.release.set(21)
     }
 }

@@ -6,6 +6,7 @@ import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -107,6 +108,8 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     }
 
     private String resolveGenerate(Player player, String raw) {
+        plugin.getUnpooledGenerateLog().note(
+                raw, config.isPoolEnabled() && poolService.findEntry(raw).isPresent());
         ResolvedPrompt resolved = resolve(player, raw);
         if (!resolved.usable()) {
             return resolved.fallback();
@@ -129,23 +132,43 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             return resolved.fallback();
         }
 
-        String key = httpClient.cacheKey(resolved.model(), resolved.text(), resolved.formatId());
+        KnowledgeComposer.Prepared prepared = KnowledgeComposer.prepare(
+                resolved.overrides(),
+                config.getSystemPrompt(),
+                plugin.getKnowledgeBase(),
+                resolved.knowledge());
+        String key = httpClient.cacheKey(resolved.model(), resolved.text(), resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
-            if (!config.canSendRequests()) {
-                return resolved.fallback();
+            if (config.canSendChatRequests()) {
+                UUID playerId = player != null ? player.getUniqueId() : null;
+                CompletionSupport.onComplete(
+                        httpClient.requestAsync(
+                                resolved.text(),
+                                playerId,
+                                prepared.overrides().withNoticeId(noticeId(resolved, raw)),
+                                resolved.ttl(),
+                                prepared.cacheToken()),
+                        plugin.getLogger(),
+                        "Background AI generation failed",
+                        (ignored, error) -> {
+                            if (error != null) {
+                                plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
+                            }
+                        });
             }
-            UUID playerId = player != null ? player.getUniqueId() : null;
-            CompletionSupport.onComplete(
-                    httpClient.requestAsync(resolved.text(), playerId, resolved.overrides(), resolved.ttl()),
-                    plugin.getLogger(),
-                    "Background AI generation failed",
-                    (ignored, error) -> {
-                        if (error != null) {
-                            plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
-                        }
-                    });
-            return resolved.fallback();
+            return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
         });
+    }
+
+    /**
+     * Named prompts key on their id. A literal placeholder keys on the argument before
+     * {@code {player}} and the other built-ins are filled in.
+     */
+    private static String noticeId(ResolvedPrompt resolved, String raw) {
+        if (resolved.id() != null && !resolved.id().isBlank()) {
+            return resolved.id();
+        }
+        return raw == null ? "" : raw;
     }
 
     private ResolvedPrompt resolve(Player player, String raw) {

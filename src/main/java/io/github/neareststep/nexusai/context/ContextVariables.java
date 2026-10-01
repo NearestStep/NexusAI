@@ -2,7 +2,8 @@ package io.github.neareststep.nexusai.context;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import org.bukkit.Bukkit;
-import org.bukkit.block.Biome;
+import org.bukkit.Keyed;
+import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 
 import java.util.LinkedHashMap;
@@ -12,7 +13,10 @@ import java.util.Set;
 
 /**
  * Built-in prompt tokens that do not need PlaceholderAPI.
- * User {@code vars:} of the same name win. Values are read on the player's region thread.
+ * User {@code vars:} of the same name win and stay wrapped as player input.
+ * Server values ({@code biome}, {@code world}, {@code time}, {@code weather}) are inserted raw.
+ * A trusted player name is inserted raw; any other name is wrapped.
+ * Values are read on the player's region thread.
  */
 public final class ContextVariables {
 
@@ -66,7 +70,7 @@ public final class ContextVariables {
             if (value == null) {
                 continue;
             }
-            result = result.replace('{' + name + '}', PlayerInput.wrap(value));
+            result = result.replace('{' + name + '}', PlayerInput.substituteBuiltin(name, value));
         }
         return result;
     }
@@ -99,11 +103,33 @@ public final class ContextVariables {
 
     private static String biomeName(Player player) {
         try {
-            Biome biome = player.getLocation().getBlock().getBiome();
-            if (biome == null || biome.getKey() == null) {
+            // Stored as Object so the class file does not checkcast Biome. That type is an enum
+            // on 1.20.6 and an interface on newer servers; a checkcast or invokevirtual compiled
+            // against the enum fails on the interface.
+            return biomeKey(player.getLocation().getBlock().getBiome());
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * Path of a biome key, such as {@code plains}.
+     * {@code Biome} implements {@link Keyed} on both shapes, so the call is {@code invokeinterface}.
+     */
+    static String biomeKey(Object biome) {
+        if (!(biome instanceof Keyed keyed)) {
+            return "";
+        }
+        try {
+            NamespacedKey key = keyed.getKey();
+            if (key == null) {
                 return "";
             }
-            return biome.getKey().getKey().toLowerCase(Locale.ROOT);
+            String path = key.getKey();
+            if (path == null || path.isEmpty()) {
+                return "";
+            }
+            return path.toLowerCase(Locale.ROOT);
         } catch (Throwable ignored) {
             return "";
         }

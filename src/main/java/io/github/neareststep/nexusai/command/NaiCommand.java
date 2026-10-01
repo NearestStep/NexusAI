@@ -6,11 +6,15 @@ import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
+import io.github.neareststep.nexusai.prompt.PromptImporter;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
@@ -21,6 +25,9 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -28,6 +35,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * Handles {@code /nai} admin subcommands.
@@ -35,7 +43,7 @@ import java.util.Objects;
 public final class NaiCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "version", "reload", "status", "test", "prompts");
+            "help", "version", "reload", "status", "test", "prompts", "talk");
     private static final String DEFAULT_TEST_PROMPT = "Reply with exactly the word pong.";
 
     private final NexusAI plugin;
@@ -52,28 +60,62 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             @NotNull String[] args
     ) {
         MessageService messages = plugin.getMessageService();
-        if (!sender.hasPermission("nexusai.command")) {
+        String sub = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
+        boolean admin = sender.hasPermission("nexusai.command");
+        boolean canTalk = sender.hasPermission("nexusai.talk") || admin;
+        if ("talk".equals(sub)) {
+            if (!canTalk) {
+                messages.send(sender, "command.no-permission");
+                return true;
+            }
+            handleTalk(sender, messages, args);
+            return true;
+        }
+        if (!admin) {
+            if ("help".equals(sub) && sender.hasPermission("nexusai.talk")) {
+                sendTalkHelp(sender, messages);
+                return true;
+            }
             messages.send(sender, "command.no-permission");
             return true;
         }
-
-        String sub = args.length == 0 ? "help" : args[0].toLowerCase(Locale.ROOT);
-        if (args.length > 1 && !"test".equals(sub)) {
+        if (args.length > 1 && !"test".equals(sub) && !"prompts".equals(sub)) {
             messages.send(sender, "command.extra-args");
             return true;
         }
         switch (sub) {
             case "help" -> sendHelp(sender, messages);
             case "version" -> messages.send(sender, "command.version", Map.of(
-                    "version", plugin.getPluginMeta().getVersion()
+                    "version", plugin.getPluginMeta().getVersion(),
+                    "authors", formatAuthors(plugin.getPluginMeta().getAuthors())
             ));
             case "reload" -> handleReload(sender, messages);
             case "status" -> handleStatus(sender, messages);
             case "test" -> handleTest(sender, messages, args);
-            case "prompts" -> handlePrompts(sender, messages);
+            case "prompts" -> handlePrompts(sender, messages, args);
             default -> messages.send(sender, "command.unknown");
         }
         return true;
+    }
+
+    /**
+     * Joins {@code authors} from plugin.yml. Names are not hardcoded here.
+     */
+    static String formatAuthors(List<String> authors) {
+        if (authors == null || authors.isEmpty()) {
+            return "";
+        }
+        StringBuilder joined = new StringBuilder();
+        for (String author : authors) {
+            if (author == null || author.isBlank()) {
+                continue;
+            }
+            if (!joined.isEmpty()) {
+                joined.append(", ");
+            }
+            joined.append(author.trim());
+        }
+        return joined.toString();
     }
 
     private void sendHelp(CommandSender sender, MessageService messages) {
@@ -90,6 +132,67 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "command.help-test");
         }
         messages.send(sender, "command.help-prompts");
+        if (sender.hasPermission("nexusai.import")) {
+            messages.send(sender, "command.help-prompts-import");
+        }
+        if (sender.hasPermission("nexusai.talk") || sender.hasPermission("nexusai.command")) {
+            messages.send(sender, "command.help-talk");
+            messages.send(sender, "command.help-talk-end");
+        }
+    }
+
+    private void sendTalkHelp(CommandSender sender, MessageService messages) {
+        messages.send(sender, "command.help-header");
+        messages.send(sender, "command.help-talk");
+        messages.send(sender, "command.help-talk-end");
+    }
+
+    private void handleTalk(CommandSender sender, MessageService messages, String[] args) {
+        if (plugin.getDialogueService() == null) {
+            messages.send(sender, "talk.disabled");
+            return;
+        }
+        if (args.length < 2) {
+            messages.send(sender, sender instanceof Player ? "talk.usage" : "talk.console-usage");
+            return;
+        }
+        if ("end".equalsIgnoreCase(args[1])) {
+            if (args.length > 2) {
+                messages.send(sender, "command.extra-args");
+                return;
+            }
+            if (!(sender instanceof Player player)) {
+                messages.send(sender, "talk.no-session");
+                return;
+            }
+            plugin.getDialogueService().end(player);
+            return;
+        }
+        Player player;
+        String id;
+        int messageAt;
+        if (sender instanceof Player self) {
+            player = self;
+            id = args[1];
+            messageAt = 2;
+        } else {
+            String typedId = args.length >= 3 ? args[2] : "";
+            boolean online = Bukkit.getPlayerExact(args[1]) != null;
+            boolean known = !typedId.isEmpty()
+                    && plugin.getPromptCatalog().find(typedId.toLowerCase(Locale.ROOT)).isPresent();
+            ConsoleTalkError error = consoleTalkError(args, online, known);
+            if (error != null) {
+                messages.send(sender, error.messageKey(), error.placeholders());
+                return;
+            }
+            player = Bukkit.getPlayerExact(args[1]);
+            id = args[2];
+            messageAt = 3;
+        }
+        String message = messageAt >= args.length
+                ? ""
+                : String.join(" ", Arrays.copyOfRange(args, messageAt, args.length)).trim();
+        plugin.getDialogueService().fromCommand(player, id, message);
     }
 
     private void handleReload(CommandSender sender, MessageService messages) {
@@ -124,14 +227,19 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-provider", Map.of("provider", config.getProvider()));
         messages.send(sender, "command.status-base-url", Map.of("base_url", config.getBaseUrl()));
         messages.send(sender, "command.status-model", Map.of("model", config.getModel()));
-        String masked = config.maskedApiKeys();
         messages.send(sender, "command.status-api-key", Map.of(
-                "api_key", masked.isBlank() ? no : masked
+                "api_key", statusApiKeyText(config, yes, no)
         ));
         messages.send(sender, "command.status-pool", Map.of(
                 "pool_state", config.isPoolEnabled() ? enabled : disabled,
                 "pool_entries", String.valueOf(config.getPoolEntries().size())
         ));
+        java.util.List<String> unpooled = plugin.getUnpooledGenerateLog().prompts();
+        if (!unpooled.isEmpty()) {
+            messages.send(sender, "command.status-unpooled", Map.of(
+                    "prompts", String.join(", ", unpooled)
+            ));
+        }
         messages.send(sender, "command.status-cache", Map.of(
                 "cache_size", String.valueOf(plugin.getAiCache().size())
         ));
@@ -155,6 +263,66 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             for (ModelQueue.Status row : queue.status(System.currentTimeMillis())) {
                 messages.send(sender, "command.status-queue-line", Map.of("entry", queueLine(row)));
             }
+        }
+        ModerationService moderation = plugin.getModerationService();
+        boolean moderationOn = moderation != null && moderation.enabled();
+        messages.send(sender, "command.status-moderation", Map.of(
+                "state", moderationOn ? enabled : disabled,
+                "checks", String.valueOf(moderation == null ? 0 : moderation.checksToday()),
+                "flags", String.valueOf(moderation == null ? 0 : moderation.flagsToday())
+        ));
+        FallbackModel fallback = config.fallbackModel();
+        String fallbackEntry = messages.raw("common.none");
+        if (fallback.configured() && queue != null) {
+            fallbackEntry = queueLine(queue.fallbackStatus(fallback.provider(), fallback.model(), System.currentTimeMillis()));
+        }
+        messages.send(sender, "command.status-fallback-model", Map.of("entry", fallbackEntry));
+        messages.send(sender, "command.status-knowledge", Map.of(
+                "files", String.valueOf(plugin.getKnowledgeBase().size())
+        ));
+    }
+
+    /**
+     * Text for the API-key status line. A configured key on {@code api.provider} stays masked.
+     * When that provider has no key but another queue, fallback, or moderation target can send,
+     * the line lists key presence per provider instead of a single {@code no}.
+     */
+    public static String statusApiKeyText(PluginConfig config, String yes, String no) {
+        if (config.hasApiKey()) {
+            String masked = config.maskedApiKeys();
+            return masked.isBlank() ? no : masked;
+        }
+        if (config.canSendRequests()) {
+            return config.providerKeyPresence(yes, no);
+        }
+        return no;
+    }
+
+    /**
+     * Argument errors for the console form {@code /nai talk <player> <id> [message]}.
+     * {@code null} means the talk may proceed and the character's reply still goes to the player.
+     * A non-null result is sent to the command sender, not the named player.
+     */
+    static ConsoleTalkError consoleTalkError(String[] args, boolean playerOnline, boolean characterKnown) {
+        if (args.length >= 2 && "end".equalsIgnoreCase(args[1])) {
+            return null;
+        }
+        if (args.length < 3) {
+            return new ConsoleTalkError("talk.console-usage", Map.of());
+        }
+        if (!playerOnline) {
+            return new ConsoleTalkError("talk.unknown-player", Map.of("player", args[1]));
+        }
+        if (!characterKnown) {
+            String id = args[2] == null ? "" : args[2].toLowerCase(Locale.ROOT);
+            return new ConsoleTalkError("talk.unknown-character", Map.of("id", id));
+        }
+        return null;
+    }
+
+    record ConsoleTalkError(String messageKey, Map<String, String> placeholders) {
+        ConsoleTalkError {
+            placeholders = placeholders == null ? Map.of() : Map.copyOf(placeholders);
         }
     }
 
@@ -207,6 +375,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         GenerationOverrides overrides = GenerationOverrides.none();
+        String noticeId = prompt;
         if (plugin.getPromptCatalog().find(prompt).isPresent()) {
             Player player = sender instanceof Player online ? online : null;
             ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
@@ -219,11 +388,19 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 messages.send(sender, "command.test-fail", testPlaceholders(0L, detail));
                 return;
             }
+            if (resolved.id() != null && !resolved.id().isBlank()) {
+                noticeId = resolved.id();
+            }
             prompt = resolved.text();
-            overrides = resolved.overrides();
+            overrides = KnowledgeComposer.prepare(
+                    resolved.overrides(),
+                    plugin.getPluginConfig().getSystemPrompt(),
+                    plugin.getKnowledgeBase(),
+                    resolved.knowledge()).overrides();
         } else if (args.length > 1) {
             prompt = outgoingTestPrompt(prompt, true);
         }
+        overrides = overrides.withNoticeId(noticeId);
         messages.send(sender, "command.test-sending");
         long started = System.nanoTime();
         String requestPrompt = prompt;
@@ -247,7 +424,15 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 }, plugin.getLogger()));
     }
 
-    private void handlePrompts(CommandSender sender, MessageService messages) {
+    private void handlePrompts(CommandSender sender, MessageService messages, String[] args) {
+        if (args.length >= 2 && "import".equals(args[1].toLowerCase(Locale.ROOT))) {
+            handleImport(sender, messages, args);
+            return;
+        }
+        if (args.length > 1) {
+            messages.send(sender, "command.extra-args");
+            return;
+        }
         List<String> ids = plugin.getPromptCatalog().ids();
         if (ids.isEmpty()) {
             messages.send(sender, "command.prompts-empty");
@@ -257,6 +442,56 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         for (String id : ids) {
             messages.send(sender, "command.prompts-line", Map.of("id", id));
         }
+    }
+
+    /**
+     * Import writes {@code prompts.yml}. Listing ids stays on {@code nexusai.command}.
+     * {@code nexusai.import} is separate so an operator can list prompts without being allowed to rewrite the file.
+     */
+    private void handleImport(CommandSender sender, MessageService messages, String[] args) {
+        if (!sender.hasPermission("nexusai.import")) {
+            messages.send(sender, "command.no-permission");
+            return;
+        }
+        if (args.length < 3 || args.length > 4) {
+            messages.send(sender, "command.extra-args");
+            return;
+        }
+        boolean overwrite = false;
+        if (args.length == 4) {
+            if (!"--overwrite".equals(args[3])) {
+                messages.send(sender, "command.prompts-import-fail", Map.of("error", "unknown option " + args[3]));
+                return;
+            }
+            overwrite = true;
+        }
+        PromptImporter.Report report = PromptImporter.importFile(plugin.getDataFolder().toPath(), args[2], overwrite);
+        if (!report.success()) {
+            messages.send(sender, "command.prompts-import-fail", Map.of(
+                    "error", report.error() == null ? "import failed" : report.error()
+            ));
+            return;
+        }
+        for (String warning : report.warnings()) {
+            plugin.getLogger().warning(warning);
+        }
+        if (report.changed()) {
+            try {
+                plugin.reloadPlugin();
+            } catch (Exception e) {
+                String error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                plugin.getMessageService().send(sender, "command.reload-fail", Map.of("error", error));
+                return;
+            }
+        }
+        MessageService current = plugin.getMessageService();
+        String none = current.raw("common.none");
+        current.send(sender, "command.prompts-import-ok", Map.of(
+                "file", report.fileName(),
+                "added", report.added().isEmpty() ? none : String.join(", ", report.added()),
+                "skipped", report.skipped().isEmpty() ? none : String.join(", ", report.skipped()),
+                "conflicting", report.conflicting().isEmpty() ? none : String.join(", ", report.conflicting())
+        ));
     }
 
     /**
@@ -304,8 +539,49 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             @NotNull String alias,
             @NotNull String[] args
     ) {
-        if (!sender.hasPermission("nexusai.command")) {
+        boolean admin = sender.hasPermission("nexusai.command");
+        boolean canTalk = admin || sender.hasPermission("nexusai.talk");
+        if (!admin && !canTalk) {
             return List.of();
+        }
+        if (args.length == 2 && "talk".equals(args[0].toLowerCase(Locale.ROOT)) && canTalk) {
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            List<String> ids = new ArrayList<>();
+            if ("end".startsWith(prefix)) {
+                ids.add("end");
+            }
+            if (!(sender instanceof Player)) {
+                try {
+                    if (Bukkit.getServer() != null) {
+                        for (Player player : Bukkit.getOnlinePlayers()) {
+                            if (player.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                                ids.add(player.getName());
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // Tab completion must not fail when the server is not booted.
+                }
+            }
+            for (String id : plugin.getPromptCatalog().ids()) {
+                if (id.startsWith(prefix)) {
+                    ids.add(id);
+                }
+            }
+            return ids;
+        }
+        if (args.length == 3 && "talk".equals(args[0].toLowerCase(Locale.ROOT)) && !(sender instanceof Player)) {
+            String prefix = args[2].toLowerCase(Locale.ROOT);
+            List<String> ids = new ArrayList<>();
+            for (String id : plugin.getPromptCatalog().ids()) {
+                if (id.startsWith(prefix)) {
+                    ids.add(id);
+                }
+            }
+            return ids;
+        }
+        if (args.length >= 2 && "prompts".equals(args[0].toLowerCase(Locale.ROOT))) {
+            return completePrompts(sender, args);
         }
         if (args.length == 2 && "test".equals(args[0].toLowerCase(Locale.ROOT)) && sender.hasPermission("nexusai.test")) {
             String prefix = args[1].toLowerCase(Locale.ROOT);
@@ -319,6 +595,10 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
         if (args.length != 1) {
             return List.of();
+        }
+        if (!admin) {
+            String prefix = args[0].toLowerCase(Locale.ROOT);
+            return "talk".startsWith(prefix) ? List.of("talk") : List.of();
         }
         String prefix = args[0].toLowerCase(Locale.ROOT);
         List<String> out = new ArrayList<>();
@@ -335,8 +615,52 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             if ("test".equals(sub) && !sender.hasPermission("nexusai.test")) {
                 continue;
             }
+            if ("talk".equals(sub) && !sender.hasPermission("nexusai.talk") && !sender.hasPermission("nexusai.command")) {
+                continue;
+            }
             out.add(sub);
         }
         return out;
+    }
+
+    private List<String> completePrompts(CommandSender sender, String[] args) {
+        String action = args[1].toLowerCase(Locale.ROOT);
+        if (args.length == 2) {
+            if (!sender.hasPermission("nexusai.import")) {
+                return List.of();
+            }
+            return "import".startsWith(action) ? List.of("import") : List.of();
+        }
+        if (!sender.hasPermission("nexusai.import") || !"import".equals(args[1].toLowerCase(Locale.ROOT))) {
+            return List.of();
+        }
+        if (args.length == 3) {
+            return importFileNames(args[2]);
+        }
+        if (args.length == 4 && "--overwrite".startsWith(args[3])) {
+            return List.of("--overwrite");
+        }
+        return List.of();
+    }
+
+    private List<String> importFileNames(String prefix) {
+        Path folder = plugin.getDataFolder().toPath().resolve("import");
+        if (!Files.isDirectory(folder)) {
+            return List.of();
+        }
+        String needle = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+        try (Stream<Path> files = Files.list(folder)) {
+            List<String> names = new ArrayList<>();
+            for (Path path : files.filter(Files::isRegularFile).sorted().toList()) {
+                String name = path.getFileName().toString();
+                String lower = name.toLowerCase(Locale.ROOT);
+                if ((lower.endsWith(".yml") || lower.endsWith(".yaml")) && lower.startsWith(needle)) {
+                    names.add(name);
+                }
+            }
+            return names;
+        } catch (IOException e) {
+            return List.of();
+        }
     }
 }

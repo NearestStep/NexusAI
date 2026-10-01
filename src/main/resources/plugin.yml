@@ -1,22 +1,21 @@
 name: NexusAI
 version: '${version}'
 main: io.github.neareststep.nexusai.NexusAI
-api-version: '26.2'
-folia-supported: true
+api-version: '1.20.6'
+folia-supported: false
 authors: [ mo00Wy ]
 description: Asynchronous bridge between Minecraft and AI models via PlaceholderAPI
 softdepend: [PlaceholderAPI]
 
 commands:
   nai:
-    description: NexusAI admin commands
-    usage: /nai <help|version|reload|status|test|prompts>
+    description: NexusAI commands
+    usage: /nai <help|version|reload|status|test|prompts|prompts import|talk>
     aliases: [nexusai]
-    permission: nexusai.command
 
 permissions:
   nexusai.command:
-    description: Access /nai base commands
+    description: Access /nai admin commands
     default: op
   nexusai.reload:
     description: Reload NexusAI configuration
@@ -26,4 +25,16 @@ permissions:
     default: op
   nexusai.test:
     description: Send one AI test request
+    default: op
+  nexusai.moderation.notify:
+    description: Receive chat moderation flags
+    default: op
+  nexusai.moderation.bypass:
+    description: Skip chat moderation checks
+    default: false
+  nexusai.import:
+    description: Import prompt definitions from plugins/NexusAI/import into prompts.yml
+    default: op
+  nexusai.talk:
+    description: Talk to a character with /nai talk. Defaults to op; grant it to players explicitly.
     default: op

@@ -72,14 +72,17 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         return CompletableFuture.supplyAsync(() -> doComplete(prompt, effective), executor);
     }
 
-    static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
+    public static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
         String instruction = config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
         if (instruction != null && !instruction.isBlank()) {
             system = system == null ? instruction : system + "\n\n" + instruction;
         }
-        system = PlayerInput.appendGuard(system);
+        system = PlayerInput.appendGuard(system, PlayerInput.containsWrappedInput(prompt));
+        if (system.isBlank()) {
+            system = null;
+        }
         Double temperature = effective.temperature(config.getTemperature());
         Integer maxTokens = effective.maxTokens(config.getMaxTokens());
         String model = effective.model(config.getModel());
@@ -99,7 +102,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             }
         }
         List<ChatCompletionRequest.Message> messages = new ArrayList<>(2);
-        messages.add(new ChatCompletionRequest.Message("system", system));
+        if (system != null) {
+            messages.add(new ChatCompletionRequest.Message("system", system));
+        }
         messages.add(new ChatCompletionRequest.Message("user", prompt));
         return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
     }
@@ -114,6 +119,32 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String baseUrl,
             String apiKey,
             String model
+    ) {
+        return exchange(prompt, overrides, baseUrl, apiKey, model, true);
+    }
+
+    /**
+     * Same HTTP call as {@link #exchange}, without answer formatting or player-input rejection.
+     * Chat moderation parses the raw JSON verdict. Those filters are for text shown to players,
+     * and they would drop a verdict that quotes the chat line.
+     */
+    public ChatExchange exchangeRaw(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model
+    ) {
+        return exchange(prompt, overrides, baseUrl, apiKey, model, false);
+    }
+
+    private ChatExchange exchange(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            boolean filterAnswer
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         if (model != null && !model.isBlank()) {
@@ -166,24 +197,37 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                     || parsed.getChoices().getFirst().getMessage() == null) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            String text = parsed.getChoices().getFirst().getMessage().visibleText();
+            ChatCompletionResponse.Choice choice = parsed.getChoices().getFirst();
+            String text = choice.getMessage().visibleText();
             if (text == null || text.isBlank()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
+            if (!filterAnswer) {
+                return new ChatExchange(text, headers);
+            }
+            boolean lengthLimited = LengthCutoff.isLength(choice.getFinishReason());
+            String source = lengthLimited ? LengthCutoff.trim(text) : text;
             String formatted = AnswerFormatter.format(
-                    text,
+                    source,
                     config.isStripMarkdown(),
                     config.getMaxAnswerChars(),
                     config.getMaxAnswerLines()
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
+            if (PlayerInput.stripSectionSigns(text).isBlank()) {
+                throw new AiRequestException(
+                        AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null);
+            }
             String reason = PlayerInput.rejectionReason(text, prompt);
             if (reason == null) {
                 reason = PlayerInput.rejectionReason(formatted, prompt);
             }
             if (reason != null) {
                 throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
+            }
+            if (lengthLimited) {
+                LengthTrimNotices.note(logger, noticeId(effective, prompt));
             }
             return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
@@ -203,6 +247,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             throw new AiRequestException(kind, 0, SecretMask.redact(message, List.of(apiKey)), e);
         }
+    }
+
+    /**
+     * Prefer the stable prompt id. The rendered prompt is only a fallback for a direct call
+     * that did not name one, such as a unit test.
+     */
+    private static String noticeId(GenerationOverrides overrides, String prompt) {
+        String id = overrides == null ? null : overrides.noticeId();
+        if (id != null && !id.isBlank()) {
+            return id;
+        }
+        return prompt;
     }
 
     private String doComplete(String prompt, GenerationOverrides overrides) {
@@ -249,6 +305,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
             case REJECTED -> "Rejected model answer from " + host;
+            case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case OTHER -> html && status == 403
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;

@@ -1,14 +1,17 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.ProviderSettings;
 import io.github.neareststep.nexusai.config.SecretMask;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -67,6 +70,11 @@ public final class RoutingProvider implements AiProvider {
 
     @Override
     public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        return answer(prompt, overrides, ignoreCooldown).thenApply(ModelAnswer::text);
+    }
+
+    @Override
+    public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         return CompletableFuture.supplyAsync(() -> route(prompt, effective, ignoreCooldown), executor);
@@ -76,88 +84,171 @@ public final class RoutingProvider implements AiProvider {
      * @param probe {@code /nai test}. Skips temporary cooldown, still honors a daily cap,
      *              and does not mark a failure, skip a key, or lengthen a cooldown.
      */
-    private String route(String prompt, GenerationOverrides overrides, boolean probe) {
+    private ModelAnswer route(String prompt, GenerationOverrides overrides, boolean probe) {
         long now = clock.getAsLong();
         List<ModelQueue.Choice> choices = queue.selectable(now, probe);
-        if (choices.isEmpty()) {
-            throw queue.explain(null, now);
-        }
-        AiRequestException last = null;
+        Attempt last = new Attempt();
+        Set<Integer> attempted = new HashSet<>();
         for (ModelQueue.Choice choice : choices) {
-            ProviderSettings provider = config.provider(choice.provider());
-            if (provider == null) {
-                last = new AiRequestException(AiErrorKind.OTHER, 0, "Unknown provider " + choice.provider(), null);
-                if (!probe) {
-                    queue.markFailure(choice.index(), last, clock.getAsLong());
-                }
-                continue;
-            }
+            attempted.add(choice.index());
             String model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
-            KeyRing ring = rings.computeIfAbsent(provider.id(), ignored -> new KeyRing(provider.apiKeys()));
-            int attempts = Math.max(1, ring.keys().size());
-            for (int attempt = 0; attempt < attempts; attempt++) {
-                now = clock.getAsLong();
-                String key = ring.acquire(now, probe);
-                if (key == null) {
-                    if (!probe) {
-                        queue.cooldown(choice.index(), Math.max(now + 1_000L, ring.nextReadyAt(now)), ModelQueue.Hold.ERROR);
-                    }
-                    break;
-                }
-                if (!provider.hasKeys() && !config.providerAllowsKeyless(provider)) {
-                    last = new AiRequestException(AiErrorKind.BAD_KEY, 0, "API key is not configured", null);
-                    if (!probe) {
-                        queue.markFailure(choice.index(), last, now);
-                    }
-                    break;
-                }
-                if (!queue.tryConsume(choice.index(), now)) {
-                    break;
-                }
-                try {
-                    ChatExchange exchange = http.exchange(prompt, overrides, provider.url(), key, model);
-                    if (!probe) {
-                        queue.observe(choice.index(), exchange.headers(), clock.getAsLong());
-                    }
-                    return exchange.text();
-                } catch (AiRequestException error) {
-                    last = error;
-                    now = clock.getAsLong();
-                    if (error.kind() == AiErrorKind.REJECTED) {
-                        queue.recordRejection(choice.index());
-                        logger.info("Rejected answer from " + choice.provider() + " / " + model
-                                + ". " + error.getMessage()
-                                + " Trying the next model-queue entry. No cooldown.");
-                        break;
-                    }
-                    if (!probe && !key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
-                        long skipFor = error.kind() == AiErrorKind.BAD_KEY
-                                ? config.getAuthPauseSeconds() * 1000L
-                                : Math.max(config.getProviderPauseSeconds() * 1000L, error.retryAfterSeconds() * 1000L);
-                        ring.skip(key, now + skipFor);
-                        String lead = error.kind() == AiErrorKind.BAD_KEY
-                                ? "AI provider rejected the API key (invalid or unauthorized)."
-                                : "AI provider rate limit.";
-                        logger.warning(lead + " Skipping key " + SecretMask.mask(key)
-                                + " on " + choice.provider() + " after HTTP " + error.status()
-                                + " and trying the next key or model-queue entry.");
-                    }
-                    boolean anotherKey = !key.isEmpty() && (probe
-                            ? attempt + 1 < attempts
-                            : ring.hasAvailable(now));
-                    if (error.kind() == AiErrorKind.BAD_KEY && anotherKey) {
-                        continue;
-                    }
-                    if (!probe) {
-                        queue.markFailure(choice.index(), error, now);
-                    }
-                    break;
+            ChatExchange answer = tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last);
+            if (answer != null) {
+                return new ModelAnswer(answer.text(), answer.cacheTtl());
+            }
+        }
+        FallbackModel fallback = overrides.fallbackModel();
+        if (fallback != null && fallback.configured()) {
+            ModelQueue.FallbackPlan plan = queue.planFallback(
+                    fallback.provider(), fallback.model(), clock.getAsLong(), probe, attempted);
+            if (plan.allowed()) {
+                ChatExchange answer = tryModel(
+                        prompt,
+                        overrides,
+                        probe,
+                        plan.provider(),
+                        plan.model(),
+                        plan.queueIndex(),
+                        plan.dedicated(),
+                        last);
+                if (answer != null) {
+                    return new ModelAnswer(answer.text(), answer.cacheTtl());
                 }
             }
         }
-        if (probe && last != null) {
-            throw last;
+        if (choices.isEmpty() && (fallback == null || !fallback.configured()) && last.error == null) {
+            throw queue.explain(null, clock.getAsLong());
         }
-        throw queue.explain(last, clock.getAsLong());
+        if (probe && last.error != null) {
+            throw last.error;
+        }
+        throw queue.explain(last.error, clock.getAsLong());
+    }
+
+    /**
+     * One provider/model attempt, including key rotation. {@code null} means this model did not answer.
+     * Replies go through {@link ChatCaller#exchange}, which applies the same reply filter as the queue.
+     */
+    private ChatExchange tryModel(
+            String prompt,
+            GenerationOverrides overrides,
+            boolean probe,
+            String providerId,
+            String model,
+            int queueIndex,
+            boolean dedicatedFallback,
+            Attempt last
+    ) {
+        ProviderSettings provider = config.provider(providerId);
+        if (provider == null) {
+            last.error = new AiRequestException(AiErrorKind.OTHER, 0, "Unknown provider " + providerId, null);
+            if (!probe) {
+                fail(queueIndex, dedicatedFallback, providerId, model, last.error);
+            }
+            return null;
+        }
+        KeyRing ring = rings.computeIfAbsent(provider.id(), ignored -> new KeyRing(provider.apiKeys()));
+        int attempts = Math.max(1, ring.keys().size());
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            long now = clock.getAsLong();
+            String key = ring.acquire(now, probe);
+            if (key == null) {
+                if (!probe) {
+                    long until = Math.max(now + 1_000L, ring.nextReadyAt(now));
+                    if (dedicatedFallback) {
+                        queue.cooldownFallback(providerId, model, until, ModelQueue.Hold.ERROR);
+                    } else {
+                        queue.cooldown(queueIndex, until, ModelQueue.Hold.ERROR);
+                    }
+                }
+                return null;
+            }
+            if (!provider.hasKeys() && !config.providerAllowsKeyless(provider)) {
+                // No HTTP call. Do not record this as a rejected key or cool the row down.
+                last.error = new AiRequestException(AiErrorKind.OTHER, 0, "API key is not configured", null);
+                return null;
+            }
+            boolean consumed = dedicatedFallback
+                    ? queue.tryConsumeFallback(providerId, model, now)
+                    : queue.tryConsume(queueIndex, now);
+            if (!consumed) {
+                return null;
+            }
+            try {
+                ChatExchange exchange = http.exchange(prompt, overrides, provider.url(), key, model);
+                if (!probe) {
+                    if (dedicatedFallback) {
+                        queue.observeFallback(providerId, model, exchange.headers(), clock.getAsLong());
+                    } else {
+                        queue.observe(queueIndex, exchange.headers(), clock.getAsLong());
+                    }
+                }
+                return exchange;
+            } catch (AiRequestException error) {
+                last.error = error;
+                now = clock.getAsLong();
+                if (error.kind() == AiErrorKind.EMPTY_REPLY) {
+                    throw error;
+                }
+                if (error.kind() == AiErrorKind.REJECTED) {
+                    if (dedicatedFallback) {
+                        queue.recordFallbackRejection(providerId, model);
+                    } else {
+                        queue.recordRejection(queueIndex);
+                    }
+                    String next = dedicatedFallback
+                            ? " Not trying another fallback model."
+                            : " Trying the next model-queue entry. No cooldown.";
+                    logger.info("Rejected answer from " + providerId + " / " + model
+                            + ". " + error.getMessage() + next);
+                    return null;
+                }
+                if (!probe && !key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
+                    long skipFor = error.kind() == AiErrorKind.BAD_KEY
+                            ? config.getAuthPauseSeconds() * 1000L
+                            : Math.max(config.getProviderPauseSeconds() * 1000L, error.retryAfterSeconds() * 1000L);
+                    ring.skip(key, now + skipFor);
+                    String lead = error.kind() == AiErrorKind.BAD_KEY
+                            ? "AI provider rejected the API key (invalid or unauthorized)."
+                            : "AI provider rate limit.";
+                    logger.warning(lead + " Skipping key " + SecretMask.mask(key)
+                            + " on " + providerId + " after HTTP " + error.status()
+                            + " and trying the next key or model-queue entry.");
+                }
+                boolean anotherKey = !key.isEmpty() && (probe
+                        ? attempt + 1 < attempts
+                        : ring.hasAvailable(now));
+                if (error.kind() == AiErrorKind.BAD_KEY && anotherKey) {
+                    continue;
+                }
+                if (!probe) {
+                    fail(queueIndex, dedicatedFallback, providerId, model, error);
+                }
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private void fail(int queueIndex, boolean dedicatedFallback, String providerId, String model, AiRequestException error) {
+        long now = clock.getAsLong();
+        if (dedicatedFallback) {
+            queue.markFallbackFailure(providerId, model, error, now);
+        } else {
+            queue.markFailure(queueIndex, error, now);
+        }
+    }
+
+    private static final class Attempt {
+        private AiRequestException error;
+    }
+
+    /**
+     * Key ring shared with dialogue calls so a 401 or 429 skip applies to both paths.
+     */
+    public KeyRing sharedRing(String providerId) {
+        ProviderSettings provider = config.provider(providerId);
+        List<String> keys = provider == null ? List.of() : provider.apiKeys();
+        return rings.computeIfAbsent(providerId, ignored -> new KeyRing(keys));
     }
 }
