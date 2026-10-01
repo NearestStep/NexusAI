@@ -199,6 +199,11 @@ public final class RequestGate {
         failureEpochByKey.merge(admissionKey, 1L, Long::sum);
         if (kind == AiErrorKind.EMPTY_REPLY) {
             backoffByKey.compute(admissionKey, (key, previous) -> {
+                // One open wait is one attempt. A pool refill sends several requests together;
+                // each empty reply must not climb 5 → 15 → 30 on its own.
+                if (previous != null && previous.emptyReplyAttempt > 0 && now < previous.untilMillis) {
+                    return previous;
+                }
                 int emptyAttempt = previous == null || previous.emptyReplyAttempt == 0
                         ? 1
                         : previous.emptyReplyAttempt + 1;
