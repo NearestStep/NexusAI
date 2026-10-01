@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.KeyRing;
+import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -18,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -214,6 +216,85 @@ class DialogueHttpTest {
             assertFalse(secondBody.get().contains("suddenly cu"));
         } finally {
             server.stop(0);
+        }
+    }
+
+    @Test
+    void lengthTrimNoticeLogsThePersonaNotTheSheet() throws Exception {
+        LengthTrimNotices.reset();
+        Logger logger = Logger.getLogger("dialogue-notice-" + UUID.randomUUID());
+        logger.setUseParentHandlers(false);
+        List<String> lines = new ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                lines.add(record.getMessage());
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        String raw = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+        HttpServer server = server((exchange, attempt) -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = ("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(raw) + "}}]}").getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        try {
+            PluginConfig config = config(server.getAddress().getPort(), PluginConfig.DEFAULT_MAX_TOKENS);
+            DialogueRouter router = new DialogueRouter(
+                    ignored -> config,
+                    ignored -> new ModelQueue(
+                            List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
+                            0, 60_000L, 300_000L, null, logger),
+                    ignored -> new KeyRing(List.of("test-key")),
+                    new DialogueTransport(() -> config, HttpClient.newHttpClient()),
+                    new DialogueRouter.Admission() {
+                        @Override
+                        public Optional<String> admit(UUID playerId, String key) {
+                            return Optional.empty();
+                        }
+
+                        @Override
+                        public void success(String key) {
+                        }
+
+                        @Override
+                        public void failure(String key, Throwable error) {
+                        }
+                    },
+                    logger,
+                    () -> 1_000L
+            );
+            String sheet = "You are Bram. The player is Steve " + PlayerInput.wrap("Steve &cAdmin");
+            DialogueEngine.ModelReply reply = router.route(new DialogueEngine.ModelCall(
+                    sheet,
+                    List.of(new DialogueProtocol.MemoryLine("user", PlayerInput.wrap("hello"))),
+                    List.of(),
+                    GenerationOverrides.none().withNoticeId("black&csmith"),
+                    "simple",
+                    UUID.randomUUID(),
+                    PlayerInput.wrap("hello")
+            ));
+            assertEquals("The harbor is quiet today. Ships wait at the dock.", reply.text());
+            assertEquals(List.of(LengthTrimNotices.message("blacksmith")), lines);
+            assertFalse(lines.getFirst().contains("Steve"));
+            assertFalse(lines.getFirst().contains("Bram"));
+            assertFalse(lines.getFirst().contains("&"));
+            assertFalse(lines.getFirst().contains("§"));
+        } finally {
+            logger.removeHandler(handler);
+            server.stop(0);
+            LengthTrimNotices.reset();
         }
     }
 

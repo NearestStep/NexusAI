@@ -171,7 +171,7 @@ public final class PoolService {
         AtomicBoolean storedUnique = new AtomicBoolean();
         List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
         String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
-        GenerationOverrides overrides = overridesFor(configuredPrompt);
+        GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
         for (int i = 0; i < needed; i++) {
             jobs.add(httpClient.generateFreshAsync(httpPrompt, poolKey, overrides).handle((answer, error) -> {
                 try {
