@@ -72,7 +72,7 @@ public final class LengthTrimNotices {
         if (id == null) {
             return "(blank)";
         }
-        String clean = PlayerInput.stripSectionSigns(id).replace("&", "").replace("§", "");
+        String clean = PlayerInput.sanitize(id).replace("&", "").replace("§", "");
         clean = clean.replace('\r', ' ').replace('\n', ' ').trim();
         if (clean.isEmpty()) {
             return "(blank)";

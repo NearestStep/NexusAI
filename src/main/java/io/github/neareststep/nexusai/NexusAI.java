@@ -180,7 +180,7 @@ public final class NexusAI extends JavaPlugin {
     }
 
     private void startRuntimeServices() {
-        this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize());
+        this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize(), pluginConfig.allowMarkup());
         this.rateLimiter = new RateLimiter(
                 pluginConfig.getRequestsPerMinute(),
                 pluginConfig.getRequestsPerDay(),
@@ -195,13 +195,14 @@ public final class NexusAI extends JavaPlugin {
         AiDiagnostics diagnostics = new AiDiagnostics(
                 getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
-        this.aiPool = new AiPool();
+        this.aiPool = new AiPool(pluginConfig.allowMarkup());
         PoolStore poolStore = new PoolStore(
                 new File(getDataFolder(), "pool.yml"),
                 scheduler,
                 Duration.ofSeconds(pluginConfig.getPoolSaveDelaySeconds()),
                 getLogger(),
-                pluginConfig.isPoolPersist()
+                pluginConfig.isPoolPersist(),
+                pluginConfig.allowMarkup()
         );
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
