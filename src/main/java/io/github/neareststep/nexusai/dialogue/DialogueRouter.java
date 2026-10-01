@@ -117,7 +117,7 @@ public final class DialogueRouter {
                     }
                     String text = safeText(current, call, sent.result().content(), key, sent.result().finishReason());
                     if (LengthCutoff.isLength(sent.result().finishReason())) {
-                        LengthTrimNotices.note(logger, talkPrompt(call));
+                        LengthTrimNotices.note(logger, talkNotice(call));
                     }
                     admission.success(admissionKey);
                     return new DialogueEngine.ModelReply(text, List.of(), toolsDropped);
@@ -216,14 +216,16 @@ public final class DialogueRouter {
     }
 
     /**
-     * The character prompt identifies the talk. A blank system message still names the command.
+     * The persona name identifies the talk. The rendered character sheet is not logged.
+     * A blank id still names the command.
      */
-    private static String talkPrompt(DialogueEngine.ModelCall call) {
-        String system = call.system();
-        if (system == null || system.isBlank()) {
+    private static String talkNotice(DialogueEngine.ModelCall call) {
+        GenerationOverrides overrides = call.overrides();
+        String id = overrides == null ? null : overrides.noticeId();
+        if (id == null || id.isBlank()) {
             return "nai talk";
         }
-        return system;
+        return id;
     }
 
     private static boolean Reasoning(String model) {

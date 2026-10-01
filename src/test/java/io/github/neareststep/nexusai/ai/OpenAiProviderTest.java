@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -355,6 +356,59 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void lengthNoticeUsesThePromptIdNotTheRenderedText() throws Exception {
+        LengthTrimNotices.reset();
+        Logger logger = Logger.getLogger("openai-notice-id");
+        logger.setUseParentHandlers(false);
+        logger.setLevel(java.util.logging.Level.INFO);
+        java.util.List<String> infos = new java.util.ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getLevel() == java.util.logging.Level.INFO) {
+                    infos.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(java.util.logging.Level.INFO);
+        logger.addHandler(handler);
+        try {
+            String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+            String body = "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(cut) + "}}]}";
+            GenerationOverrides harbor = GenerationOverrides.none().withNoticeId("har&cbor");
+            String steve = "Hello " + PlayerInput.wrap("Steve") + " tell the story of the harbor";
+            String alex = "Hello " + PlayerInput.wrap("Alex") + " tell the story of the harbor";
+            assertEquals("The harbor is quiet today. Ships wait at the dock.",
+                    exchangeOf(body, steve, harbor, logger).text());
+            exchangeOf(body, alex, harbor, logger);
+            exchangeOf(body, alex, harbor, logger);
+            assertEquals(List.of(
+                    LengthTrimNotices.message("harbor"),
+                    LengthTrimNotices.message("harbor")
+            ), infos);
+            for (String line : infos) {
+                assertFalse(line.contains("Steve"));
+                assertFalse(line.contains("Alex"));
+                assertFalse(line.contains("&"));
+                assertFalse(line.contains("§"));
+                assertFalse(line.contains("PLAYER INPUT"));
+            }
+        } finally {
+            logger.removeHandler(handler);
+            LengthTrimNotices.reset();
+        }
+    }
+
+    @Test
     void blankContentIsAnErrorAndReasoningTextIsUsed() throws Exception {
         assertKind(200, "{\"choices\":[{\"message\":{\"content\":\"\"}}]}", AiErrorKind.OTHER);
         assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"The visible reasoning text.\"}}]}",
@@ -400,6 +454,15 @@ class OpenAiProviderTest {
     }
 
     private ChatExchange exchangeOf(String responseBody) throws Exception {
+        return exchangeOf(responseBody, "ping", GenerationOverrides.none(), Logger.getLogger("openai-length"));
+    }
+
+    private ChatExchange exchangeOf(
+            String responseBody,
+            String prompt,
+            GenerationOverrides overrides,
+            Logger logger
+    ) throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/chat/completions", exchange -> {
             exchange.getRequestBody().readAllBytes();
@@ -415,8 +478,8 @@ class OpenAiProviderTest {
             yaml.set("api.key", "test-key");
             String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
             yaml.set("api.base-url", baseUrl);
-            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-length"));
-            return provider.exchange("ping", GenerationOverrides.none(), baseUrl, "test-key", "gpt-4o-mini");
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, logger);
+            return provider.exchange(prompt, overrides, baseUrl, "test-key", "gpt-4o-mini");
         } finally {
             server.stop(0);
             executor.shutdownNow();
