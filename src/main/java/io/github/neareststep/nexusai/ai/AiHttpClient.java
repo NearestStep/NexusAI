@@ -6,6 +6,9 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,6 +22,8 @@ import java.util.logging.Logger;
  * Every provider call spends a shared {@link RateLimiter} slot and honors backoff/pause.
  */
 public final class AiHttpClient {
+
+    private static final DateTimeFormatter RETRY_CLOCK = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final AiCache cache;
     private final AiProvider provider;
@@ -168,15 +173,7 @@ public final class AiHttpClient {
     }
 
     /**
-     * {@code true} when an empty-after-sanitising reply is holding {@code admissionKey}
-     * until {@link #resetBackoff()}.
-     */
-    public boolean backoffHeldUntilReset(String admissionKey) {
-        return gate.heldUntilReset(admissionKey);
-    }
-
-    /**
-     * Clears per-prompt backoff, including an empty-reply hold.
+     * Clears per-prompt backoff, including an empty-reply ladder.
      * Used when configuration is reloaded.
      */
     public void resetBackoff() {
@@ -312,7 +309,7 @@ public final class AiHttpClient {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
-                    diagnostics.report(kind, AiErrors.detail(failure), gate.isPaused());
+                    diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
                 }
                 if (kind == AiErrorKind.REJECTED) {
                     logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
@@ -329,6 +326,18 @@ public final class AiHttpClient {
                 inFlight.remove(cacheKey, created);
             }
         }
+    }
+
+    private String failureDetail(String admissionKey, AiErrorKind kind, Throwable failure) {
+        if (kind != AiErrorKind.EMPTY_REPLY) {
+            return AiErrors.detail(failure);
+        }
+        long until = gate.blockedUntilMillis(admissionKey);
+        if (until <= 0L) {
+            return null;
+        }
+        String when = Instant.ofEpochMilli(until).atZone(ZoneId.systemDefault()).format(RETRY_CLOCK);
+        return "Retry after " + when + ".";
     }
 
     private static CompletableFuture<String> rejected(String reason) {
