@@ -197,15 +197,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                     || parsed.getChoices().getFirst().getMessage() == null) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            String text = parsed.getChoices().getFirst().getMessage().visibleText();
+            ChatCompletionResponse.Choice choice = parsed.getChoices().getFirst();
+            String text = choice.getMessage().visibleText();
             if (text == null || text.isBlank()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
             if (!filterAnswer) {
                 return new ChatExchange(text, headers);
             }
+            boolean lengthLimited = LengthCutoff.isLength(choice.getFinishReason());
+            String source = lengthLimited ? LengthCutoff.trim(text) : text;
             String formatted = AnswerFormatter.format(
-                    text,
+                    source,
                     config.isStripMarkdown(),
                     config.getMaxAnswerChars(),
                     config.getMaxAnswerLines()
@@ -223,7 +226,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (reason != null) {
                 throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
             }
-            return new ChatExchange(formatted, headers);
+            return new ChatExchange(formatted, headers, lengthLimited ? LengthCutoff.CACHE_TTL : null);
         } catch (AiRequestException e) {
             throw e;
         } catch (HttpTimeoutException e) {
