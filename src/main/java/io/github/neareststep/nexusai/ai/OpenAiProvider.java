@@ -212,6 +212,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
+            if (PlayerInput.stripSectionSigns(text).isBlank()) {
+                throw new AiRequestException(
+                        AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null);
+            }
             String reason = PlayerInput.rejectionReason(text, prompt);
             if (reason == null) {
                 reason = PlayerInput.rejectionReason(formatted, prompt);
@@ -283,6 +287,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
             case REJECTED -> "Rejected model answer from " + host;
+            case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case OTHER -> html && status == 403
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;

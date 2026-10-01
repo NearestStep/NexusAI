@@ -62,6 +62,7 @@ public final class AiDiagnostics {
             case TIMEOUT -> "AI provider request timed out.";
             case LOCAL_LIMIT -> "Local rate limit reached.";
             case REJECTED -> "AI answer rejected.";
+            case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case OTHER -> "AI provider request failed.";
         };
         if (paused && kind.pausesProvider()) {
