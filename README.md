@@ -19,7 +19,7 @@ Supported servers are Paper and Purpur 1.20.6 through 26.2. Folia is not support
 ## Installation
 
 1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-1.0.1-SNAPSHOT.jar` into `plugins/`
+2. Copy `build/libs/NexusAI-1.0.1.jar` into `plugins/`
 3. Install PlaceholderAPI
 4. Set the API key (prefer environment):
 
