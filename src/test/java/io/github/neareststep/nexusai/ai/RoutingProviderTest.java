@@ -27,6 +27,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RoutingProviderTest {
 
     @Test
+    void lengthCutoffCacheTtlSurvivesTheQueue() {
+        PluginConfig config = config();
+        ModelQueue queue = new ModelQueue(
+                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
+                0,
+                60_000L,
+                300_000L,
+                null,
+                () -> 10_000L,
+                LocalDate::now,
+                ZoneId.of("UTC"),
+                Logger.getLogger("route-ttl"));
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) ->
+                new ChatExchange("The harbor is quiet.", Map.of(), LengthCutoff.CACHE_TTL);
+        RoutingProvider provider = new RoutingProvider(
+                config, queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("route-ttl"), () -> 10_000L);
+        ModelAnswer answer = provider.answer("ping", GenerationOverrides.none(), false).join();
+        assertEquals("The harbor is quiet.", answer.text());
+        assertEquals(LengthCutoff.CACHE_TTL, answer.cacheTtl());
+    }
+
+    @Test
     void rotatesKeysAndSkips401ThenFailsOverOn429() throws Exception {
         if (System.getenv("NEXUSAI_API_KEY") != null && !System.getenv("NEXUSAI_API_KEY").isBlank()) {
             return;

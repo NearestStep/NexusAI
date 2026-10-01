@@ -23,6 +23,7 @@ public final class ChatCompletionResponse {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static final class Choice {
         private Message message;
+        private String finishReason;
 
         public Message getMessage() {
             return message;
@@ -30,6 +31,16 @@ public final class ChatCompletionResponse {
 
         public void setMessage(Message message) {
             this.message = message;
+        }
+
+        @JsonIgnore
+        public String getFinishReason() {
+            return finishReason;
+        }
+
+        @JsonProperty("finish_reason")
+        public void setFinishReason(String finishReason) {
+            this.finishReason = finishReason;
         }
     }
 
