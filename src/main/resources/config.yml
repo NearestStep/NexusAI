@@ -34,8 +34,10 @@ api:
   system-prompt: ""
   # Negative = do not send temperature. 0 is a real value.
   temperature: -1
-  # 0 = do not send max_tokens. Reasoning models are raised to at least 2048.
-  max-tokens: 0
+  # 0 or a negative value (for example -1) does not send max_tokens.
+  # 256 fits a short placeholder or talk reply. A prompt or pool entry may set a higher max-tokens.
+  # Reasoning models are raised to at least 2048. o-series models receive max_completion_tokens instead.
+  max-tokens: 256
   # Strip markdown and clamp the answer (0 = no limit). Useful for holograms and menus.
   strip-markdown: false
   max-answer-chars: 0
@@ -274,7 +276,7 @@ moderation:
     reason is one short sentence when flagged, and empty otherwise.
   # 0 is sent. Negative = omit temperature.
   temperature: 0
-  # 0 = omit max_tokens.
+  # 0 or a negative value omits max_tokens. A positive value is sent for the check only.
   max-tokens: 80
 
 fallback: "..."
