@@ -22,6 +22,14 @@ public final class RequestGate {
     private final long rateLimitPauseMillis;
     private final long authPauseMillis;
     private final LongSupplier clock;
+    /** Empty-after-sanitising delays: 5 min, 15 min, 30 min, then 60 min. */
+    private static final long[] EMPTY_REPLY_BACKOFF_MILLIS = {
+            5L * 60_000L,
+            15L * 60_000L,
+            30L * 60_000L,
+            60L * 60_000L
+    };
+
     private final ConcurrentHashMap<String, Backoff> backoffByKey = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> failureEpochByKey = new ConcurrentHashMap<>();
     private final AtomicLong pauseGeneration = new AtomicLong();
@@ -118,22 +126,12 @@ public final class RequestGate {
     }
 
     /**
-     * Drops per-prompt backoff, including an empty-reply hold.
+     * Drops per-prompt backoff, including an empty-reply ladder.
      * {@code /nai reload} builds a new gate and calls this so a changed prompt can be sent again.
      */
     public void resetBackoff() {
         backoffByKey.clear();
         failureEpochByKey.clear();
-    }
-
-    /**
-     * {@code true} when {@code admissionKey} is held until {@link #resetBackoff()}
-     * and the configured error backoff will not release it.
-     */
-    public boolean heldUntilReset(String admissionKey) {
-        Objects.requireNonNull(admissionKey, "admissionKey");
-        Backoff backoff = backoffByKey.get(admissionKey);
-        return backoff != null && backoff.untilReset && clock.getAsLong() < backoff.untilMillis;
     }
 
     public long blockedForMillis(String admissionKey) {
@@ -143,6 +141,19 @@ public final class RequestGate {
         Backoff backoff = backoffByKey.get(admissionKey);
         long backoffLeft = backoff == null ? 0L : Math.max(0L, backoff.untilMillis - now);
         return Math.max(pauseLeft, backoffLeft);
+    }
+
+    /**
+     * Epoch millis when this prompt may be sent again, or {@code 0} when nothing is holding it.
+     */
+    public long blockedUntilMillis(String admissionKey) {
+        Objects.requireNonNull(admissionKey, "admissionKey");
+        long until = Math.max(0L, pausedUntil);
+        Backoff backoff = backoffByKey.get(admissionKey);
+        if (backoff != null) {
+            until = Math.max(until, backoff.untilMillis);
+        }
+        return until;
     }
 
     public void recordSuccess(String admissionKey, long pauseStamp, long failureEpoch) {
@@ -156,6 +167,7 @@ public final class RequestGate {
         Objects.requireNonNull(admissionKey, "admissionKey");
         long currentEpoch = failureEpochByKey.getOrDefault(admissionKey, 0L);
         if (currentEpoch == failureEpoch) {
+            // A non-empty reply drops the ladder, so the next empty reply starts again at 5 minutes.
             backoffByKey.remove(admissionKey);
         }
         if (clearPause && pauseGeneration.get() == pauseStamp) {
@@ -186,16 +198,24 @@ public final class RequestGate {
         long now = clock.getAsLong();
         failureEpochByKey.merge(admissionKey, 1L, Long::sum);
         if (kind == AiErrorKind.EMPTY_REPLY) {
-            backoffByKey.put(admissionKey, new Backoff(Long.MAX_VALUE, 1, true));
+            backoffByKey.compute(admissionKey, (key, previous) -> {
+                int emptyAttempt = previous == null || previous.emptyReplyAttempt == 0
+                        ? 1
+                        : previous.emptyReplyAttempt + 1;
+                int index = Math.min(emptyAttempt, EMPTY_REPLY_BACKOFF_MILLIS.length) - 1;
+                int genericAttempt = previous == null ? 0 : previous.attempt;
+                return new Backoff(now + EMPTY_REPLY_BACKOFF_MILLIS[index], genericAttempt, emptyAttempt);
+            });
             return;
         }
         backoffByKey.compute(admissionKey, (key, previous) -> {
             int attempt = previous == null ? 1 : previous.attempt + 1;
+            int emptyReplyAttempt = previous == null ? 0 : previous.emptyReplyAttempt;
             long multiplier = 1L << Math.min(attempt - 1, 10);
             long delay = backoffInitialMillis == 0L
                     ? 0L
                     : Math.min(backoffMaxMillis, backoffInitialMillis * multiplier);
-            return new Backoff(now + delay, attempt);
+            return new Backoff(now + delay, attempt, emptyReplyAttempt);
         });
         if (armPause && kind.pausesProvider()) {
             long pause = kind == AiErrorKind.RATE_LIMIT ? rateLimitPauseMillis : authPauseMillis;
@@ -221,17 +241,15 @@ public final class RequestGate {
 
     private static final class Backoff {
         private final long untilMillis;
+        /** Generic error-backoff step. Zero when only empty replies have been recorded. */
         private final int attempt;
-        private final boolean untilReset;
+        /** Empty-reply step. Zero when this prompt has not returned an empty reply. */
+        private final int emptyReplyAttempt;
 
-        private Backoff(long untilMillis, int attempt) {
-            this(untilMillis, attempt, false);
-        }
-
-        private Backoff(long untilMillis, int attempt, boolean untilReset) {
+        private Backoff(long untilMillis, int attempt, int emptyReplyAttempt) {
             this.untilMillis = untilMillis;
             this.attempt = attempt;
-            this.untilReset = untilReset;
+            this.emptyReplyAttempt = emptyReplyAttempt;
         }
     }
 }
