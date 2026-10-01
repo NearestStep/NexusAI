@@ -226,7 +226,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (reason != null) {
                 throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
             }
-            return new ChatExchange(formatted, headers, lengthLimited ? LengthCutoff.CACHE_TTL : null);
+            if (lengthLimited) {
+                LengthTrimNotices.note(logger, prompt);
+            }
+            return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
             throw e;
         } catch (HttpTimeoutException e) {
