@@ -118,6 +118,9 @@ public final class DialogueTransport {
         );
         formatted = FormatEnforcer.enforce(formatted, current.presetFor(formatId));
         formatted = SecretMask.redact(formatted, apiKey == null || apiKey.isBlank() ? current.configuredSecrets() : List.of(apiKey));
+        if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw).isBlank()) {
+            throw new AiRequestException(AiErrorKind.EMPTY_REPLY, 200, PlayerInput.EMPTY_REPLY, null);
+        }
         String reason = PlayerInput.rejectionReason(raw, wrappedUser);
         if (reason == null) {
             reason = PlayerInput.rejectionReason(formatted, wrappedUser);
