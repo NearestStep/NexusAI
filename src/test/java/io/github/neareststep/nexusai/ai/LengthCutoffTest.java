@@ -105,4 +105,43 @@ class LengthCutoffTest {
         assertTrue(trimmed.contains("tail words"));
         assertFalse(trimmed.endsWith("т.д.)"));
     }
+
+    @Test
+    void aRomanNumeralHeadingIsNotASentence() {
+        assertEquals("…a burial.", LengthCutoff.trim("…a burial.\n\n### I."));
+        assertEquals("…a burial.", LengthCutoff.trim("…a burial.\n\n### i."));
+        assertEquals("…a burial.", LengthCutoff.trim("…a burial.\n\n## IV."));
+        assertEquals("…a burial.", LengthCutoff.trim("…a burial.\n\n### xiv."));
+        assertEquals("…a burial.", LengthCutoff.trim("…a burial.\n\n### XIV. "));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\nIII."));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\nIII. oak"));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\niv."));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\n\n### XIV."));
+        assertEquals("The count stopped at III.", LengthCutoff.trim("The count stopped at III. Then cu"));
+        assertEquals("Read chapter I.", LengthCutoff.trim("Read chapter I. Then cu"));
+        assertEquals(
+                "Bring a few planks.\nI. The harbor is quiet.",
+                LengthCutoff.trim("Bring a few planks.\nI. The harbor is quiet."));
+    }
+
+    @Test
+    void aMarkdownHeadingDoesNotEndASentence() {
+        assertEquals(
+                "The harbor is quiet today. Ships wait at the dock.",
+                LengthCutoff.trim("The harbor is quiet today. Ships wait at the dock.\n\n# Why?"));
+        assertEquals(
+                "The harbor is quiet today. Ships wait at the dock.",
+                LengthCutoff.trim("The harbor is quiet today. Ships wait at the dock.\n\n### Later…"));
+        assertEquals(
+                "The harbor is quiet today. Ships wait at the dock.",
+                LengthCutoff.trim("The harbor is quiet today. Ships wait at the dock.\n\n### I. The burial"));
+        String cut = LengthCutoff.trim("xxxxxxxxxxxxxxxxxxxx\n\n### I.");
+        assertEquals("xxxxxxxxxxxxxxxxxxxx…", cut);
+        assertFalse(cut.contains("#"));
+        assertEquals("…", LengthCutoff.trim("### I."));
+        assertEquals("Hi.", LengthCutoff.trim("Hi.\n\n### I."));
+        String titled = LengthCutoff.trim("Hi. The notes\n\n### Burial customs of the old");
+        assertTrue(titled.contains("Burial customs"));
+        assertFalse(titled.contains("### I."));
+    }
 }

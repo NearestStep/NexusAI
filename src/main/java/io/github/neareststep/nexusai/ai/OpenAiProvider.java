@@ -227,7 +227,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                 throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
             }
             if (lengthLimited) {
-                LengthTrimNotices.note(logger, prompt);
+                LengthTrimNotices.note(logger, noticeId(effective, prompt));
             }
             return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
@@ -247,6 +247,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             throw new AiRequestException(kind, 0, SecretMask.redact(message, List.of(apiKey)), e);
         }
+    }
+
+    /**
+     * Prefer the stable prompt id. The rendered prompt is only a fallback for a direct call
+     * that did not name one, such as a unit test.
+     */
+    private static String noticeId(GenerationOverrides overrides, String prompt) {
+        String id = overrides == null ? null : overrides.noticeId();
+        if (id != null && !id.isBlank()) {
+            return id;
+        }
+        return prompt;
     }
 
     private String doComplete(String prompt, GenerationOverrides overrides) {

@@ -23,6 +23,30 @@ class DialogueEngineTest {
     private final AtomicInteger calls = new AtomicInteger();
 
     @Test
+    void lengthTrimNoticeUsesThePersonaNotTheRenderedSheet() {
+        List<String> ids = new ArrayList<>();
+        DialogueEngine engine = engine(reply -> {
+            ids.add(reply.overrides().noticeId());
+            return DialogueEngine.ModelReply.text("Hello.");
+        });
+        engine.talk(request("hi", false, List.of(), settings(), 1_000L, node -> true));
+        assertEquals(List.of("blacksmith"), ids);
+        assertFalse(ids.getFirst().contains("Steve"));
+        assertFalse(ids.getFirst().contains("Bram"));
+
+        ids.clear();
+        DialogueEngine blank = engine(reply -> {
+            ids.add(reply.overrides().noticeId());
+            return DialogueEngine.ModelReply.text("Hello.");
+        });
+        blank.talk(new DialogueEngine.TalkRequest(
+                player, "Steve", "  ", "hi", false, false, false,
+                "You are Bram. The player is Steve.", "...", DialogueProfile.absent(), List.of(),
+                settings(), GenerationOverrides.none(), "chat", "world", 0, 64, 0, node -> true, 2_000L));
+        assertEquals(List.of("nai talk"), ids);
+    }
+
+    @Test
     void plainTextNeverRunsAnActionAndAToolCallUsesTheFixedCommand() {
         CharacterAction action = action(0, 0, null);
         DialogueEngine engine = engine(reply -> {

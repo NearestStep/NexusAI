@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class GenerationOverrides {
 
     private static final GenerationOverrides NONE = new GenerationOverrides(
-            false, null, false, null, false, null, false, null, false, null, false, null, null);
+            false, null, false, null, false, null, false, null, false, null, false, null, null, null);
 
     private final boolean systemPromptSet;
     private final String systemPrompt;
@@ -24,6 +24,10 @@ public final class GenerationOverrides {
     private final boolean fallbackSet;
     private final String fallbackProvider;
     private final String fallbackModel;
+    /**
+     * Stable id for a length-trim notice. Not a generation parameter and not sent to the model.
+     */
+    private final String noticeId;
 
     private GenerationOverrides(
             boolean systemPromptSet,
@@ -38,7 +42,8 @@ public final class GenerationOverrides {
             String format,
             boolean fallbackSet,
             String fallbackProvider,
-            String fallbackModel
+            String fallbackModel,
+            String noticeId
     ) {
         this.systemPromptSet = systemPromptSet;
         this.systemPrompt = systemPrompt;
@@ -53,6 +58,7 @@ public final class GenerationOverrides {
         this.fallbackSet = fallbackSet;
         this.fallbackProvider = fallbackProvider;
         this.fallbackModel = fallbackModel;
+        this.noticeId = noticeId;
     }
 
     public static GenerationOverrides none() {
@@ -96,6 +102,7 @@ public final class GenerationOverrides {
                 null,
                 false,
                 null,
+                null,
                 null
         );
     }
@@ -125,7 +132,8 @@ public final class GenerationOverrides {
                 format,
                 fallbackSet,
                 fallbackProvider,
-                fallbackModel
+                fallbackModel,
+                noticeId
         );
     }
 
@@ -146,7 +154,8 @@ public final class GenerationOverrides {
                 FormatPresets.normalize(format),
                 fallbackSet,
                 fallbackProvider,
-                fallbackModel
+                fallbackModel,
+                noticeId
         );
     }
 
@@ -164,7 +173,8 @@ public final class GenerationOverrides {
                 format,
                 fallbackSet,
                 fallbackProvider,
-                fallbackModel
+                fallbackModel,
+                noticeId
         );
     }
 
@@ -189,8 +199,42 @@ public final class GenerationOverrides {
                 format,
                 true,
                 parsed.provider(),
-                parsed.model()
+                parsed.model(),
+                noticeId
         );
+    }
+
+    /**
+     * Id logged when this call hits {@code max_tokens}. A prompt id, placeholder name,
+     * pool name, or talk persona. Blank does not change this instance.
+     */
+    public GenerationOverrides withNoticeId(String id) {
+        if (id == null || id.isBlank() || id.equals(noticeId)) {
+            return this;
+        }
+        return new GenerationOverrides(
+                systemPromptSet,
+                systemPrompt,
+                temperatureSet,
+                temperature,
+                maxTokensSet,
+                maxTokens,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel,
+                id
+        );
+    }
+
+    /**
+     * @return the length-trim notice id, or {@code null} when this call has none
+     */
+    public String noticeId() {
+        return noticeId;
     }
 
     /**
@@ -215,11 +259,14 @@ public final class GenerationOverrides {
      * Fields set on {@code onTop} replace this instance. Unset fields are kept.
      */
     public GenerationOverrides overlay(GenerationOverrides onTop) {
-        if (onTop == null || onTop.isEmpty()) {
+        if (onTop == null) {
             return this;
         }
+        if (onTop.isEmpty()) {
+            return onTop.noticeId == null ? this : withNoticeId(onTop.noticeId);
+        }
         if (isEmpty()) {
-            return onTop;
+            return noticeId == null || onTop.noticeId != null ? onTop : onTop.withNoticeId(noticeId);
         }
         return new GenerationOverrides(
                 onTop.systemPromptSet || systemPromptSet,
@@ -234,7 +281,8 @@ public final class GenerationOverrides {
                 onTop.formatSet ? onTop.format : format,
                 onTop.fallbackSet || fallbackSet,
                 onTop.fallbackSet ? onTop.fallbackProvider : fallbackProvider,
-                onTop.fallbackSet ? onTop.fallbackModel : fallbackModel
+                onTop.fallbackSet ? onTop.fallbackModel : fallbackModel,
+                onTop.noticeId != null ? onTop.noticeId : noticeId
         );
     }
 
@@ -295,13 +343,14 @@ public final class GenerationOverrides {
                 && Objects.equals(model, that.model)
                 && Objects.equals(format, that.format)
                 && Objects.equals(fallbackProvider, that.fallbackProvider)
-                && Objects.equals(fallbackModel, that.fallbackModel);
+                && Objects.equals(fallbackModel, that.fallbackModel)
+                && Objects.equals(noticeId, that.noticeId);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
                 systemPromptSet, systemPrompt, temperatureSet, temperature, maxTokensSet, maxTokens,
-                modelSet, model, formatSet, format, fallbackSet, fallbackProvider, fallbackModel);
+                modelSet, model, formatSet, format, fallbackSet, fallbackProvider, fallbackModel, noticeId);
     }
 }
