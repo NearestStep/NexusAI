@@ -15,8 +15,8 @@ public enum AiErrorKind {
     /** The model leaked a player-input boundary or restated the guard. Not a provider failure. */
     REJECTED("rejected"),
     /**
-     * The reply was empty after colour codes were removed. Holds that prompt until reload.
-     * Not a provider outage and not a guard rejection.
+     * The reply was empty after colour codes were removed. Backs that prompt off
+     * for 5, then 15, then 30 minutes, capped at 60. Not a provider outage and not a guard rejection.
      */
     EMPTY_REPLY("empty-reply");
 

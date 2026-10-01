@@ -152,9 +152,7 @@ public final class PoolService {
             return;
         }
         if (httpClient.isAdmissionBlocked(poolKey)) {
-            if (!httpClient.backoffHeldUntilReset(poolKey)) {
-                scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
-            }
+            scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
             return;
         }
 
@@ -209,9 +207,7 @@ public final class PoolService {
                         return;
                     }
                     if (httpClient.isAdmissionBlocked(poolKey)) {
-                        if (!httpClient.backoffHeldUntilReset(poolKey)) {
-                            scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
-                        }
+                        scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
                         return;
                     }
                     int repeated = duplicates.get();
