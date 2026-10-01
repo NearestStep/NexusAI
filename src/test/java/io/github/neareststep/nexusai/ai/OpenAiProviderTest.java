@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.ProviderCatalog;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,6 +29,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OpenAiProviderTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @Test
+    void bundledDefaultSendsMaxTokensForEveryProvider() throws Exception {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.load(Path.of("src/main/resources/config.yml").toFile());
+        assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, yaml.getInt("api.max-tokens"));
+        for (String provider : ProviderCatalog.IDS) {
+            yaml.set("api.provider", provider);
+            yaml.set("api.model", "placeholder-model");
+            PluginConfig config = new PluginConfig(yaml);
+            JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
+            assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, json.get("max_tokens").asInt(), provider);
+            assertFalse(json.has("max_completion_tokens"), provider);
+            assertFalse(json.has("temperature"), provider);
+        }
+        yaml.set("api.provider", "openai");
+        yaml.set("api.model", "o3-mini");
+        JsonNode oSeries = mapper.valueToTree(
+                OpenAiProvider.buildBody(new PluginConfig(yaml), "hi", GenerationOverrides.none()));
+        assertFalse(oSeries.has("max_tokens"));
+        assertTrue(oSeries.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR);
+    }
+
+    @Test
+    void zeroAndNegativeMaxTokensStayOutOfTheBody() {
+        for (int raw : new int[] {0, -1}) {
+            PluginConfig config = config("gpt-4o-mini", "", -1, raw, "", false, 0, 0, "low");
+            JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
+            assertFalse(json.has("max_tokens"), "raw=" + raw);
+            assertFalse(json.has("max_completion_tokens"), "raw=" + raw);
+        }
+        PluginConfig config = config("gpt-4o-mini", "", -1, PluginConfig.DEFAULT_MAX_TOKENS, "", false, 0, 0, "low");
+        JsonNode omitted = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, 0)));
+        assertFalse(omitted.has("max_tokens"));
+        JsonNode negative = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, -1)));
+        assertFalse(negative.has("max_tokens"));
+        JsonNode raised = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, 768)));
+        assertEquals(768, raised.get("max_tokens").asInt());
+    }
 
     @Test
     void omittedGenerationSettingsStayOutOfTheBody() throws Exception {

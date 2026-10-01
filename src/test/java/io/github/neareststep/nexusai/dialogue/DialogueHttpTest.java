@@ -100,6 +100,42 @@ class DialogueHttpTest {
     }
 
     @Test
+    void talkSendsTheDefaultCapAndAHigherPromptOverride() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        HttpServer server = server((exchange, attempt) -> {
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                    {"choices":[{"message":{"role":"assistant","content":"Hello."}}]}
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        try {
+            route(server, List.of(), GenerationOverrides.none(), PluginConfig.DEFAULT_MAX_TOKENS);
+            JsonNode defaults = mapper.readTree(body.get());
+            assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, defaults.get("max_tokens").asInt());
+            assertFalse(defaults.has("max_completion_tokens"));
+
+            route(server, List.of(), GenerationOverrides.of(false, null, false, null, true, 768), PluginConfig.DEFAULT_MAX_TOKENS);
+            JsonNode higher = mapper.readTree(body.get());
+            assertEquals(768, higher.get("max_tokens").asInt());
+
+            route(server, List.of(), GenerationOverrides.of(false, null, false, null, true, -1), PluginConfig.DEFAULT_MAX_TOKENS);
+            JsonNode omitted = mapper.readTree(body.get());
+            assertFalse(omitted.has("max_tokens"));
+            assertFalse(omitted.has("max_completion_tokens"));
+
+            route(server, List.of(), GenerationOverrides.none(), 0);
+            JsonNode zero = mapper.readTree(body.get());
+            assertFalse(zero.has("max_tokens"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void messageTextAloneIsNotAToolCall() throws Exception {
         String body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"give_iron\"}}]}";
         DialogueProtocol.ParsedCompletion parsed = DialogueProtocol.parse(body);
@@ -110,8 +146,17 @@ class DialogueHttpTest {
     }
 
     private DialogueEngine.ModelReply route(HttpServer server, List<CharacterAction> tools) {
+        return route(server, tools, GenerationOverrides.none(), 0);
+    }
+
+    private DialogueEngine.ModelReply route(
+            HttpServer server,
+            List<CharacterAction> tools,
+            GenerationOverrides overrides,
+            int maxTokens
+    ) {
         int port = server.getAddress().getPort();
-        PluginConfig config = config(port);
+        PluginConfig config = config(port, maxTokens);
         ModelQueue queue = new ModelQueue(
                 List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
                 0,
@@ -146,7 +191,7 @@ class DialogueHttpTest {
                 "You are Bram.",
                 List.of(new DialogueProtocol.MemoryLine("user", wrapped)),
                 tools,
-                GenerationOverrides.none(),
+                overrides,
                 "simple",
                 UUID.randomUUID(),
                 wrapped
@@ -179,13 +224,17 @@ class DialogueHttpTest {
     }
 
     private static PluginConfig config(int port) {
+        return config(port, 0);
+    }
+
+    private static PluginConfig config(int port, int maxTokens) {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("api.provider", "openai");
         yaml.set("api.model", "gpt-4o-mini");
         yaml.set("api.base-url", "http://127.0.0.1:" + port + "/v1");
         yaml.set("api.key", "test-key");
         yaml.set("api.temperature", -1);
-        yaml.set("api.max-tokens", 0);
+        yaml.set("api.max-tokens", maxTokens);
         yaml.createSection("providers.openai");
         yaml.set("providers.openai.type", "openai-compatible");
         yaml.set("providers.openai.url", "http://127.0.0.1:" + port + "/v1");
