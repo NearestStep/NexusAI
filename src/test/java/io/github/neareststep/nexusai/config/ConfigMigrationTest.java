@@ -41,6 +41,7 @@ class ConfigMigrationTest {
         YamlConfiguration config = new YamlConfiguration();
         config.load(Path.of("src/main/resources/config.yml").toFile());
         assertEquals(1, config.getInt("config-version"));
+        assertEquals(256, config.getInt("api.max-tokens"));
         assertEquals("openai-compatible", config.getString("providers.openai.type"));
         assertEquals("https://api.openai.com/v1", config.getString("providers.openai.url"));
         assertEquals("", config.getString("providers.openai.api-key"));
@@ -98,6 +99,60 @@ class ConfigMigrationTest {
         assertEquals("sk-user-secret-1234", loaded.getApiKey());
         assertEquals("llama-3.3-70b-versatile", loaded.modelQueue().getFirst().model());
         assertEquals("****1234", loaded.maskedApiKeys());
+    }
+
+    @Test
+    void missingMaxTokensIsAppendedWithTheBackupRule() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String without = defaults.replace("  max-tokens: 256\n", "");
+        assertFalse(without.contains("max-tokens: 256"));
+        Path dir = Files.createTempDirectory("nexusai-max-tokens");
+        Path file = dir.resolve("config.yml");
+        Files.writeString(file, without, StandardCharsets.UTF_8);
+        Path existingBak = dir.resolve("config.yml.bak");
+        Files.writeString(existingBak, "OLD\n", StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("max-tokens-merge");
+
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.valid());
+        assertTrue(outcome.addedKeys().contains("api.max-tokens"));
+        assertEquals("OLD\n", Files.readString(existingBak, StandardCharsets.UTF_8));
+        assertTrue(outcome.backup().getFileName().toString().startsWith("config.yml.bak."));
+        assertEquals(without, Files.readString(outcome.backup(), StandardCharsets.UTF_8));
+
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(Files.readString(file, StandardCharsets.UTF_8));
+        assertEquals(256, yaml.getInt("api.max-tokens"));
+        assertEquals(80, yaml.getInt("moderation.max-tokens"));
+        assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, new PluginConfig(yaml).getMaxTokens());
+
+        String keptZero = defaults.replace("  max-tokens: 256\n", "  max-tokens: 0\n");
+        Path kept = dir.resolve("kept.yml");
+        Files.writeString(kept, keptZero, StandardCharsets.UTF_8);
+        ConfigStartup.Outcome unchanged = ConfigStartup.prepareConfig(kept, defaults, logger);
+        assertTrue(unchanged.addedKeys().isEmpty());
+        YamlConfiguration zero = new YamlConfiguration();
+        zero.loadFromString(Files.readString(kept, StandardCharsets.UTF_8));
+        assertEquals(0, zero.getInt("api.max-tokens"));
+        assertEquals(null, new PluginConfig(zero).getMaxTokens());
+
+        String legacy = V06.replace("  max-tokens: 64\n", "");
+        assertFalse(legacy.contains("max-tokens:"));
+        Path legacyFile = dir.resolve("legacy.yml");
+        Files.writeString(legacyFile, legacy, StandardCharsets.UTF_8);
+        ConfigStartup.Outcome migrated = ConfigStartup.prepareConfig(legacyFile, defaults, logger);
+        assertTrue(migrated.valid());
+        assertTrue(migrated.addedKeys().contains("api.max-tokens"));
+        List<Path> backups = Files.list(dir)
+                .filter(path -> path.getFileName().toString().startsWith("legacy.yml.bak"))
+                .toList();
+        assertEquals(1, backups.size());
+        assertEquals(legacy, Files.readString(backups.getFirst(), StandardCharsets.UTF_8));
+        YamlConfiguration gained = new YamlConfiguration();
+        gained.loadFromString(Files.readString(legacyFile, StandardCharsets.UTF_8));
+        assertEquals(256, gained.getInt("api.max-tokens"));
+        assertEquals(0.2d, gained.getDouble("api.temperature"), 0.0001);
+        assertEquals("sk-user-secret-1234", gained.getString("api.key"));
     }
 
     @Test
