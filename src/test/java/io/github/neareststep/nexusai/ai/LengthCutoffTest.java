@@ -2,8 +2,6 @@ package io.github.neareststep.nexusai.ai;
 
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,12 +54,55 @@ class LengthCutoffTest {
     }
 
     @Test
-    void onlyLengthSelectsTheShortCacheTtl() {
+    void onlyLengthMarksACutOffReply() {
         assertTrue(LengthCutoff.isLength("length"));
         assertTrue(LengthCutoff.isLength(" Length "));
         assertFalse(LengthCutoff.isLength("stop"));
         assertFalse(LengthCutoff.isLength(null));
-        assertEquals(Duration.ofSeconds(30), LengthCutoff.CACHE_TTL);
-        assertTrue(LengthCutoff.CACHE_TTL.compareTo(Duration.ofSeconds(300)) < 0);
+    }
+
+    @Test
+    void aListNumberAtLineStartIsNotASentence() {
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\n3."));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\n3. oak"));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\n  12."));
+        assertEquals("Bring a few planks.", LengthCutoff.trim("Bring a few planks.\r\n3. spruce"));
+        assertEquals("The count stopped at 3.", LengthCutoff.trim("The count stopped at 3. Then cu"));
+    }
+
+    @Test
+    void abbreviationsAreNotSentenceEnds() {
+        assertEquals("Please ask…", LengthCutoff.trim("Please ask Mr."));
+        assertEquals("Please ask…", LengthCutoff.trim("Please ask MRS."));
+        assertEquals("Please ask…", LengthCutoff.trim("Please ask Dr."));
+        assertEquals("Please ask…", LengthCutoff.trim("Please ask St."));
+        assertEquals("Please ask…", LengthCutoff.trim("Please ask vs."));
+        assertEquals("Compare…", LengthCutoff.trim("Compare e.g."));
+        assertEquals("Compare…", LengthCutoff.trim("Compare i.e."));
+        assertEquals("Compare…", LengthCutoff.trim("Compare etc."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри т.д."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри т.п."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри т.е."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри др."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри пр."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри г."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри гг."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри им."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри ул."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри см."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри напр."));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри (т.д.)"));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри (etc.)"));
+        assertEquals("Смотри…", LengthCutoff.trim("Смотри (e.g.)"));
+        assertEquals("Смотри (т.д.).", LengthCutoff.trim("Смотри (т.д.)."));
+        assertEquals("Ask Mr. Smith about the dock.", LengthCutoff.trim("Ask Mr. Smith about the dock. Then cu"));
+        assertEquals("First.", LengthCutoff.trim("First."));
+        assertEquals("See 1st.", LengthCutoff.trim("See 1st."));
+        assertEquals("Это флаг.", LengthCutoff.trim("Это флаг."));
+
+        String late = "xxxxxxxxxxxxxxxxxxxx (и т.д.) tail words cut";
+        String trimmed = LengthCutoff.trim(late);
+        assertTrue(trimmed.contains("tail words"));
+        assertFalse(trimmed.endsWith("т.д.)"));
     }
 }
