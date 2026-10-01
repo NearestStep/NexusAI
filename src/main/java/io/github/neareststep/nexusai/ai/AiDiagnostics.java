@@ -15,6 +15,7 @@ public final class AiDiagnostics {
     private final long cooldownMillis;
     private final LongSupplier clock;
     private final ConcurrentHashMap<AiErrorKind, Long> lastLoggedAt = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<AiErrorKind, String> lastLoggedText = new ConcurrentHashMap<>();
     private volatile String lastError;
 
     public AiDiagnostics(Logger logger, Duration cooldown) {
@@ -42,10 +43,14 @@ public final class AiDiagnostics {
         lastError = message;
         long now = clock.getAsLong();
         Long previous = lastLoggedAt.get(kind);
-        if (previous != null && now - previous < cooldownMillis) {
+        boolean cooled = previous != null && now - previous < cooldownMillis;
+        // An empty-reply line names a retry time. Write it again when that time changes
+        // so the warning matches Last error. Other kinds keep the first line for the cooldown.
+        if (cooled && (kind != AiErrorKind.EMPTY_REPLY || message.equals(lastLoggedText.get(kind)))) {
             return;
         }
         lastLoggedAt.put(kind, now);
+        lastLoggedText.put(kind, message);
         logger.warning(message);
     }
 
