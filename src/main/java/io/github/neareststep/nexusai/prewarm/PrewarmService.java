@@ -125,7 +125,7 @@ public final class PrewarmService {
             if (config.fallbackModel().configured()) {
                 overrides = overrides.withFallbackModel(config.fallbackModel().provider(), config.fallbackModel().model());
             }
-            warmText(new Prepared(prompt, overrides, null, ""));
+            warmText(new Prepared(prompt, overrides.withNoticeId(template), null, ""));
         }
     }
 
@@ -194,7 +194,7 @@ public final class PrewarmService {
         if (text == null || text.isBlank() || ContextVariables.usesBuiltIn(text, java.util.Set.of())) {
             return null;
         }
-        return new Prepared(text, overrides, ttl, knowledgeHash);
+        return new Prepared(text, overrides.withNoticeId(configured), ttl, knowledgeHash);
     }
 
     private void warmText(Prepared prepared) {

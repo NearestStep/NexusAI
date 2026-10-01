@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai;
 
 import io.github.neareststep.nexusai.ai.AiDiagnostics;
+import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
@@ -165,6 +166,7 @@ public final class NexusAI extends JavaPlugin {
         applyPrompts(parsed);
         messageService.reload(pluginConfig.getLocale());
         getUnpooledGenerateLog().reset();
+        LengthTrimNotices.reset();
 
         stopRuntimeServices(true);
         startRuntimeServices();

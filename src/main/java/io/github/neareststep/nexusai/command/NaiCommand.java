@@ -375,6 +375,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         GenerationOverrides overrides = GenerationOverrides.none();
+        String noticeId = prompt;
         if (plugin.getPromptCatalog().find(prompt).isPresent()) {
             Player player = sender instanceof Player online ? online : null;
             ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
@@ -387,6 +388,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 messages.send(sender, "command.test-fail", testPlaceholders(0L, detail));
                 return;
             }
+            if (resolved.id() != null && !resolved.id().isBlank()) {
+                noticeId = resolved.id();
+            }
             prompt = resolved.text();
             overrides = KnowledgeComposer.prepare(
                     resolved.overrides(),
@@ -396,6 +400,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         } else if (args.length > 1) {
             prompt = outgoingTestPrompt(prompt, true);
         }
+        overrides = overrides.withNoticeId(noticeId);
         messages.send(sender, "command.test-sending");
         long started = System.nanoTime();
         String requestPrompt = prompt;
