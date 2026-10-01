@@ -5,11 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.ProviderCatalog;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,15 +32,58 @@ class OpenAiProviderTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
+    void bundledDefaultSendsMaxTokensForEveryProvider() throws Exception {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.load(Path.of("src/main/resources/config.yml").toFile());
+        assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, yaml.getInt("api.max-tokens"));
+        for (String provider : ProviderCatalog.IDS) {
+            yaml.set("api.provider", provider);
+            yaml.set("api.model", "placeholder-model");
+            PluginConfig config = new PluginConfig(yaml);
+            JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
+            assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, json.get("max_tokens").asInt(), provider);
+            assertFalse(json.has("max_completion_tokens"), provider);
+            assertFalse(json.has("temperature"), provider);
+        }
+        yaml.set("api.provider", "openai");
+        yaml.set("api.model", "o3-mini");
+        JsonNode oSeries = mapper.valueToTree(
+                OpenAiProvider.buildBody(new PluginConfig(yaml), "hi", GenerationOverrides.none()));
+        assertFalse(oSeries.has("max_tokens"));
+        assertTrue(oSeries.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR);
+    }
+
+    @Test
+    void zeroAndNegativeMaxTokensStayOutOfTheBody() {
+        for (int raw : new int[] {0, -1}) {
+            PluginConfig config = config("gpt-4o-mini", "", -1, raw, "", false, 0, 0, "low");
+            JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
+            assertFalse(json.has("max_tokens"), "raw=" + raw);
+            assertFalse(json.has("max_completion_tokens"), "raw=" + raw);
+        }
+        PluginConfig config = config("gpt-4o-mini", "", -1, PluginConfig.DEFAULT_MAX_TOKENS, "", false, 0, 0, "low");
+        JsonNode omitted = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, 0)));
+        assertFalse(omitted.has("max_tokens"));
+        JsonNode negative = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, -1)));
+        assertFalse(negative.has("max_tokens"));
+        JsonNode raised = mapper.valueToTree(OpenAiProvider.buildBody(
+                config, "hi", GenerationOverrides.of(false, null, false, null, true, 768)));
+        assertEquals(768, raised.get("max_tokens").asInt());
+    }
+
+    @Test
     void omittedGenerationSettingsStayOutOfTheBody() throws Exception {
         PluginConfig config = config("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", GenerationOverrides.none()));
         assertEquals("gpt-4o-mini", json.get("model").asText());
-        assertEquals(2, json.get("messages").size());
-        assertEquals("system", json.get("messages").get(0).get("role").asText());
-        assertEquals(PlayerInput.GUARD, json.get("messages").get(0).get("content").asText());
-        assertEquals("user", json.get("messages").get(1).get("role").asText());
-        assertEquals("hi", json.get("messages").get(1).get("content").asText());
+        assertEquals(1, json.get("messages").size());
+        assertEquals("user", json.get("messages").get(0).get("role").asText());
+        assertEquals("hi", json.get("messages").get(0).get("content").asText());
+        assertFalse(json.toString().contains(PlayerInput.GUARD));
+        JsonNode guarded = mapper.valueToTree(OpenAiProvider.buildBody(config, PlayerInput.wrap("hi"), GenerationOverrides.none()));
+        assertEquals(PlayerInput.GUARD, guarded.get("messages").get(0).get("content").asText());
         assertFalse(json.has("temperature"));
         assertFalse(json.has("max_tokens"));
         assertFalse(json.has("max_completion_tokens"));
@@ -51,13 +99,32 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void knowledgeSitsBetweenTheAdminPromptAndTheFormatInstruction() {
+        PluginConfig config = config("gpt-4o-mini", "Be brief.", 0.7, 256, "low", false, 0, 0, "low");
+        String block = KnowledgeBase.OPEN + "\n[lore]\nThe harbor is old.\n" + KnowledgeBase.CLOSE;
+        GenerationOverrides overrides = KnowledgeComposer.apply(
+                GenerationOverrides.of(true, "You are the harbor keeper.", false, null, false, null).withFormat("chat"),
+                config.getSystemPrompt(),
+                block);
+        String system = OpenAiProvider.buildBody(config, PlayerInput.wrap("hello"), overrides).getMessages().getFirst().getContent();
+        int admin = system.indexOf("You are the harbor keeper.");
+        int knowledgeAt = system.indexOf(KnowledgeBase.OPEN);
+        int format = system.indexOf("Reply in 1 to 3 sentences");
+        int guard = system.lastIndexOf(PlayerInput.GUARD);
+        assertTrue(admin >= 0 && knowledgeAt > admin, system);
+        assertTrue(format > knowledgeAt, system);
+        assertTrue(guard > format, system);
+        assertTrue(system.endsWith(PlayerInput.GUARD));
+    }
+
+    @Test
     void globalAndPoolOverridesShapeTheBody() throws Exception {
         PluginConfig config = config("gpt-4o-mini", "Be brief.", 0.7, 256, "low", false, 0, 0, "low");
         GenerationOverrides overrides = GenerationOverrides.of(true, "Pool system", true, 0.0, true, 32);
         JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(config, "hi", overrides));
         assertEquals("system", json.get("messages").get(0).get("role").asText());
-        assertTrue(json.get("messages").get(0).get("content").asText().startsWith("Pool system"));
-        assertTrue(json.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
+        assertEquals("Pool system", json.get("messages").get(0).get("content").asText());
+        assertFalse(json.get("messages").get(0).get("content").asText().contains(PlayerInput.GUARD));
         assertEquals("user", json.get("messages").get(1).get("role").asText());
         assertEquals(0.0, json.get("temperature").asDouble());
         assertEquals(32, json.get("max_tokens").asInt());
@@ -79,8 +146,8 @@ class OpenAiProviderTest {
         assertTrue(oJson.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR);
         assertFalse(oJson.has("max_tokens"));
         assertFalse(oJson.has("temperature"));
-        assertTrue(oJson.get("messages").get(0).get("content").asText().startsWith("system"));
-        assertTrue(oJson.get("messages").get(0).get("content").asText().endsWith(PlayerInput.GUARD));
+        assertEquals("system", oJson.get("messages").get(0).get("content").asText());
+        assertFalse(oJson.toString().contains(PlayerInput.GUARD));
     }
 
     @Test
@@ -201,6 +268,147 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void colourOnlyContentIsAnEmptyReplyAndGluedMarkersStayReadable() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> mode = new AtomicReference<>("blank");
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            String content = "markers".equals(mode.get()) ? "Hello &&&END&&& traveler" : "&c§l";
+            byte[] response = ("{\"choices\":[{\"message\":{\"content\":\"" + content + "\"}}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            yaml.set("api.base-url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-empty"));
+            CompletionException error = assertThrows(CompletionException.class, () -> provider.complete("ping").join());
+            assertEquals(AiErrorKind.EMPTY_REPLY, AiErrors.classify(error));
+            assertEquals(PlayerInput.EMPTY_REPLY, AiErrors.detail(error));
+            assertFalse(AiErrors.detail(error).contains("missing choices"));
+            mode.set("markers");
+            assertEquals("Hello &&& END &&& traveler", provider.complete("ping").join());
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void lengthFinishReasonTrimsToASentenceAndKeepsTheNormalCacheTtl() throws Exception {
+        LengthTrimNotices.reset();
+        Logger logger = Logger.getLogger("openai-length");
+        logger.setLevel(java.util.logging.Level.INFO);
+        java.util.List<String> infos = new java.util.ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getLevel() == java.util.logging.Level.INFO) {
+                    infos.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(java.util.logging.Level.INFO);
+        logger.addHandler(handler);
+        try {
+            String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+            ChatExchange exchange = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(cut) + "}}]}");
+            assertEquals("The harbor is quiet today. Ships wait at the dock.", exchange.text());
+            assertEquals(null, exchange.cacheTtl());
+            assertEquals(1, infos.size());
+            assertEquals(LengthTrimNotices.message("ping"), infos.getFirst());
+
+            String coloured = "Hello &cworld. The traveler walked toward the §cmount";
+            ChatExchange stripped = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(coloured) + "}}]}");
+            assertEquals("Hello world. The traveler walked toward the…", stripped.text());
+            assertFalse(stripped.text().contains("&"));
+            assertFalse(stripped.text().contains("§"));
+
+            ChatExchange stopped = exchangeOf(
+                    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"The harbor is quiet.\"}}]}");
+            assertEquals("The harbor is quiet.", stopped.text());
+            assertEquals(null, stopped.cacheTtl());
+
+            AiRequestException empty = assertThrows(AiRequestException.class, () -> exchangeOf(
+                    "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"&c§l\"}}]}"));
+            assertEquals(AiErrorKind.EMPTY_REPLY, empty.kind());
+            assertEquals(PlayerInput.EMPTY_REPLY, empty.getMessage());
+            assertEquals(2, infos.size());
+        } finally {
+            logger.removeHandler(handler);
+            LengthTrimNotices.reset();
+        }
+    }
+
+    @Test
+    void lengthNoticeUsesThePromptIdNotTheRenderedText() throws Exception {
+        LengthTrimNotices.reset();
+        Logger logger = Logger.getLogger("openai-notice-id");
+        logger.setUseParentHandlers(false);
+        logger.setLevel(java.util.logging.Level.INFO);
+        java.util.List<String> infos = new java.util.ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getLevel() == java.util.logging.Level.INFO) {
+                    infos.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(java.util.logging.Level.INFO);
+        logger.addHandler(handler);
+        try {
+            String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+            String body = "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(cut) + "}}]}";
+            GenerationOverrides harbor = GenerationOverrides.none().withNoticeId("har&cbor");
+            String steve = "Hello " + PlayerInput.wrap("Steve") + " tell the story of the harbor";
+            String alex = "Hello " + PlayerInput.wrap("Alex") + " tell the story of the harbor";
+            assertEquals("The harbor is quiet today. Ships wait at the dock.",
+                    exchangeOf(body, steve, harbor, logger).text());
+            exchangeOf(body, alex, harbor, logger);
+            exchangeOf(body, alex, harbor, logger);
+            assertEquals(List.of(
+                    LengthTrimNotices.message("harbor"),
+                    LengthTrimNotices.message("harbor")
+            ), infos);
+            for (String line : infos) {
+                assertFalse(line.contains("Steve"));
+                assertFalse(line.contains("Alex"));
+                assertFalse(line.contains("&"));
+                assertFalse(line.contains("§"));
+                assertFalse(line.contains("PLAYER INPUT"));
+            }
+        } finally {
+            logger.removeHandler(handler);
+            LengthTrimNotices.reset();
+        }
+    }
+
+    @Test
     void blankContentIsAnErrorAndReasoningTextIsUsed() throws Exception {
         assertKind(200, "{\"choices\":[{\"message\":{\"content\":\"\"}}]}", AiErrorKind.OTHER);
         assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"The visible reasoning text.\"}}]}",
@@ -243,6 +451,39 @@ class OpenAiProviderTest {
         assertKind(402, "{\"error\":{\"message\":\"insufficient balance\"}}", AiErrorKind.QUOTA);
         assertKind(401, "{\"error\":{\"message\":\"invalid api key\"}}", AiErrorKind.BAD_KEY);
         assertKind(404, "{\"error\":{\"code\":\"model_not_found\",\"message\":\"no such model\"}}", AiErrorKind.UNKNOWN_MODEL);
+    }
+
+    private ChatExchange exchangeOf(String responseBody) throws Exception {
+        return exchangeOf(responseBody, "ping", GenerationOverrides.none(), Logger.getLogger("openai-length"));
+    }
+
+    private ChatExchange exchangeOf(
+            String responseBody,
+            String prompt,
+            GenerationOverrides overrides,
+            Logger logger
+    ) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("gpt-4o-mini", "", -1, 256, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
+            yaml.set("api.base-url", baseUrl);
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, logger);
+            return provider.exchange(prompt, overrides, baseUrl, "test-key", "gpt-4o-mini");
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
     }
 
     private void assertAnswer(int status, String responseBody, String expected) throws Exception {

@@ -4,11 +4,22 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
 
+import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.command.NaiCommand;
+
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PluginConfigTest {
@@ -132,12 +143,70 @@ class PluginConfigTest {
         PluginConfig pluginConfig = new PluginConfig(baseYaml());
         assertEquals(null, pluginConfig.getSystemPrompt());
         assertEquals(null, pluginConfig.getTemperature());
-        assertEquals(null, pluginConfig.getMaxTokens());
+        assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, pluginConfig.getMaxTokens());
         assertFalse(pluginConfig.isStripMarkdown());
         assertEquals("low", pluginConfig.getReasoningEffort());
         assertEquals(60, pluginConfig.getProviderPauseSeconds());
         assertEquals(300, pluginConfig.getAuthPauseSeconds());
         assertTrue(pluginConfig.isPoolPersist());
+    }
+
+    @Test
+    void zeroAndNegativeMaxTokensAreNotSent() {
+        YamlConfiguration zero = baseYaml();
+        zero.set("api.max-tokens", 0);
+        assertEquals(null, new PluginConfig(zero).getMaxTokens());
+        YamlConfiguration negative = baseYaml();
+        negative.set("api.max-tokens", -1);
+        assertEquals(null, new PluginConfig(negative).getMaxTokens());
+    }
+
+    @Test
+    void groqQueueWarnsOnceWhenMaxTokensIsNotPositive() {
+        YamlConfiguration groq = baseYaml();
+        groq.set("api.provider", "groq");
+        groq.set("api.max-tokens", 0);
+        String warning = new PluginConfig(groq).groqUnlimitedOutputWarning();
+        assertTrue(warning != null && warning.contains("HTTP 429"));
+        assertFalse(warning.contains("\n"));
+
+        YamlConfiguration mixedCase = baseYaml();
+        mixedCase.set("api.provider", "Groq");
+        mixedCase.set("api.max-tokens", -1);
+        assertTrue(new PluginConfig(mixedCase).groqUnlimitedOutputWarning().contains("groq"));
+
+        YamlConfiguration queued = baseYaml();
+        queued.set("api.provider", "openai");
+        queued.set("api.max-tokens", 0);
+        queued.set("model-queue", List.of(Map.of("provider", "groq", "model", "qwen/qwen3.8-27b")));
+        assertTrue(new PluginConfig(queued).groqUnlimitedOutputWarning().contains("model queue"));
+
+        YamlConfiguration positive = baseYaml();
+        positive.set("api.provider", "groq");
+        positive.set("api.max-tokens", 256);
+        assertNull(new PluginConfig(positive).groqUnlimitedOutputWarning());
+
+        YamlConfiguration otherProvider = baseYaml();
+        otherProvider.set("api.provider", "openai");
+        otherProvider.set("api.max-tokens", 0);
+        assertNull(new PluginConfig(otherProvider).groqUnlimitedOutputWarning());
+
+        YamlConfiguration fallbackOnly = baseYaml();
+        fallbackOnly.set("api.provider", "openai");
+        fallbackOnly.set("api.max-tokens", 0);
+        fallbackOnly.set("fallback-model.provider", "groq");
+        fallbackOnly.set("fallback-model.model", "qwen/qwen3.8-27b");
+        String fallbackWarning = new PluginConfig(fallbackOnly).groqUnlimitedOutputWarning();
+        assertTrue(fallbackWarning != null && fallbackWarning.contains("fallback model"));
+        assertTrue(fallbackWarning.contains("HTTP 429"));
+        assertFalse(fallbackWarning.contains("model queue"));
+
+        YamlConfiguration fallbackCase = baseYaml();
+        fallbackCase.set("api.provider", "openai");
+        fallbackCase.set("api.max-tokens", -1);
+        fallbackCase.set("fallback-model.provider", "Groq");
+        fallbackCase.set("fallback-model.model", "qwen/qwen3.8-27b");
+        assertTrue(new PluginConfig(fallbackCase).groqUnlimitedOutputWarning().contains("groq"));
     }
 
     @Test
@@ -159,6 +228,14 @@ class PluginConfigTest {
         assertEquals("Be brief", entry.overrides().systemPrompt("global"));
         assertEquals(0.0, entry.overrides().temperature(0.9), 0.0001);
         assertEquals(40, entry.overrides().maxTokens(400));
+
+        yaml.set("pool.entries", List.of(
+                Map.of("prompt", "omit", "size", 1, "min-threshold", 0, "max-tokens", 0),
+                Map.of("prompt", "negative", "size", 1, "min-threshold", 0, "max-tokens", -1)
+        ));
+        List<PoolEntry> omitted = new PluginConfig(yaml).getPoolEntries();
+        assertEquals(null, omitted.get(0).overrides().maxTokens(400));
+        assertEquals(null, omitted.get(1).overrides().maxTokens(400));
     }
 
     @Test
@@ -177,6 +254,160 @@ class PluginConfigTest {
         PoolEntry entry = pluginConfig.getPoolEntries().get(0);
         assertTrue(entry.hasVars());
         assertEquals("%player_name%", entry.vars().get("player_name"));
+    }
+
+    @Test
+    void queueProviderWithAKeyAllowsRequestsWhenTheActiveProviderHasNone() {
+        withClearedApiKey(() -> {
+            PluginConfig config = new PluginConfig(keyedQueueYaml());
+            assertFalse(config.hasApiKey());
+            assertTrue(config.canSendRequests());
+            assertEquals("openai: no, mock: yes", config.providerKeyPresence("yes", "no"));
+            assertEquals("openai: no, mock: yes", NaiCommand.statusApiKeyText(config, "yes", "no"));
+        });
+    }
+
+    @Test
+    void missingKeyStaysABlockerOnlyWhenNoTargetCanSend() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = baseYaml();
+            yaml.set("providers.openai.type", "openai-compatible");
+            yaml.set("providers.openai.url", "https://api.openai.com/v1");
+            yaml.set("providers.openai.api-key", "");
+            yaml.set("providers.ollama.type", "openai-compatible");
+            yaml.set("providers.ollama.url", "http://localhost:11434/v1");
+            yaml.set("providers.ollama.api-key", "");
+            yaml.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            PluginConfig blocked = new PluginConfig(yaml);
+            assertFalse(blocked.canSendRequests());
+            assertFalse(blocked.canSendChatRequests());
+            assertEquals("no", NaiCommand.statusApiKeyText(blocked, "yes", "no"));
+            assertTrue(blocked.credentialWarning().contains("AI requests will not be sent"));
+        });
+    }
+
+    @Test
+    void fallbackModelAndPinnedModerationAndLocalQueueAllowRequests() {
+        withClearedApiKey(() -> {
+            YamlConfiguration fallback = keyedQueueYaml();
+            fallback.set("providers.mock.api-key", "");
+            fallback.set("fallback-model.provider", "mock");
+            fallback.set("fallback-model.model", "mock-fallback");
+            fallback.set("providers.mock.api-key", "fallback-key-ZZ99");
+            fallback.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            assertTrue(new PluginConfig(fallback).canSendRequests());
+
+            YamlConfiguration moderation = keyedQueueYaml();
+            moderation.set("providers.mock.api-key", "");
+            moderation.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            moderation.set("moderation.enabled", true);
+            moderation.set("moderation.provider", "mock");
+            moderation.set("moderation.model", "mock-mod");
+            moderation.set("providers.mock.api-key", "mod-key-ZZ99");
+            PluginConfig pinned = new PluginConfig(moderation);
+            assertTrue(pinned.canSendRequests());
+            assertFalse(pinned.canSendChatRequests());
+            assertTrue(pinned.providerKeyPresence("yes", "no").contains("mock: yes"));
+            assertTrue(pinned.credentialWarning().contains("Pinned moderation can still run"));
+            assertTrue(pinned.credentialWarning().contains("will not be sent"));
+
+            YamlConfiguration local = keyedQueueYaml();
+            local.set("providers.mock.api-key", "");
+            local.set("providers.mock.url", "http://127.0.0.1:18090/v1");
+            local.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+            PluginConfig localQueue = new PluginConfig(local);
+            assertTrue(localQueue.canSendRequests());
+            assertTrue(localQueue.canSendChatRequests());
+            assertNull(localQueue.credentialWarning());
+            assertTrue(localQueue.providerKeyPresence("yes", "no").contains("mock: local"));
+
+            YamlConfiguration activeKey = keyedQueueYaml();
+            activeKey.set("api.provider", "mock");
+            activeKey.set("providers.mock.api-key", "mock-key-QA01");
+            PluginConfig keyed = new PluginConfig(activeKey);
+            assertTrue(keyed.hasApiKey());
+            assertEquals("****QA01", NaiCommand.statusApiKeyText(keyed, "yes", "no"));
+
+            YamlConfiguration disabledPin = keyedQueueYaml();
+            disabledPin.set("providers.mock.api-key", "mod-key-ZZ99");
+            disabledPin.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            disabledPin.set("moderation.enabled", false);
+            disabledPin.set("moderation.provider", "mock");
+            disabledPin.set("moderation.model", "mock-mod");
+            assertFalse(new PluginConfig(disabledPin).canSendRequests());
+        });
+    }
+
+    @Test
+    void moderationOnlyKeyDoesNotSendOrRecordAProviderError() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = keyedQueueYaml();
+            yaml.set("providers.mock.api-key", "mod-key-ZZ99");
+            yaml.set("model-queue", List.of(Map.of("provider", "openai", "model", "gpt-4o-mini")));
+            yaml.set("moderation.enabled", true);
+            yaml.set("moderation.provider", "mock");
+            yaml.set("moderation.model", "mock-mod");
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.canSendRequests());
+            assertFalse(config.canSendChatRequests());
+            AtomicInteger calls = new AtomicInteger();
+            AiProvider provider = prompt -> {
+                calls.incrementAndGet();
+                return CompletableFuture.completedFuture("should-not-send");
+            };
+            AiHttpClient client = new AiHttpClient(
+                    new AiCache(Duration.ofMinutes(5), 10),
+                    provider,
+                    config,
+                    Logger.getLogger("mod-only"));
+            assertTrue(client.testAsync("FBPROBE say something").isCompletedExceptionally());
+            assertTrue(client.requestAsync("TIMEPROBE time=morning").isCompletedExceptionally());
+            assertEquals(0, calls.get());
+            assertTrue(client.lastErrorText() == null || client.lastErrorText().isBlank());
+        });
+    }
+
+    @Test
+    void ollamaWithoutAKeyIsReportedAsLocal() {
+        withClearedApiKey(() -> {
+            YamlConfiguration yaml = baseYaml();
+            yaml.set("providers.openai.type", "openai-compatible");
+            yaml.set("providers.openai.url", "https://api.openai.com/v1");
+            yaml.set("providers.openai.api-key", "");
+            yaml.set("providers.ollama.type", "openai-compatible");
+            yaml.set("providers.ollama.url", "http://127.0.0.1:11434/v1");
+            yaml.set("providers.ollama.api-key", "");
+            yaml.set("model-queue", List.of(
+                    Map.of("provider", "openai", "model", "gpt-4o-mini"),
+                    Map.of("provider", "ollama", "model", "mock-ok")));
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.canSendChatRequests());
+            assertEquals("openai: no, ollama: local", config.providerKeyPresence("yes", "no"));
+            assertEquals("openai: no, ollama: local", NaiCommand.statusApiKeyText(config, "yes", "no"));
+            assertNull(config.credentialWarning());
+        });
+    }
+
+    private static YamlConfiguration keyedQueueYaml() {
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "");
+        yaml.set("providers.mock.type", "openai-compatible");
+        yaml.set("providers.mock.url", "https://mock.example/v1");
+        yaml.set("providers.mock.api-key", "mock-key-QA01");
+        yaml.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+        return yaml;
+    }
+
+    private static void withClearedApiKey(Runnable body) {
+        Function<String, String> previous = PluginConfig.environment;
+        PluginConfig.environment = name -> null;
+        try {
+            body.run();
+        } finally {
+            PluginConfig.environment = previous;
+        }
     }
 
     private static boolean hasEnvKey() {

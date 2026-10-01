@@ -1,15 +1,23 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.GameClock;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -84,6 +92,39 @@ class AiHttpClientTest {
     }
 
     @Test
+    void testUsesTheQueueWhenTheActiveProviderHasNoKey() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("api.provider", "openai");
+        yaml.set("api.model", "gpt-4o-mini");
+        yaml.set("api.key", "");
+        yaml.set("api.base-url", "https://api.openai.com/v1");
+        yaml.set("fallback", "...");
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "");
+        yaml.set("providers.mock.type", "openai-compatible");
+        yaml.set("providers.mock.url", "https://mock.example/v1");
+        yaml.set("providers.mock.api-key", "mock-key-QA01");
+        yaml.set("model-queue", List.of(Map.of("provider", "mock", "model", "mock-ok")));
+        PluginConfig config = new PluginConfig(yaml);
+        assertTrue(config.canSendRequests());
+        AtomicReference<String> seenModel = new AtomicReference<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            seenModel.set(model);
+            assertEquals("mock-ok", model);
+            assertEquals("mock-key-QA01", apiKey);
+            return new ChatExchange("QUEUE-OK", Map.of());
+        };
+        ModelQueue queue = new ModelQueue(
+                config.modelQueue(), 0, 60_000L, 300_000L, null, Logger.getLogger("queue-test"));
+        RoutingProvider routing = new RoutingProvider(
+                config, queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("queue-test"));
+        AiHttpClient client = new AiHttpClient(cache, routing, config, Logger.getLogger("queue-test"));
+        assertEquals("QUEUE-OK", client.testAsync("Reply with exactly the word pong.").join());
+        assertEquals("mock-ok", seenModel.get());
+    }
+
+    @Test
     void generateFreshBypassesCache() {
         AtomicInteger calls = new AtomicInteger();
         AiProvider provider = prompt -> {
@@ -127,6 +168,29 @@ class AiHttpClientTest {
         assertEquals("answer", second.get(2, TimeUnit.SECONDS));
         assertEquals(1, calls.get());
         assertEquals("answer", cache.get(client.cacheKey("same")).orElseThrow());
+    }
+
+    @Test
+    void repeatedCachedReadsWithinTheSamePeriodHitTheCache() {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("period-" + calls.get());
+        };
+        AiHttpClient client = new AiHttpClient(cache, provider, configWithKey, Logger.getLogger("time-cache"));
+        String template = "TIMEPROBE time={time}";
+        String morning = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(0)));
+        String stillMorning = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(4_000)));
+        assertEquals("TIMEPROBE time=morning", morning);
+        assertEquals(morning, stillMorning);
+        assertEquals("period-1", client.requestAsync(morning).join());
+        assertEquals("period-1", client.requestAsync(stillMorning).join());
+        assertEquals(1, calls.get());
+
+        String evening = ContextVariables.apply(template, Set.of(), Map.of("time", GameClock.format(12_000)));
+        assertEquals("TIMEPROBE time=evening", evening);
+        assertEquals("period-2", client.requestAsync(evening).join());
+        assertEquals(2, calls.get());
     }
 
     @Test
@@ -249,6 +313,36 @@ class AiHttpClientTest {
         }, local, Logger.getLogger("test"));
         assertEquals("local", client.generateFreshAsync("hi").join());
         assertEquals(1, calls.get());
+    }
+
+    @Test
+    void lengthTruncatedRepliesUseTheNormalCacheTtl() {
+        AiProvider truncated = new AiProvider() {
+            @Override
+            public CompletableFuture<String> complete(String prompt) {
+                return CompletableFuture.completedFuture("The harbor is quiet.");
+            }
+
+            @Override
+            public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+                return CompletableFuture.completedFuture(ModelAnswer.text("Hello §cworld…"));
+            }
+        };
+        AiHttpClient client = new AiHttpClient(cache, truncated, configWithKey, Logger.getLogger("ttl-normal-cut"));
+        assertEquals("Hello §cworld…", client.requestAsync("cut").join());
+        assertEquals(Duration.ofMinutes(5), cache.entryTtl(client.cacheKey("cut")));
+        assertEquals("Hello world…", cache.get(client.cacheKey("cut")).orElseThrow());
+        assertFalse(cache.get(client.cacheKey("cut")).orElseThrow().contains("§"));
+
+        AiProvider normal = prompt -> CompletableFuture.completedFuture("full reply");
+        AiHttpClient plain = new AiHttpClient(cache, normal, configWithKey, Logger.getLogger("ttl-normal"));
+        assertEquals("full reply", plain.requestAsync("full").join());
+        assertEquals(Duration.ofMinutes(5), cache.entryTtl(plain.cacheKey("full")));
+
+        assertEquals("Hello §cworld…", client.requestAsync(
+                "sooner", null, GenerationOverrides.none(), Duration.ofSeconds(10)).join());
+        assertEquals(Duration.ofSeconds(10), cache.entryTtl(client.cacheKey("sooner")));
+        assertEquals("Hello world…", cache.get(client.cacheKey("sooner")).orElseThrow());
     }
 
     private AiHttpClient client(PluginConfig config, RateLimiter limiter, AtomicLong clock, AiProvider provider) {

@@ -6,6 +6,9 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,6 +22,8 @@ import java.util.logging.Logger;
  * Every provider call spends a shared {@link RateLimiter} slot and honors backoff/pause.
  */
 public final class AiHttpClient {
+
+    private static final DateTimeFormatter RETRY_CLOCK = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final AiCache cache;
     private final AiProvider provider;
@@ -72,8 +77,26 @@ public final class AiHttpClient {
             Duration cacheTtl
     ) {
         Objects.requireNonNull(prompt, "prompt");
+        return requestAsync(prompt, playerId, overrides, cacheTtl, "");
+    }
+
+    /**
+     * @param knowledgeHash cache-key fragment for injected knowledge, or empty when the prompt has none
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl,
+            String knowledgeHash
+    ) {
+        Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        String key = cacheKey(effective.model(config.getModel()), prompt, effective.formatOr(config.defaultFormatId()));
+        String key = cacheKey(
+                effective.model(config.getModel()),
+                prompt,
+                effective.formatOr(config.defaultFormatId()),
+                knowledgeHash);
         Optional<String> cached = cache.get(key);
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
@@ -104,7 +127,7 @@ public final class AiHttpClient {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(admissionKey, "admissionKey");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(null, admissionKey, false);
@@ -130,7 +153,7 @@ public final class AiHttpClient {
 
     public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides) {
         Objects.requireNonNull(prompt, "prompt");
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(RateLimiter.SERVER_SENTINEL, prompt, true);
@@ -147,6 +170,14 @@ public final class AiHttpClient {
 
     public boolean isAdmissionBlocked(String admissionKey) {
         return gate.isBlocked(admissionKey);
+    }
+
+    /**
+     * Clears per-prompt backoff, including an empty-reply ladder.
+     * Used when configuration is reloaded.
+     */
+    public void resetBackoff() {
+        gate.resetBackoff();
     }
 
     public long admissionDelayMillis(String admissionKey) {
@@ -187,7 +218,7 @@ public final class AiHttpClient {
         if (existing != null) {
             return existing;
         }
-        if (!config.canSendRequests()) {
+        if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         CompletableFuture<String> created = new CompletableFuture<>();
@@ -221,21 +252,35 @@ public final class AiHttpClient {
             boolean ignoreCooldown
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        CompletableFuture<String> upstream;
+        CompletableFuture<ModelAnswer> upstream;
         try {
-            upstream = provider.complete(prompt, effective, ignoreCooldown);
+            upstream = provider.answer(prompt, effective, ignoreCooldown);
         } catch (RuntimeException e) {
             finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
             return;
         }
-        upstream.whenComplete((value, error) -> {
+        upstream.whenComplete((answer, error) -> {
             try {
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache, cacheTtl, clearPause);
+                String value = answer == null ? null : answer.text();
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache,
+                        effectiveCacheTtl(cacheTtl, answer), clearPause);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
                 created.completeExceptionally(thrown);
             }
         });
+    }
+
+    /**
+     * A reply may carry its own TTL. Use that TTL when it is shorter than the prompt TTL or
+     * {@code cache.ttl}. A length-truncated reply does not carry one, so it keeps the normal TTL.
+     */
+    private Duration effectiveCacheTtl(Duration requested, ModelAnswer answer) {
+        if (answer == null || answer.cacheTtl() == null) {
+            return requested;
+        }
+        Duration normal = requested != null ? requested : config.getCacheTtl();
+        return answer.cacheTtl().compareTo(normal) < 0 ? answer.cacheTtl() : normal;
     }
 
     private void finish(
@@ -251,6 +296,10 @@ public final class AiHttpClient {
             boolean clearPause
     ) {
         try {
+            if (error == null && (value == null || value.isBlank() || PlayerInput.stripSectionSigns(value).isBlank())) {
+                error = new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null);
+                value = null;
+            }
             if (error == null && value != null && !value.isBlank()) {
                 if (writeCache && cacheKey != null) {
                     if (cacheTtl != null) {
@@ -262,6 +311,10 @@ public final class AiHttpClient {
                 gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);
                 created.complete(value);
             } else if (error != null || value == null || value.isBlank()) {
+                if (AiErrors.localMissingKey(error)) {
+                    created.completeExceptionally(AiErrors.unwrap(error));
+                    return;
+                }
                 Throwable failure = error != null
                         ? error
                         : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
@@ -270,7 +323,7 @@ public final class AiHttpClient {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
-                    diagnostics.report(kind, AiErrors.detail(failure), gate.isPaused());
+                    diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
                 }
                 if (kind == AiErrorKind.REJECTED) {
                     logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
@@ -289,6 +342,18 @@ public final class AiHttpClient {
         }
     }
 
+    private String failureDetail(String admissionKey, AiErrorKind kind, Throwable failure) {
+        if (kind != AiErrorKind.EMPTY_REPLY) {
+            return AiErrors.detail(failure);
+        }
+        long until = gate.blockedUntilMillis(admissionKey);
+        if (until <= 0L) {
+            return null;
+        }
+        String when = Instant.ofEpochMilli(until).atZone(ZoneId.systemDefault()).format(RETRY_CLOCK);
+        return "Retry after " + when + ".";
+    }
+
     private static CompletableFuture<String> rejected(String reason) {
         return CompletableFuture.failedFuture(new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, reason, null));
     }
@@ -302,8 +367,53 @@ public final class AiHttpClient {
     }
 
     public String cacheKey(String model, String prompt, String format) {
+        return cacheKey(model, prompt, format, "");
+    }
+
+    /**
+     * Knowledge text is not part of the user prompt, so its hash is a separate cache-key field.
+     * An empty hash keeps the historical key used by prompts that attach no knowledge.
+     */
+    public String cacheKey(String model, String prompt, String format, String knowledgeHash) {
         String effectiveModel = model == null || model.isBlank() ? config.getModel() : model;
         String effectiveFormat = config.normalizeFormat(format);
-        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION + '\u0000' + prompt;
+        String base = effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION + '\u0000' + prompt;
+        if (knowledgeHash == null || knowledgeHash.isBlank()) {
+            return base;
+        }
+        return effectiveModel + '\u0000' + effectiveFormat + '\u0000' + PlayerInput.KEY_VERSION
+                + '\u0000' + knowledgeHash + '\u0000' + prompt;
+    }
+
+    /**
+     * Shared admission for dialogue calls. Placeholder requests keep using {@link #requestAsync}.
+     */
+    public Optional<String> tryAdmit(UUID playerId, String admissionKey) {
+        return gate.tryAdmit(playerId, admissionKey, false);
+    }
+
+    public void recordAdmissionSuccess(String admissionKey) {
+        gate.recordSuccess(admissionKey, gate.pauseStamp(), gate.failureEpoch(admissionKey), true);
+    }
+
+    public void recordAdmissionFailure(String admissionKey, Throwable error) {
+        if (AiErrors.localMissingKey(error)) {
+            return;
+        }
+        AiErrorKind kind = AiErrors.classify(error);
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
+            return;
+        }
+        AiRequestException typed = AiErrors.find(error);
+        long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
+        gate.recordFailure(admissionKey, kind, retryAfter, true);
+        diagnostics.report(kind, AiErrors.detail(error), gate.isPaused());
+    }
+
+    public io.github.neareststep.nexusai.ai.KeyRing sharedRing(String providerId) {
+        if (provider instanceof RoutingProvider routing) {
+            return routing.sharedRing(providerId);
+        }
+        return new io.github.neareststep.nexusai.ai.KeyRing(java.util.List.of());
     }
 }

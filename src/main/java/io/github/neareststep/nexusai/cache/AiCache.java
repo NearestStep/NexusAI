@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.cache;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
@@ -53,7 +54,12 @@ public final class AiCache {
     }
 
     public Optional<String> get(String key) {
-        return Optional.ofNullable(cache.getIfPresent(key));
+        String value = cache.getIfPresent(key);
+        if (value == null) {
+            return Optional.empty();
+        }
+        String cleaned = PlayerInput.stripSectionSigns(value).trim();
+        return cleaned.isEmpty() ? Optional.empty() : Optional.of(cleaned);
     }
 
     public void put(String key, String value) {
@@ -102,6 +108,17 @@ public final class AiCache {
     public long size() {
         cache.cleanUp();
         return cache.estimatedSize();
+    }
+
+    /**
+     * TTL stored for {@code key}, or null when the key is absent.
+     * A put may store a shorter TTL than the cache default.
+     */
+    public Duration entryTtl(String key) {
+        if (key == null || cache.getIfPresent(key) == null) {
+            return null;
+        }
+        return Duration.ofNanos(ttlNanosFor(key));
     }
 
     private long ttlNanosFor(String key) {

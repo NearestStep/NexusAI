@@ -33,6 +33,67 @@ class RequestGateTest {
     }
 
     @Test
+    void emptyReplyBackoffEscalatesThenResetsOnSuccessAndReload() {
+        RequestGate gate = gate(100, 1_000, 3_000, 60_000, 300_000);
+        long[] steps = {5L * 60_000L, 15L * 60_000L, 30L * 60_000L, 60L * 60_000L, 60L * 60_000L};
+        for (long step : steps) {
+            long now = clock.get();
+            gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+            assertTrue(gate.isBlocked("tip"));
+            assertFalse(gate.isBlocked("other"));
+            assertFalse(gate.isPaused());
+            assertEquals(now + step, gate.blockedUntilMillis("tip"));
+            clock.addAndGet(step - 1L);
+            assertTrue(gate.isBlocked("tip"));
+            clock.addAndGet(1L);
+            assertFalse(gate.isBlocked("tip"));
+        }
+
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        long epoch = gate.failureEpoch("tip");
+        gate.recordSuccess("tip", gate.pauseStamp(), epoch);
+        assertFalse(gate.isBlocked("tip"));
+        long resetAt = clock.get();
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertEquals(resetAt + 5L * 60_000L, gate.blockedUntilMillis("tip"));
+
+        gate.resetBackoff();
+        assertFalse(gate.isBlocked("tip"));
+        assertEquals(0L, gate.blockedUntilMillis("tip"));
+        assertTrue(gate.tryAdmit(null, "tip", false).isEmpty());
+    }
+
+    @Test
+    void emptyRepliesInOneWindowTakeASingleLadderStep() {
+        RequestGate gate = gate(100, 1_000, 3_000, 60_000, 300_000);
+        long now = clock.get();
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertEquals(now + 5L * 60_000L, gate.blockedUntilMillis("tip"));
+        assertFalse(gate.isPaused());
+        assertFalse(gate.isBlocked("other"));
+
+        clock.addAndGet(1_000L);
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertEquals(now + 5L * 60_000L, gate.blockedUntilMillis("tip"));
+
+        clock.set(now + 5L * 60_000L);
+        assertFalse(gate.isBlocked("tip"));
+        long next = clock.get();
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertEquals(next + 15L * 60_000L, gate.blockedUntilMillis("tip"));
+
+        long epoch = gate.failureEpoch("tip");
+        gate.recordSuccess("tip", gate.pauseStamp(), epoch);
+        assertFalse(gate.isBlocked("tip"));
+        long resetAt = clock.get();
+        gate.recordFailure("tip", AiErrorKind.EMPTY_REPLY);
+        assertEquals(resetAt + 5L * 60_000L, gate.blockedUntilMillis("tip"));
+    }
+
+    @Test
     void aContentRejectionDoesNotBackOffOrPause() {
         RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
         gate.recordFailure("tip", AiErrorKind.REJECTED);

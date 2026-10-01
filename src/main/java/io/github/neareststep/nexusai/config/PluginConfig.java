@@ -23,6 +23,12 @@ public final class PluginConfig {
 
     private static final String ENV_API_KEY = "NEXUSAI_API_KEY";
 
+    /**
+     * Sent when {@code api.max-tokens} is missing. {@code 0} and negative values omit the field.
+     * Short placeholder and talk replies fit in this budget and stay under a low Groq output-token cap.
+     */
+    public static final int DEFAULT_MAX_TOKENS = 256;
+
     /** Test seam. Production reads the process environment. */
     static Function<String, String> environment = System::getenv;
 
@@ -77,8 +83,14 @@ public final class PluginConfig {
     private Map<String, ProviderSettings> providers = Map.of();
     private List<QueueEntryConfig> modelQueue = List.of();
     private int modelQueueRemainingThreshold;
+    private FallbackModel fallbackModel = FallbackModel.none();
+    private int knowledgeMaxChars = 6000;
+    private int knowledgeMaxFileChars = 4000;
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
+    private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
+            io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
+    private ModerationSettings moderation = ModerationSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -94,7 +106,7 @@ public final class PluginConfig {
         this.systemPrompt = blankToNull(config.getString("api.system-prompt", ""));
         double temperatureRaw = config.getDouble("api.temperature", -1.0d);
         this.temperature = temperatureRaw < 0 ? null : temperatureRaw;
-        int maxTokensRaw = config.getInt("api.max-tokens", 0);
+        int maxTokensRaw = config.getInt("api.max-tokens", DEFAULT_MAX_TOKENS);
         this.maxTokens = maxTokensRaw <= 0 ? null : maxTokensRaw;
         this.stripMarkdown = config.getBoolean("api.strip-markdown", false);
         this.maxAnswerChars = Math.max(0, config.getInt("api.max-answer-chars", 0));
@@ -152,8 +164,15 @@ public final class PluginConfig {
             this.modelQueue = loadModelQueue(config);
         }
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
+        this.fallbackModel = FallbackModel.of(
+                config.getString("fallback-model.provider", ""),
+                config.getString("fallback-model.model", ""));
+        this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
+        this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
+        this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
+        this.moderation = ModerationSettings.load(config);
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -537,11 +556,137 @@ public final class PluginConfig {
     }
 
     /**
-     * Requests may be sent when a key is configured, or when the endpoint does not need one
-     * (Ollama preset, or a localhost / port 11434 base URL).
+     * Requests may be sent when at least one model-queue row, the fallback model, or an enabled
+     * pinned moderation provider can accept a call. A target can accept a call when it has an API
+     * key or when its endpoint does not need one (Ollama, or a localhost / port 11434 base URL).
+     * An empty key on {@code api.provider} does not block a different row that can send.
+     * Pinned moderation alone does not let placeholders or {@code /nai test} send; see
+     * {@link #canSendChatRequests()}.
      */
     public boolean canSendRequests() {
-        return !requestsHeld && (hasApiKey() || allowsKeylessRequests());
+        if (canSendChatRequests()) {
+            return true;
+        }
+        if (requestsHeld) {
+            return false;
+        }
+        ModerationSettings pinned = moderation == null ? ModerationSettings.defaults() : moderation;
+        return pinned.enabled() && pinned.pinned() && providerUsable(provider(pinned.provider()));
+    }
+
+    /**
+     * Placeholders, the pool, prewarm, dialogue, and {@code /nai test} can send.
+     * A pinned moderation provider is not one of these targets.
+     */
+    public boolean canSendChatRequests() {
+        if (requestsHeld) {
+            return false;
+        }
+        for (QueueEntryConfig entry : modelQueue) {
+            if (providerUsable(provider(entry.provider()))) {
+                return true;
+            }
+        }
+        FallbackModel fallback = fallbackModel();
+        return fallback.configured() && providerUsable(provider(fallback.provider()));
+    }
+
+    /**
+     * One startup and {@code /nai reload} warning when {@code api.max-tokens} omits the field
+     * and groq is in the model queue or is the fallback model. Null when the cap is positive
+     * or groq is not used. Groq counts a request with no {@code max_tokens} against a small
+     * output-token budget.
+     */
+    public String groqUnlimitedOutputWarning() {
+        if (maxTokens != null) {
+            return null;
+        }
+        boolean queued = false;
+        for (QueueEntryConfig entry : modelQueue) {
+            if (entry != null && "groq".equals(entry.provider())) {
+                queued = true;
+                break;
+            }
+        }
+        boolean fallbackGroq = "groq".equals(fallbackModel().provider());
+        if (!queued && !fallbackGroq) {
+            return null;
+        }
+        String where;
+        if (queued && fallbackGroq) {
+            where = "A groq provider is in the model queue and is the fallback model";
+        } else if (queued) {
+            where = "A groq provider is in the model queue";
+        } else {
+            where = "A groq provider is the fallback model";
+        }
+        return "api.max-tokens is 0 or negative, so max_tokens is omitted. "
+                + where + " and can hit HTTP 429 "
+                + "(output tokens per minute) after a long reply, then pause. "
+                + "Set api.max-tokens to 256, or set 0 again only if you want the field left off.";
+    }
+
+    /**
+     * Startup warning when chat requests cannot be sent, or null when they can.
+     * A config whose only usable target is pinned moderation gets its own warning.
+     */
+    public String credentialWarning() {
+        if (requestsHeld || canSendChatRequests()) {
+            return null;
+        }
+        if (canSendRequests()) {
+            return "API key is not set for the model queue or fallback model. "
+                    + "Placeholders, the pool, prewarm, and /nai test will not be sent. "
+                    + "Pinned moderation can still run.";
+        }
+        return "API key is not set (env NEXUSAI_API_KEY or api.key). "
+                + "Plugin will load, but AI requests will not be sent.";
+    }
+
+    /**
+     * Key presence for the active provider, each model-queue provider, the fallback model, and a
+     * pinned moderation provider. {@code yes} and {@code no} are the localized words.
+     * A provider that can send without a key is {@code local}.
+     */
+    public String providerKeyPresence(String yes, String no) {
+        String present = yes == null ? "yes" : yes;
+        String absent = no == null ? "no" : no;
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        if (provider != null && !provider.isBlank()) {
+            ids.add(provider);
+        }
+        for (QueueEntryConfig entry : modelQueue) {
+            ids.add(entry.provider());
+        }
+        FallbackModel fallback = fallbackModel();
+        if (fallback.configured()) {
+            ids.add(fallback.provider());
+        }
+        if (moderation != null && moderation.pinned()) {
+            ids.add(moderation.provider());
+        }
+        StringBuilder line = new StringBuilder();
+        for (String id : ids) {
+            if (!line.isEmpty()) {
+                line.append(", ");
+            }
+            line.append(id).append(": ").append(keyPresence(providers.get(id), present, absent));
+        }
+        return line.toString();
+    }
+
+    private String keyPresence(ProviderSettings settings, String present, String absent) {
+        if (settings != null && settings.hasKeys()) {
+            return present;
+        }
+        if (providerAllowsKeyless(settings)) {
+            return "local";
+        }
+        return absent;
+    }
+
+    private boolean providerUsable(ProviderSettings candidate) {
+        return candidate != null && (candidate.hasKeys() || providerAllowsKeyless(candidate));
     }
 
     /**
@@ -681,6 +826,10 @@ public final class PluginConfig {
         return prewarmPrompts;
     }
 
+    public ModerationSettings moderation() {
+        return moderation;
+    }
+
     public Map<String, ProviderSettings> providers() {
         return providers;
     }
@@ -704,6 +853,22 @@ public final class PluginConfig {
         return modelQueueRemainingThreshold;
     }
 
+    public FallbackModel fallbackModel() {
+        return fallbackModel == null ? FallbackModel.none() : fallbackModel;
+    }
+
+    public int knowledgeMaxChars() {
+        return knowledgeMaxChars;
+    }
+
+    public int knowledgeMaxFileChars() {
+        return knowledgeMaxFileChars;
+    }
+
+    private static int positiveOrDefault(int value, int fallback) {
+        return value > 0 ? value : fallback;
+    }
+
     public String defaultFormatId() {
         return defaultFormatId;
     }
@@ -720,6 +885,10 @@ public final class PluginConfig {
         String normalized = normalizeFormat(id);
         FormatPreset configured = formats.get(normalized);
         return configured == null ? FormatPresets.builtin(normalized) : configured;
+    }
+
+    public io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings() {
+        return dialogueSettings;
     }
 
     /**
