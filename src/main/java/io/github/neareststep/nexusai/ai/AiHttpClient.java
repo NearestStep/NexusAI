@@ -252,21 +252,35 @@ public final class AiHttpClient {
             boolean ignoreCooldown
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        CompletableFuture<String> upstream;
+        CompletableFuture<ModelAnswer> upstream;
         try {
-            upstream = provider.complete(prompt, effective, ignoreCooldown);
+            upstream = provider.answer(prompt, effective, ignoreCooldown);
         } catch (RuntimeException e) {
             finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
             return;
         }
-        upstream.whenComplete((value, error) -> {
+        upstream.whenComplete((answer, error) -> {
             try {
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache, cacheTtl, clearPause);
+                String value = answer == null ? null : answer.text();
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache,
+                        effectiveCacheTtl(cacheTtl, answer), clearPause);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
                 created.completeExceptionally(thrown);
             }
         });
+    }
+
+    /**
+     * A length-truncated reply carries {@link LengthCutoff#CACHE_TTL}. Use it when it is shorter
+     * than the prompt TTL or {@code cache.ttl}. A prompt TTL that is already shorter wins.
+     */
+    private Duration effectiveCacheTtl(Duration requested, ModelAnswer answer) {
+        if (answer == null || answer.cacheTtl() == null) {
+            return requested;
+        }
+        Duration normal = requested != null ? requested : config.getCacheTtl();
+        return answer.cacheTtl().compareTo(normal) < 0 ? answer.cacheTtl() : normal;
     }
 
     private void finish(

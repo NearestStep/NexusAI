@@ -315,6 +315,37 @@ class AiHttpClientTest {
         assertEquals(1, calls.get());
     }
 
+    @Test
+    void lengthTruncatedRepliesUseTheShortCacheTtl() {
+        AiProvider truncated = new AiProvider() {
+            @Override
+            public CompletableFuture<String> complete(String prompt) {
+                return CompletableFuture.completedFuture("The harbor is quiet.");
+            }
+
+            @Override
+            public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+                return CompletableFuture.completedFuture(
+                        new ModelAnswer("Hello §cworld…", LengthCutoff.CACHE_TTL));
+            }
+        };
+        AiHttpClient client = new AiHttpClient(cache, truncated, configWithKey, Logger.getLogger("ttl-short"));
+        assertEquals("Hello §cworld…", client.requestAsync("cut").join());
+        assertEquals(LengthCutoff.CACHE_TTL, cache.entryTtl(client.cacheKey("cut")));
+        assertEquals("Hello world…", cache.get(client.cacheKey("cut")).orElseThrow());
+        assertFalse(cache.get(client.cacheKey("cut")).orElseThrow().contains("§"));
+
+        AiProvider normal = prompt -> CompletableFuture.completedFuture("full reply");
+        AiHttpClient plain = new AiHttpClient(cache, normal, configWithKey, Logger.getLogger("ttl-normal"));
+        assertEquals("full reply", plain.requestAsync("full").join());
+        assertEquals(Duration.ofMinutes(5), cache.entryTtl(plain.cacheKey("full")));
+
+        assertEquals("Hello §cworld…", client.requestAsync(
+                "sooner", null, GenerationOverrides.none(), Duration.ofSeconds(10)).join());
+        assertEquals(Duration.ofSeconds(10), cache.entryTtl(client.cacheKey("sooner")));
+        assertEquals("Hello world…", cache.get(client.cacheKey("sooner")).orElseThrow());
+    }
+
     private AiHttpClient client(PluginConfig config, RateLimiter limiter, AtomicLong clock, AiProvider provider) {
         RequestGate gate = new RequestGate(limiter, 2_000L, 30_000L, 60_000L, 300_000L, clock::get);
         AiDiagnostics diagnostics = new AiDiagnostics(Logger.getLogger("test-client"), Duration.ofSeconds(30), clock::get);

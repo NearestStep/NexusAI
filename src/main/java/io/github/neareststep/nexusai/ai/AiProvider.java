@@ -31,4 +31,13 @@ public interface AiProvider {
     default CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
         return complete(prompt, overrides);
     }
+
+    /**
+     * Same call as {@link #complete(String, GenerationOverrides, boolean)}.
+     * The default drops any per-reply cache TTL. {@link RoutingProvider} keeps one when the
+     * reply was cut off by {@code finish_reason=length}.
+     */
+    default CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        return complete(prompt, overrides, ignoreCooldown).thenApply(ModelAnswer::text);
+    }
 }

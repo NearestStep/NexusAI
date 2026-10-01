@@ -109,6 +109,7 @@ public final class NexusAI extends JavaPlugin {
         loadKnowledge();
         loadPrompts();
         logCredentialState();
+        logGroqMaxTokensWarning();
         logMissingEnvVars();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
@@ -169,6 +170,7 @@ public final class NexusAI extends JavaPlugin {
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
+        logGroqMaxTokensWarning();
         logMissingEnvVars();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
@@ -331,6 +333,19 @@ public final class NexusAI extends JavaPlugin {
         for (String name : pluginConfig.missingEnvVars()) {
             getLogger().warning("Environment variable " + name
                     + " is not set. Its placeholder was replaced with an empty value and is not used as an API key.");
+        }
+    }
+
+    /**
+     * One warning per startup and per {@code /nai reload}. Not logged per request.
+     */
+    private void logGroqMaxTokensWarning() {
+        if (pluginConfig.requestsHeld()) {
+            return;
+        }
+        String warning = pluginConfig.groqUnlimitedOutputWarning();
+        if (warning != null) {
+            getLogger().warning(warning);
         }
     }
 
