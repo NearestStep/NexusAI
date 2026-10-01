@@ -1,20 +1,41 @@
 package io.github.neareststep.nexusai.ai;
 
-import java.time.Duration;
-
 /**
  * Cleans a reply whose provider stopped because {@code finish_reason} is {@code length}.
  * A sentence ending ({@code . ! ? …}, ASCII {@code ...}, and {@code 。！？؟}) is kept when it
  * falls at or past the halfway point of the text. Otherwise the last partial word is dropped
- * and {@code …} is appended. The shared response cache stores that reply for
- * {@link #CACHE_TTL} instead of {@code cache.ttl}, unless the prompt TTL is already shorter.
+ * and {@code …} is appended. A period after a bare number at the start of a line, and a period
+ * that belongs to a common abbreviation, are not sentence endings. The shared response cache
+ * stores the trimmed reply for the normal TTL ({@code cache.ttl}, or the prompt {@code ttl}).
  */
 public final class LengthCutoff {
 
-    /** Shorter than the default {@code cache.ttl} of 300 seconds, long enough to absorb a refreshing placeholder. */
-    public static final Duration CACHE_TTL = Duration.ofSeconds(30);
-
     private static final String CLOSERS = "\"'”’»›)]}）";
+
+    /**
+     * Lowercase tokens, including the final period. A closing bracket may follow that period.
+     */
+    private static final String[] ABBREVIATIONS = {
+            "напр.",
+            "т.д.",
+            "т.п.",
+            "т.е.",
+            "mrs.",
+            "e.g.",
+            "i.e.",
+            "etc.",
+            "гг.",
+            "др.",
+            "пр.",
+            "им.",
+            "ул.",
+            "см.",
+            "г.",
+            "vs.",
+            "mr.",
+            "dr.",
+            "st."
+    };
 
     private LengthCutoff() {
     }
@@ -50,7 +71,7 @@ public final class LengthCutoff {
             }
             int cp = text.codePointAt(i);
             int next = i + Character.charCount(cp);
-            if (isTerminator(cp) && !decimalPoint(text, i)) {
+            if (isTerminator(cp) && !ignoredPeriod(text, i)) {
                 int end = extendClosers(text, next);
                 if (boundary(text, end, cp)) {
                     best = end - 1;
@@ -102,11 +123,76 @@ public final class LengthCutoff {
                 || codePoint == '⁈';
     }
 
+    /**
+     * A period that must not end a sentence: a decimal, a list number at the start of a line,
+     * or the period of a common abbreviation (a closing bracket may follow it).
+     */
+    private static boolean ignoredPeriod(String text, int index) {
+        return decimalPoint(text, index) || listItemPeriod(text, index) || abbreviation(text, index);
+    }
+
     private static boolean decimalPoint(String text, int index) {
-        if (text.charAt(index) != '.' || index == 0 || index + 1 >= text.length()) {
+        if (index < 0 || index >= text.length() || text.charAt(index) != '.' || index == 0 || index + 1 >= text.length()) {
             return false;
         }
         return Character.isDigit(text.charAt(index - 1)) && Character.isDigit(text.charAt(index + 1));
+    }
+
+    /**
+     * {@code 3.} and {@code 12.} at the start of a line, with optional indent. A number in the
+     * middle of a line, such as {@code point 3.}, can still end a sentence.
+     */
+    private static boolean listItemPeriod(String text, int index) {
+        if (index < 0 || index >= text.length() || text.charAt(index) != '.') {
+            return false;
+        }
+        int start = index - 1;
+        if (start < 0 || !Character.isDigit(text.charAt(start))) {
+            return false;
+        }
+        while (start >= 0 && Character.isDigit(text.charAt(start))) {
+            start--;
+        }
+        int cursor = start;
+        while (cursor >= 0 && (text.charAt(cursor) == ' ' || text.charAt(cursor) == '\t')) {
+            cursor--;
+        }
+        return cursor < 0 || text.charAt(cursor) == '\n' || text.charAt(cursor) == '\r';
+    }
+
+    private static boolean abbreviation(String text, int dot) {
+        if (dot < 0 || dot >= text.length() || text.charAt(dot) != '.') {
+            return false;
+        }
+        for (String token : ABBREVIATIONS) {
+            int start = dot + 1 - token.length();
+            if (start < 0) {
+                continue;
+            }
+            if (start > 0 && isTokenChar(text.charAt(start - 1))) {
+                continue;
+            }
+            if (regionEqualsIgnoreCase(text, start, token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isTokenChar(char ch) {
+        return Character.isLetter(ch) || Character.isDigit(ch);
+    }
+
+    private static boolean regionEqualsIgnoreCase(String text, int start, String expected) {
+        if (start < 0 || start + expected.length() > text.length()) {
+            return false;
+        }
+        for (int i = 0; i < expected.length(); i++) {
+            if (Character.toLowerCase(text.charAt(start + i)) != expected.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static int extendClosers(String text, int index) {
