@@ -162,6 +162,44 @@ class PluginConfigTest {
     }
 
     @Test
+    void groqQueueWarnsOnceWhenMaxTokensIsNotPositive() {
+        YamlConfiguration groq = baseYaml();
+        groq.set("api.provider", "groq");
+        groq.set("api.max-tokens", 0);
+        String warning = new PluginConfig(groq).groqUnlimitedOutputWarning();
+        assertTrue(warning != null && warning.contains("HTTP 429"));
+        assertFalse(warning.contains("\n"));
+
+        YamlConfiguration mixedCase = baseYaml();
+        mixedCase.set("api.provider", "Groq");
+        mixedCase.set("api.max-tokens", -1);
+        assertTrue(new PluginConfig(mixedCase).groqUnlimitedOutputWarning().contains("groq"));
+
+        YamlConfiguration queued = baseYaml();
+        queued.set("api.provider", "openai");
+        queued.set("api.max-tokens", 0);
+        queued.set("model-queue", List.of(Map.of("provider", "groq", "model", "qwen/qwen3.8-27b")));
+        assertTrue(new PluginConfig(queued).groqUnlimitedOutputWarning().contains("model queue"));
+
+        YamlConfiguration positive = baseYaml();
+        positive.set("api.provider", "groq");
+        positive.set("api.max-tokens", 256);
+        assertNull(new PluginConfig(positive).groqUnlimitedOutputWarning());
+
+        YamlConfiguration otherProvider = baseYaml();
+        otherProvider.set("api.provider", "openai");
+        otherProvider.set("api.max-tokens", 0);
+        assertNull(new PluginConfig(otherProvider).groqUnlimitedOutputWarning());
+
+        YamlConfiguration fallbackOnly = baseYaml();
+        fallbackOnly.set("api.provider", "openai");
+        fallbackOnly.set("api.max-tokens", 0);
+        fallbackOnly.set("fallback-model.provider", "groq");
+        fallbackOnly.set("fallback-model.model", "qwen/qwen3.8-27b");
+        assertNull(new PluginConfig(fallbackOnly).groqUnlimitedOutputWarning());
+    }
+
+    @Test
     void poolEntryCanOverrideGenerationSettings() {
         YamlConfiguration yaml = baseYaml();
         yaml.set("api.temperature", 0.9);
