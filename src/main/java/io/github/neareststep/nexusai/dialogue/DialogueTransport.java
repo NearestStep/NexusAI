@@ -125,16 +125,18 @@ public final class DialogueTransport {
      */
     public String finishText(String raw, String wrappedUser, String formatId, String apiKey, String finishReason) {
         PluginConfig current = config();
-        String source = LengthCutoff.isLength(finishReason) ? LengthCutoff.trim(raw) : raw;
+        boolean allowMarkup = current.allowMarkup();
+        String source = LengthCutoff.isLength(finishReason) ? LengthCutoff.trim(raw, allowMarkup) : raw;
         String formatted = AnswerFormatter.format(
                 source,
                 current.isStripMarkdown(),
                 current.getMaxAnswerChars(),
-                current.getMaxAnswerLines()
+                current.getMaxAnswerLines(),
+                allowMarkup
         );
         formatted = FormatEnforcer.enforce(formatted, current.presetFor(formatId));
         formatted = SecretMask.redact(formatted, apiKey == null || apiKey.isBlank() ? current.configuredSecrets() : List.of(apiKey));
-        if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw).isBlank()) {
+        if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw, allowMarkup).isBlank()) {
             throw new AiRequestException(AiErrorKind.EMPTY_REPLY, 200, PlayerInput.EMPTY_REPLY, null);
         }
         String reason = PlayerInput.rejectionReason(raw, wrappedUser);
