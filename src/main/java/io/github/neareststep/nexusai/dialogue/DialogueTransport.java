@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.AnswerFormatter;
 import io.github.neareststep.nexusai.ai.FormatEnforcer;
+import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
@@ -95,7 +96,12 @@ public final class DialogueTransport {
             if ((parsed.content() == null || parsed.content().isBlank()) && parsed.toolNames().isEmpty()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
-            return new Result(parsed.content() == null ? "" : parsed.content(), parsed.toolNames(), headers);
+            return new Result(
+                    parsed.content() == null ? "" : parsed.content(),
+                    parsed.toolNames(),
+                    headers,
+                    parsed.finishReason()
+            );
         } catch (AiRequestException e) {
             throw e;
         } catch (HttpTimeoutException e) {
@@ -109,9 +115,19 @@ public final class DialogueTransport {
     }
 
     public String finishText(String raw, String wrappedUser, String formatId, String apiKey) {
+        return finishText(raw, wrappedUser, formatId, apiKey, null);
+    }
+
+    /**
+     * Same formatting as a placeholder reply. When {@code finishReason} is {@code length}, the
+     * text is cut on a sentence or word boundary before those filters run. Callers store the
+     * returned text, so dialogue history matches what the player saw.
+     */
+    public String finishText(String raw, String wrappedUser, String formatId, String apiKey, String finishReason) {
         PluginConfig current = config();
+        String source = LengthCutoff.isLength(finishReason) ? LengthCutoff.trim(raw) : raw;
         String formatted = AnswerFormatter.format(
-                raw,
+                source,
                 current.isStripMarkdown(),
                 current.getMaxAnswerChars(),
                 current.getMaxAnswerLines()
@@ -174,6 +190,6 @@ public final class DialogueTransport {
     ) {
     }
 
-    public record Result(String content, List<String> toolNames, Map<String, List<String>> headers) {
+    public record Result(String content, List<String> toolNames, Map<String, List<String>> headers, String finishReason) {
     }
 }

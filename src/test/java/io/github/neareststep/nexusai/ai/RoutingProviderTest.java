@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RoutingProviderTest {
 
     @Test
-    void lengthCutoffCacheTtlSurvivesTheQueue() {
+    void explicitCacheTtlSurvivesTheQueue() {
         PluginConfig config = config();
         ModelQueue queue = new ModelQueue(
                 List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
@@ -40,12 +40,19 @@ class RoutingProviderTest {
                 ZoneId.of("UTC"),
                 Logger.getLogger("route-ttl"));
         ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) ->
-                new ChatExchange("The harbor is quiet.", Map.of(), LengthCutoff.CACHE_TTL);
+                new ChatExchange("The harbor is quiet.", Map.of(), java.time.Duration.ofSeconds(45));
         RoutingProvider provider = new RoutingProvider(
                 config, queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("route-ttl"), () -> 10_000L);
         ModelAnswer answer = provider.answer("ping", GenerationOverrides.none(), false).join();
         assertEquals("The harbor is quiet.", answer.text());
-        assertEquals(LengthCutoff.CACHE_TTL, answer.cacheTtl());
+        assertEquals(java.time.Duration.ofSeconds(45), answer.cacheTtl());
+
+        ChatCaller trimmed = (prompt, overrides, baseUrl, apiKey, model) ->
+                new ChatExchange("The harbor is quiet.", Map.of());
+        RoutingProvider plain = new RoutingProvider(
+                config, queue, trimmed, Executors.newSingleThreadExecutor(), Logger.getLogger("route-ttl-plain"), () -> 10_000L);
+        ModelAnswer normal = plain.answer("ping", GenerationOverrides.none(), false).join();
+        assertEquals(null, normal.cacheTtl());
     }
 
     @Test

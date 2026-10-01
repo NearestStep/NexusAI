@@ -157,35 +157,7 @@ class DialogueHttpTest {
     ) {
         int port = server.getAddress().getPort();
         PluginConfig config = config(port, maxTokens);
-        ModelQueue queue = new ModelQueue(
-                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
-                0,
-                60_000L,
-                300_000L,
-                null,
-                Logger.getLogger("dialogue-http"));
-        DialogueRouter router = new DialogueRouter(
-                ignored -> config,
-                ignored -> queue,
-                ignored -> new KeyRing(List.of("test-key")),
-                new DialogueTransport(() -> config, java.net.http.HttpClient.newHttpClient()),
-                new DialogueRouter.Admission() {
-                    @Override
-                    public Optional<String> admit(UUID playerId, String key) {
-                        return Optional.empty();
-                    }
-
-                    @Override
-                    public void success(String key) {
-                    }
-
-                    @Override
-                    public void failure(String key, Throwable error) {
-                    }
-                },
-                Logger.getLogger("dialogue-http"),
-                () -> 1_000L
-        );
+        DialogueRouter router = router(config);
         String wrapped = io.github.neareststep.nexusai.ai.PlayerInput.wrap("hello");
         return router.route(new DialogueEngine.ModelCall(
                 "You are Bram.",
@@ -196,6 +168,69 @@ class DialogueHttpTest {
                 UUID.randomUUID(),
                 wrapped
         ));
+    }
+
+    @Test
+    void lengthCutTalkReplyIsTrimmedAndRemembered() throws Exception {
+        String raw = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+        String trimmed = "The harbor is quiet today. Ships wait at the dock.";
+        AtomicReference<String> secondBody = new AtomicReference<>();
+        HttpServer server = server((exchange, attempt) -> {
+            String payload = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            byte[] response;
+            if (attempt == 1) {
+                response = ("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                        + mapper.writeValueAsString(raw) + "}}]}").getBytes(StandardCharsets.UTF_8);
+            } else {
+                secondBody.set(payload);
+                response = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"Sure.\"}}]}"
+                        .getBytes(StandardCharsets.UTF_8);
+            }
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        try {
+            PluginConfig config = config(server.getAddress().getPort(), PluginConfig.DEFAULT_MAX_TOKENS);
+            DialogueRouter router = router(config);
+            DialogueEngine engine = new DialogueEngine(
+                    new MemoryStore(),
+                    new SessionBook(),
+                    new ActionGate(),
+                    new DialogueBudget(),
+                    new GreetingCache(),
+                    router::route,
+                    (id, action, command) -> "ran",
+                    ActionLog.noop(),
+                    ZoneId.of("UTC")
+            );
+            UUID player = UUID.randomUUID();
+            TalkResult first = engine.talk(talk(player, "hello", 1_000L));
+            assertEquals(trimmed, first.text());
+            assertFalse(first.text().contains("suddenly"));
+            TalkResult second = engine.talk(talk(player, "again", 2_000L));
+            assertEquals("Sure.", second.text());
+            assertTrue(secondBody.get().contains(trimmed));
+            assertFalse(secondBody.get().contains("suddenly cu"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void lengthCutDialogueReplyTrimsOnAWordAndStillStripsColourCodes() {
+        DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
+        String reply = transport.finishText(
+                "Hello &cworld. The traveler walked toward the §cmount", "hello", "simple", "", "length");
+        assertEquals("Hello world. The traveler walked toward the…", reply);
+        assertFalse(reply.contains("&"));
+        assertFalse(reply.contains("§"));
+        assertEquals("The harbor is qui", transport.finishText("The harbor is qui", "hello", "simple", "", "stop"));
+        AiRequestException error = assertThrows(
+                AiRequestException.class,
+                () -> transport.finishText("&c§l", "hello", "simple", "", "length"));
+        assertEquals(AiErrorKind.EMPTY_REPLY, error.kind());
+        assertEquals(PlayerInput.EMPTY_REPLY, error.getMessage());
     }
 
     @Test
@@ -241,6 +276,63 @@ class DialogueHttpTest {
         yaml.set("providers.openai.api-key", "test-key");
         yaml.set("model-queue", List.of(java.util.Map.of("provider", "openai", "model", "gpt-4o-mini")));
         return new PluginConfig(yaml);
+    }
+
+    private static DialogueRouter router(PluginConfig config) {
+        ModelQueue queue = new ModelQueue(
+                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
+                0,
+                60_000L,
+                300_000L,
+                null,
+                Logger.getLogger("dialogue-http"));
+        return new DialogueRouter(
+                ignored -> config,
+                ignored -> queue,
+                ignored -> new KeyRing(List.of("test-key")),
+                new DialogueTransport(() -> config, java.net.http.HttpClient.newHttpClient()),
+                new DialogueRouter.Admission() {
+                    @Override
+                    public Optional<String> admit(UUID playerId, String key) {
+                        return Optional.empty();
+                    }
+
+                    @Override
+                    public void success(String key) {
+                    }
+
+                    @Override
+                    public void failure(String key, Throwable error) {
+                    }
+                },
+                Logger.getLogger("dialogue-http"),
+                () -> 1_000L
+        );
+    }
+
+    private static DialogueEngine.TalkRequest talk(UUID player, String message, long now) {
+        return new DialogueEngine.TalkRequest(
+                player,
+                "Steve",
+                "blacksmith",
+                message,
+                false,
+                false,
+                false,
+                "You are Bram.",
+                "...",
+                DialogueProfile.absent(),
+                List.of(),
+                new DialogueSettings(true, 8, false, 8000, 0, 0, 0, 12, 0, 0, 200, false, 300, false, false, 1),
+                GenerationOverrides.none(),
+                "chat",
+                "world",
+                0,
+                64,
+                0,
+                node -> true,
+                now
+        );
     }
 
     private interface Handler {
