@@ -12,8 +12,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -174,6 +176,113 @@ class EmptyReplyBackoffTest {
     }
 
     @Test
+    void parallelPoolBatchTakesOneLadderStepAndLogsThatRetryTime() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+        List<String> warnings = new CopyOnWriteArrayList<>();
+        Logger logger = quietLogger("empty-pool-batch", warnings);
+        List<CompletableFuture<String>> inbound = new CopyOnWriteArrayList<>();
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        AiHttpClient client = client(cache, clock, logger, prompt -> {
+            calls.incrementAndGet();
+            CompletableFuture<String> future = new CompletableFuture<>();
+            inbound.add(future);
+            return future;
+        });
+        AiPool pool = new AiPool();
+        List<Long> delays = new CopyOnWriteArrayList<>();
+        AtomicReference<Runnable> pending = new AtomicReference<>();
+        PoolService service = new PoolService(poolConfig(), pool, client, logger, null, (delay, task) -> {
+            delays.add(delay);
+            pending.set(task);
+        });
+        service.start();
+
+        assertEquals(3, calls.get());
+        complete(inbound, 0, "&c§l");
+        long firstUntil = clock.get() + FIVE_MINUTES;
+        assertEquals(0, pool.size("blank"));
+        assertEquals(List.of(FIVE_MINUTES + 25L), delays);
+        assertTrue(client.isAdmissionBlocked("blank"));
+        assertRetry(client, warnings, firstUntil);
+        assertTrue(warnings.stream().noneMatch(line -> line.contains(retryAt(clock.get() + FIFTEEN_MINUTES))));
+        assertTrue(warnings.stream().noneMatch(line -> line.contains(retryAt(clock.get() + 30L * 60_000L))));
+
+        for (int i = 0; i < 10; i++) {
+            service.replenish("blank");
+            service.onConsume("blank");
+        }
+        assertEquals(3, calls.get());
+        assertEquals(1, delays.size());
+
+        clock.addAndGet(FIVE_MINUTES);
+        pending.get().run();
+        assertEquals(6, calls.get());
+        complete(inbound, 3, "&c§l");
+        long secondUntil = clock.get() + FIFTEEN_MINUTES;
+        assertEquals(FIFTEEN_MINUTES + 25L, delays.getLast());
+        assertRetry(client, warnings, secondUntil);
+
+        clock.addAndGet(FIFTEEN_MINUTES);
+        pending.get().run();
+        assertEquals(9, calls.get());
+        List<CompletableFuture<String>> resetBatch = new ArrayList<>(inbound.subList(6, inbound.size()));
+        resetBatch.get(0).complete("Hello");
+        resetBatch.get(1).complete("&c§l");
+        resetBatch.get(2).complete("&c§l");
+        long resetUntil = clock.get() + FIVE_MINUTES;
+        assertEquals(FIVE_MINUTES + 25L, delays.getLast());
+        assertTrue(client.isAdmissionBlocked("blank"));
+        assertRetry(client, warnings, resetUntil);
+        assertEquals(Optional.of("Hello"), pool.poll("blank"));
+
+        client.resetBackoff();
+        assertFalse(client.isAdmissionBlocked("blank"));
+        service.replenish("blank");
+        assertEquals(12, calls.get());
+        complete(inbound, 9, "&c§l");
+        assertRetry(client, warnings, clock.get() + FIVE_MINUTES);
+        service.shutdown();
+    }
+
+    @Test
+    void probeDuringTheWaitStillRunsButDoesNotClimbTheLadder() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean text = new AtomicBoolean(false);
+        AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+        List<String> warnings = new CopyOnWriteArrayList<>();
+        Logger logger = quietLogger("empty-probe-window", warnings);
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        AiHttpClient client = client(cache, clock, logger, prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(text.get() ? "Hello" : "&c§l");
+        });
+
+        assertTrue(client.requestAsync("blank").isCompletedExceptionally());
+        long until = clock.get() + FIVE_MINUTES;
+        assertEquals(1, calls.get());
+        assertRetry(client, warnings, until);
+
+        assertTrue(client.testAsync("blank").isCompletedExceptionally());
+        assertEquals(2, calls.get());
+        assertTrue(client.isAdmissionBlocked("blank"));
+        assertEquals(FIVE_MINUTES, client.admissionDelayMillis("blank"));
+        assertRetry(client, warnings, until);
+        assertTrue(client.requestAsync("blank").isCompletedExceptionally());
+        assertEquals(2, calls.get());
+
+        text.set(true);
+        assertEquals("Hello", client.testAsync("blank").join());
+        assertEquals(3, calls.get());
+        assertFalse(client.isAdmissionBlocked("blank"));
+
+        text.set(false);
+        assertTrue(client.requestAsync("blank").isCompletedExceptionally());
+        assertEquals(4, calls.get());
+        assertRetry(client, warnings, clock.get() + FIVE_MINUTES);
+    }
+
+    @Test
     void aReplyThatStillHasTextIsCached() {
         AtomicInteger calls = new AtomicInteger();
         AtomicLong clock = new AtomicLong(5_000L);
@@ -186,6 +295,24 @@ class EmptyReplyBackoffTest {
         assertEquals("Hello", client.requestAsync("greet").join());
         assertEquals(1, calls.get());
         assertFalse(client.isAdmissionBlocked("greet"));
+    }
+
+    private static void complete(List<CompletableFuture<String>> inbound, int from, String value) {
+        List<CompletableFuture<String>> batch = new ArrayList<>(inbound.subList(from, inbound.size()));
+        for (CompletableFuture<String> future : batch) {
+            future.complete(value);
+        }
+    }
+
+    private static void assertRetry(AiHttpClient client, List<String> warnings, long untilMillis) {
+        String retry = "Retry after " + retryAt(untilMillis);
+        assertTrue(client.lastErrorText().contains(retry));
+        List<String> emptyWarnings = warnings.stream()
+                .filter(line -> line.contains("empty after removing colour codes"))
+                .toList();
+        assertFalse(emptyWarnings.isEmpty());
+        assertEquals(client.lastErrorText(), emptyWarnings.getLast());
+        assertTrue(emptyWarnings.getLast().contains(retry));
     }
 
     private static String retryAt(long epochMillis) {

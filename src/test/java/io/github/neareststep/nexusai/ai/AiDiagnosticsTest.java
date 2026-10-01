@@ -68,6 +68,42 @@ class AiDiagnosticsTest {
     }
 
     @Test
+    void emptyReplyWarningFollowsTheRetryTimeWhileLastErrorDoes() {
+        AtomicLong clock = new AtomicLong(20_000L);
+        List<String> warnings = new CopyOnWriteArrayList<>();
+        Logger logger = Logger.getLogger("nexusai-diagnostics-empty-" + clock.get());
+        logger.setUseParentHandlers(false);
+        logger.addHandler(new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                    warnings.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+
+        AiDiagnostics diagnostics = new AiDiagnostics(logger, Duration.ofSeconds(30), clock::get);
+        diagnostics.report(AiErrorKind.EMPTY_REPLY, "Retry after 2026-10-01 10:05:00.");
+        diagnostics.report(AiErrorKind.EMPTY_REPLY, "Retry after 2026-10-01 10:05:00.");
+        assertEquals(1, warnings.size());
+        assertEquals(warnings.getFirst(), diagnostics.lastError());
+
+        diagnostics.report(AiErrorKind.EMPTY_REPLY, "Retry after 2026-10-01 10:20:00.");
+        assertEquals(2, warnings.size());
+        assertEquals(warnings.getLast(), diagnostics.lastError());
+        assertTrue(diagnostics.lastError().contains("10:20:00"));
+        assertTrue(warnings.getFirst().contains("10:05:00"));
+    }
+
+    @Test
     void localLimitIsNotAProviderError() {
         AiDiagnostics diagnostics = new AiDiagnostics(Logger.getLogger("nexusai-diagnostics-local"), Duration.ofSeconds(1));
         diagnostics.report(AiErrorKind.LOCAL_LIMIT, "local");
