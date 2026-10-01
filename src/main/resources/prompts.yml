@@ -30,7 +30,9 @@ config-version: 1
 #   max-prompt-length   cap on the resolved text. Omit it and limits.max-prompt-length
 #                       does not apply to text stored in this file.
 #   model, system-prompt, temperature, max-tokens
-#                       same meaning as the api section / a pool entry override
+#                       same meaning as the api section / a pool entry override.
+#                       0 or a negative max-tokens omits the field. A higher value is sent
+#                       for that prompt, including /nai talk.
 #   fallback-model      provider and model tried once after the model queue fails for this call.
 #                       Omit it to use fallback-model from config.yml.
 #   knowledge           file names from plugins/NexusAI/knowledge without .md or .txt

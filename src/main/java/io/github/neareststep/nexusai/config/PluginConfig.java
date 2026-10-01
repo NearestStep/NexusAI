@@ -23,6 +23,12 @@ public final class PluginConfig {
 
     private static final String ENV_API_KEY = "NEXUSAI_API_KEY";
 
+    /**
+     * Sent when {@code api.max-tokens} is missing. {@code 0} and negative values omit the field.
+     * Short placeholder and talk replies fit in this budget and stay under a low Groq output-token cap.
+     */
+    public static final int DEFAULT_MAX_TOKENS = 256;
+
     /** Test seam. Production reads the process environment. */
     static Function<String, String> environment = System::getenv;
 
@@ -100,7 +106,7 @@ public final class PluginConfig {
         this.systemPrompt = blankToNull(config.getString("api.system-prompt", ""));
         double temperatureRaw = config.getDouble("api.temperature", -1.0d);
         this.temperature = temperatureRaw < 0 ? null : temperatureRaw;
-        int maxTokensRaw = config.getInt("api.max-tokens", 0);
+        int maxTokensRaw = config.getInt("api.max-tokens", DEFAULT_MAX_TOKENS);
         this.maxTokens = maxTokensRaw <= 0 ? null : maxTokensRaw;
         this.stripMarkdown = config.getBoolean("api.strip-markdown", false);
         this.maxAnswerChars = Math.max(0, config.getInt("api.max-answer-chars", 0));

@@ -143,12 +143,22 @@ class PluginConfigTest {
         PluginConfig pluginConfig = new PluginConfig(baseYaml());
         assertEquals(null, pluginConfig.getSystemPrompt());
         assertEquals(null, pluginConfig.getTemperature());
-        assertEquals(null, pluginConfig.getMaxTokens());
+        assertEquals(PluginConfig.DEFAULT_MAX_TOKENS, pluginConfig.getMaxTokens());
         assertFalse(pluginConfig.isStripMarkdown());
         assertEquals("low", pluginConfig.getReasoningEffort());
         assertEquals(60, pluginConfig.getProviderPauseSeconds());
         assertEquals(300, pluginConfig.getAuthPauseSeconds());
         assertTrue(pluginConfig.isPoolPersist());
+    }
+
+    @Test
+    void zeroAndNegativeMaxTokensAreNotSent() {
+        YamlConfiguration zero = baseYaml();
+        zero.set("api.max-tokens", 0);
+        assertEquals(null, new PluginConfig(zero).getMaxTokens());
+        YamlConfiguration negative = baseYaml();
+        negative.set("api.max-tokens", -1);
+        assertEquals(null, new PluginConfig(negative).getMaxTokens());
     }
 
     @Test
@@ -170,6 +180,14 @@ class PluginConfigTest {
         assertEquals("Be brief", entry.overrides().systemPrompt("global"));
         assertEquals(0.0, entry.overrides().temperature(0.9), 0.0001);
         assertEquals(40, entry.overrides().maxTokens(400));
+
+        yaml.set("pool.entries", List.of(
+                Map.of("prompt", "omit", "size", 1, "min-threshold", 0, "max-tokens", 0),
+                Map.of("prompt", "negative", "size", 1, "min-threshold", 0, "max-tokens", -1)
+        ));
+        List<PoolEntry> omitted = new PluginConfig(yaml).getPoolEntries();
+        assertEquals(null, omitted.get(0).overrides().maxTokens(400));
+        assertEquals(null, omitted.get(1).overrides().maxTokens(400));
     }
 
     @Test
