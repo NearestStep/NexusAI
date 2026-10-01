@@ -3,6 +3,8 @@ package io.github.neareststep.nexusai.dialogue;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.KeyRing;
+import io.github.neareststep.nexusai.ai.LengthCutoff;
+import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -113,7 +115,10 @@ public final class DialogueRouter {
                         admission.success(admissionKey);
                         return new DialogueEngine.ModelReply(sent.result().content(), sent.result().toolNames(), false);
                     }
-                    String text = safeText(current, call, sent.result().content(), key);
+                    String text = safeText(current, call, sent.result().content(), key, sent.result().finishReason());
+                    if (LengthCutoff.isLength(sent.result().finishReason())) {
+                        LengthTrimNotices.note(logger, talkPrompt(call));
+                    }
                     admission.success(admissionKey);
                     return new DialogueEngine.ModelReply(text, List.of(), toolsDropped);
                 } catch (AiRequestException error) {
@@ -200,8 +205,25 @@ public final class DialogueRouter {
         }
     }
 
-    private String safeText(PluginConfig current, DialogueEngine.ModelCall call, String raw, String apiKey) {
-        return transport.finishText(raw, call.wrappedUser(), call.formatId(), apiKey);
+    private String safeText(
+            PluginConfig current,
+            DialogueEngine.ModelCall call,
+            String raw,
+            String apiKey,
+            String finishReason
+    ) {
+        return transport.finishText(raw, call.wrappedUser(), call.formatId(), apiKey, finishReason);
+    }
+
+    /**
+     * The character prompt identifies the talk. A blank system message still names the command.
+     */
+    private static String talkPrompt(DialogueEngine.ModelCall call) {
+        String system = call.system();
+        if (system == null || system.isBlank()) {
+            return "nai talk";
+        }
+        return system;
     }
 
     private static boolean Reasoning(String model) {

@@ -316,7 +316,7 @@ class AiHttpClientTest {
     }
 
     @Test
-    void lengthTruncatedRepliesUseTheShortCacheTtl() {
+    void lengthTruncatedRepliesUseTheNormalCacheTtl() {
         AiProvider truncated = new AiProvider() {
             @Override
             public CompletableFuture<String> complete(String prompt) {
@@ -325,13 +325,12 @@ class AiHttpClientTest {
 
             @Override
             public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
-                return CompletableFuture.completedFuture(
-                        new ModelAnswer("Hello §cworld…", LengthCutoff.CACHE_TTL));
+                return CompletableFuture.completedFuture(ModelAnswer.text("Hello §cworld…"));
             }
         };
-        AiHttpClient client = new AiHttpClient(cache, truncated, configWithKey, Logger.getLogger("ttl-short"));
+        AiHttpClient client = new AiHttpClient(cache, truncated, configWithKey, Logger.getLogger("ttl-normal-cut"));
         assertEquals("Hello §cworld…", client.requestAsync("cut").join());
-        assertEquals(LengthCutoff.CACHE_TTL, cache.entryTtl(client.cacheKey("cut")));
+        assertEquals(Duration.ofMinutes(5), cache.entryTtl(client.cacheKey("cut")));
         assertEquals("Hello world…", cache.get(client.cacheKey("cut")).orElseThrow());
         assertFalse(cache.get(client.cacheKey("cut")).orElseThrow().contains("§"));
 

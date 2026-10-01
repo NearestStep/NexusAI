@@ -196,7 +196,17 @@ class PluginConfigTest {
         fallbackOnly.set("api.max-tokens", 0);
         fallbackOnly.set("fallback-model.provider", "groq");
         fallbackOnly.set("fallback-model.model", "qwen/qwen3.8-27b");
-        assertNull(new PluginConfig(fallbackOnly).groqUnlimitedOutputWarning());
+        String fallbackWarning = new PluginConfig(fallbackOnly).groqUnlimitedOutputWarning();
+        assertTrue(fallbackWarning != null && fallbackWarning.contains("fallback model"));
+        assertTrue(fallbackWarning.contains("HTTP 429"));
+        assertFalse(fallbackWarning.contains("model queue"));
+
+        YamlConfiguration fallbackCase = baseYaml();
+        fallbackCase.set("api.provider", "openai");
+        fallbackCase.set("api.max-tokens", -1);
+        fallbackCase.set("fallback-model.provider", "Groq");
+        fallbackCase.set("fallback-model.model", "qwen/qwen3.8-27b");
+        assertTrue(new PluginConfig(fallbackCase).groqUnlimitedOutputWarning().contains("groq"));
     }
 
     @Test

@@ -272,8 +272,8 @@ public final class AiHttpClient {
     }
 
     /**
-     * A length-truncated reply carries {@link LengthCutoff#CACHE_TTL}. Use it when it is shorter
-     * than the prompt TTL or {@code cache.ttl}. A prompt TTL that is already shorter wins.
+     * A reply may carry its own TTL. Use that TTL when it is shorter than the prompt TTL or
+     * {@code cache.ttl}. A length-truncated reply does not carry one, so it keeps the normal TTL.
      */
     private Duration effectiveCacheTtl(Duration requested, ModelAnswer answer) {
         if (answer == null || answer.cacheTtl() == null) {

@@ -4,7 +4,7 @@ import java.time.Duration;
 
 /**
  * One completed reply. {@code cacheTtl} is null when the caller should use the prompt TTL
- * or the cache default. A length-truncated reply sets {@link LengthCutoff#CACHE_TTL}.
+ * or the cache default. A length-truncated reply leaves it null and uses that normal TTL.
  */
 public record ModelAnswer(String text, Duration cacheTtl) {
 

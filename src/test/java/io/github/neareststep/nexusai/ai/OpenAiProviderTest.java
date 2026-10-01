@@ -299,29 +299,59 @@ class OpenAiProviderTest {
     }
 
     @Test
-    void lengthFinishReasonTrimsToASentenceAndMarksTheShortCacheTtl() throws Exception {
-        String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
-        ChatExchange exchange = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
-                + mapper.writeValueAsString(cut) + "}}]}");
-        assertEquals("The harbor is quiet today. Ships wait at the dock.", exchange.text());
-        assertEquals(LengthCutoff.CACHE_TTL, exchange.cacheTtl());
+    void lengthFinishReasonTrimsToASentenceAndKeepsTheNormalCacheTtl() throws Exception {
+        LengthTrimNotices.reset();
+        Logger logger = Logger.getLogger("openai-length");
+        logger.setLevel(java.util.logging.Level.INFO);
+        java.util.List<String> infos = new java.util.ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getLevel() == java.util.logging.Level.INFO) {
+                    infos.add(record.getMessage());
+                }
+            }
 
-        String coloured = "Hello &cworld. The traveler walked toward the §cmount";
-        ChatExchange stripped = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
-                + mapper.writeValueAsString(coloured) + "}}]}");
-        assertEquals("Hello world. The traveler walked toward the…", stripped.text());
-        assertFalse(stripped.text().contains("&"));
-        assertFalse(stripped.text().contains("§"));
+            @Override
+            public void flush() {
+            }
 
-        ChatExchange stopped = exchangeOf(
-                "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"The harbor is quiet.\"}}]}");
-        assertEquals("The harbor is quiet.", stopped.text());
-        assertEquals(null, stopped.cacheTtl());
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(java.util.logging.Level.INFO);
+        logger.addHandler(handler);
+        try {
+            String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+            ChatExchange exchange = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(cut) + "}}]}");
+            assertEquals("The harbor is quiet today. Ships wait at the dock.", exchange.text());
+            assertEquals(null, exchange.cacheTtl());
+            assertEquals(1, infos.size());
+            assertEquals(LengthTrimNotices.message("ping"), infos.getFirst());
 
-        AiRequestException empty = assertThrows(AiRequestException.class, () -> exchangeOf(
-                "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"&c§l\"}}]}"));
-        assertEquals(AiErrorKind.EMPTY_REPLY, empty.kind());
-        assertEquals(PlayerInput.EMPTY_REPLY, empty.getMessage());
+            String coloured = "Hello &cworld. The traveler walked toward the §cmount";
+            ChatExchange stripped = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                    + mapper.writeValueAsString(coloured) + "}}]}");
+            assertEquals("Hello world. The traveler walked toward the…", stripped.text());
+            assertFalse(stripped.text().contains("&"));
+            assertFalse(stripped.text().contains("§"));
+
+            ChatExchange stopped = exchangeOf(
+                    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"The harbor is quiet.\"}}]}");
+            assertEquals("The harbor is quiet.", stopped.text());
+            assertEquals(null, stopped.cacheTtl());
+
+            AiRequestException empty = assertThrows(AiRequestException.class, () -> exchangeOf(
+                    "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"&c§l\"}}]}"));
+            assertEquals(AiErrorKind.EMPTY_REPLY, empty.kind());
+            assertEquals(PlayerInput.EMPTY_REPLY, empty.getMessage());
+            assertEquals(2, infos.size());
+        } finally {
+            logger.removeHandler(handler);
+            LengthTrimNotices.reset();
+        }
     }
 
     @Test
