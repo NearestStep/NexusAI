@@ -52,6 +52,7 @@ public final class PluginConfig {
     private Double temperature;
     private Integer maxTokens;
     private boolean stripMarkdown;
+    private boolean allowMarkup;
     private int maxAnswerChars;
     private int maxAnswerLines;
     private String reasoningEffort;
@@ -109,6 +110,7 @@ public final class PluginConfig {
         int maxTokensRaw = config.getInt("api.max-tokens", DEFAULT_MAX_TOKENS);
         this.maxTokens = maxTokensRaw <= 0 ? null : maxTokensRaw;
         this.stripMarkdown = config.getBoolean("api.strip-markdown", false);
+        this.allowMarkup = config.getBoolean("sanitize.allow-markup", false);
         this.maxAnswerChars = Math.max(0, config.getInt("api.max-answer-chars", 0));
         this.maxAnswerLines = Math.max(0, config.getInt("api.max-answer-lines", 0));
         this.reasoningEffort = normalizeEffort(config.getString("api.reasoning-effort", "low"));
@@ -533,6 +535,14 @@ public final class PluginConfig {
 
     public Integer getMaxTokens() {
         return maxTokens;
+    }
+
+    /**
+     * When true, model replies may keep {@code &#RRGGBB} and MiniMessage tags for placeholder
+     * consumers. Legacy {@code §} and {@code &} codes are still removed. Default is false.
+     */
+    public boolean allowMarkup() {
+        return allowMarkup;
     }
 
     public boolean isStripMarkdown() {

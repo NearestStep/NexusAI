@@ -21,7 +21,7 @@ public final class PlayerInput {
      * Cache-key marker. The guard text is not configurable, so this constant is what changes the key
      * if the guard sentence itself ever changes.
      */
-    public static final String KEY_VERSION = "player-input-guard-v7";
+    public static final String KEY_VERSION = "player-input-guard-v8";
 
     /** Shown when the reply restates the guard or refuses and then complies. */
     public static final String GUARD_REJECTION =
@@ -42,6 +42,19 @@ public final class PlayerInput {
     private static final int UNICODE = Pattern.UNICODE_CHARACTER_CLASS;
     private static final Pattern LEGACY_COLOR = Pattern.compile(
             "(?i)[§&]x(?:[§&][0-9a-f]){6}|[§&][0-9a-fk-or]");
+    /**
+     * Ampersand hex ({@code &#RRGGBB} or {@code &#RGB}) left behind by the legacy pass.
+     * Six digits win over three, so {@code &#FF0000} is one code. Four or five digits stay.
+     */
+    private static final Pattern AMP_HEX = Pattern.compile(
+            "&#[0-9A-Fa-f]{6}|&#[0-9A-Fa-f]{3}(?![0-9A-Fa-f])");
+    /**
+     * A MiniMessage-like tag. The name starts with a letter, {@code #}, or {@code !}
+     * immediately after {@code <} or {@code </}. A space, digit, or other character after
+     * {@code <} is ordinary text ({@code <3}, {@code a < b}, {@code <- }).
+     */
+    private static final Pattern MINI_TAG = Pattern.compile(
+            "</?[\\p{L}#!][^<>]*>", UNICODE);
     /**
      * Two or more {@code &} or {@code §} glued to {@code end} or {@code player input}.
      * A colour-code pass would eat {@code &E} or {@code §E} and leave a half-eaten word,
@@ -258,6 +271,8 @@ public final class PlayerInput {
      * Removes legacy {@code §} and {@code &} color codes, then every remaining {@code §}.
      * A code is the marker plus one color or format character, so {@code A§B} becomes {@code A}
      * ({@code §B} is aqua) and {@code A&B} becomes {@code A}.
+     * Player text sent to the model keeps MiniMessage tags and {@code &#RRGGBB}. Reply text does not:
+     * use {@link #stripSectionSigns(String)}.
      */
     public static String sanitize(String raw) {
         return removeFormatting(raw);
@@ -265,17 +280,27 @@ public final class PlayerInput {
 
     /**
      * Removes Minecraft formatting from model output, pool rows, and cached answers.
-     * A legacy code is {@code §} or {@code &} plus one color or format character
-     * ({@code 0-9}, {@code a-f}, {@code k-o}, {@code r}), or a hex code
-     * {@code §x§R§R§G§G§B§B} / {@code &x&R&R&G&G&B&B}. Those codes are removed as a unit,
-     * then every remaining {@code §} is removed. A bare {@code &} is kept, so
-     * {@code rock & stone} and {@code &#FF0000} stay as text.
+     * Legacy {@code §} and {@code &} codes are always removed. {@code &#RRGGBB}, {@code &#RGB},
+     * {@code <#RRGGBB>}, and MiniMessage tags are removed as well.
+     * A bare {@code &} is kept, so {@code rock & stone} stays text.
      * A run of two or more {@code &} or {@code §} glued to {@code END} or {@code PLAYER INPUT}
      * is spaced first, so {@code Hello &&&END&&& traveler} stays readable
      * ({@code Hello &&& END &&& traveler}) instead of losing the {@code E}.
      */
     public static String stripSectionSigns(String raw) {
-        return removeFormatting(raw);
+        return stripSectionSigns(raw, false);
+    }
+
+    /**
+     * Same as {@link #stripSectionSigns(String)}. When {@code allowMarkup} is true, ampersand hex
+     * and MiniMessage tags are kept. Legacy {@code §} and {@code &} codes are still removed.
+     */
+    public static String stripSectionSigns(String raw, boolean allowMarkup) {
+        String legacy = removeFormatting(raw);
+        if (allowMarkup || legacy.isEmpty()) {
+            return legacy;
+        }
+        return stripMarkup(legacy);
     }
 
     private static String removeFormatting(String raw) {
@@ -284,6 +309,22 @@ public final class PlayerInput {
         }
         String spaced = separateGluedMarkers(raw);
         return LEGACY_COLOR.matcher(spaced).replaceAll("").replace("§", "");
+    }
+
+    /**
+     * Drops ampersand hex and MiniMessage tags until a pass changes nothing, so
+     * {@code <<red>red>} cannot reassemble a tag. Only the tag is removed, so
+     * {@code <red>Hi</red>} stays {@code Hi}.
+     */
+    private static String stripMarkup(String text) {
+        String current = text;
+        String previous;
+        do {
+            previous = current;
+            current = AMP_HEX.matcher(current).replaceAll("");
+            current = MINI_TAG.matcher(current).replaceAll("");
+        } while (!current.equals(previous));
+        return current;
     }
 
     private static String separateGluedMarkers(String raw) {

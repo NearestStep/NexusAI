@@ -22,9 +22,15 @@ public final class AiCache {
     private final ConcurrentHashMap<String, Long> writtenAtMillis = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ttlNanosByKey = new ConcurrentHashMap<>();
     private final long defaultTtlNanos;
+    private final boolean allowMarkup;
 
     public AiCache(Duration ttl, long maxSize) {
+        this(ttl, maxSize, false);
+    }
+
+    public AiCache(Duration ttl, long maxSize, boolean allowMarkup) {
         Objects.requireNonNull(ttl, "ttl");
+        this.allowMarkup = allowMarkup;
         this.defaultTtlNanos = Math.max(1L, ttl.toNanos());
         this.cache = Caffeine.newBuilder()
                 .expireAfter(new Expiry<String, String>() {
@@ -58,7 +64,7 @@ public final class AiCache {
         if (value == null) {
             return Optional.empty();
         }
-        String cleaned = PlayerInput.stripSectionSigns(value).trim();
+        String cleaned = PlayerInput.stripSectionSigns(value, allowMarkup).trim();
         return cleaned.isEmpty() ? Optional.empty() : Optional.of(cleaned);
     }
 

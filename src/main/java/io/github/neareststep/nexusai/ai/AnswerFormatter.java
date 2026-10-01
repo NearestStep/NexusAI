@@ -5,9 +5,9 @@ import java.util.regex.Pattern;
 
 /**
  * Post-processing for text that reaches placeholders, dialogue replies, the pool, and the cache.
- * Section signs and {@code &} colour or format codes are removed first so a model cannot apply
- * Minecraft formatting. Server colours come from format presets and lang files. Markdown is
- * optional. Line and length caps follow.
+ * Section signs, {@code &} colour codes, ampersand hex, and MiniMessage tags are removed first
+ * so a model cannot apply formatting that a later plugin would parse. Server colours come from
+ * format presets and lang files. Markdown is optional. Line and length caps follow.
  */
 public final class AnswerFormatter {
 
@@ -26,7 +26,15 @@ public final class AnswerFormatter {
     }
 
     public static String format(String raw, boolean stripMarkdown, int maxChars, int maxLines) {
-        String text = PlayerInput.stripSectionSigns(raw).trim();
+        return format(raw, stripMarkdown, maxChars, maxLines, false);
+    }
+
+    /**
+     * @param allowMarkup when true, keep {@code &#RRGGBB} and MiniMessage tags. Legacy {@code §}
+     *                    and {@code &} codes are still removed first.
+     */
+    public static String format(String raw, boolean stripMarkdown, int maxChars, int maxLines, boolean allowMarkup) {
+        String text = PlayerInput.stripSectionSigns(raw, allowMarkup).trim();
         if (stripMarkdown) {
             text = stripMarkdown(text).trim();
         }
