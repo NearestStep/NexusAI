@@ -592,6 +592,26 @@ public final class PluginConfig {
     }
 
     /**
+     * One startup and {@code /nai reload} warning when {@code api.max-tokens} omits the field
+     * and a groq row is in the model queue. Null when the cap is positive or groq is not queued.
+     * Groq counts a request with no {@code max_tokens} against a small output-token budget.
+     */
+    public String groqUnlimitedOutputWarning() {
+        if (maxTokens != null) {
+            return null;
+        }
+        for (QueueEntryConfig entry : modelQueue) {
+            if (entry != null && "groq".equals(entry.provider())) {
+                return "api.max-tokens is 0 or negative, so max_tokens is omitted. "
+                        + "A groq provider is in the model queue and can hit HTTP 429 "
+                        + "(output tokens per minute) after a long reply, then pause. "
+                        + "Set api.max-tokens to 256, or set 0 again only if you want the field left off.";
+            }
+        }
+        return null;
+    }
+
+    /**
      * Startup warning when chat requests cannot be sent, or null when they can.
      * A config whose only usable target is pinned moderation gets its own warning.
      */

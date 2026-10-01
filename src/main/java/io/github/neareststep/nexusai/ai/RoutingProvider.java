@@ -70,6 +70,11 @@ public final class RoutingProvider implements AiProvider {
 
     @Override
     public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        return answer(prompt, overrides, ignoreCooldown).thenApply(ModelAnswer::text);
+    }
+
+    @Override
+    public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         return CompletableFuture.supplyAsync(() -> route(prompt, effective, ignoreCooldown), executor);
@@ -79,7 +84,7 @@ public final class RoutingProvider implements AiProvider {
      * @param probe {@code /nai test}. Skips temporary cooldown, still honors a daily cap,
      *              and does not mark a failure, skip a key, or lengthen a cooldown.
      */
-    private String route(String prompt, GenerationOverrides overrides, boolean probe) {
+    private ModelAnswer route(String prompt, GenerationOverrides overrides, boolean probe) {
         long now = clock.getAsLong();
         List<ModelQueue.Choice> choices = queue.selectable(now, probe);
         Attempt last = new Attempt();
@@ -87,9 +92,9 @@ public final class RoutingProvider implements AiProvider {
         for (ModelQueue.Choice choice : choices) {
             attempted.add(choice.index());
             String model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
-            String answer = tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last);
+            ChatExchange answer = tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last);
             if (answer != null) {
-                return answer;
+                return new ModelAnswer(answer.text(), answer.cacheTtl());
             }
         }
         FallbackModel fallback = overrides.fallbackModel();
@@ -97,7 +102,7 @@ public final class RoutingProvider implements AiProvider {
             ModelQueue.FallbackPlan plan = queue.planFallback(
                     fallback.provider(), fallback.model(), clock.getAsLong(), probe, attempted);
             if (plan.allowed()) {
-                String answer = tryModel(
+                ChatExchange answer = tryModel(
                         prompt,
                         overrides,
                         probe,
@@ -107,7 +112,7 @@ public final class RoutingProvider implements AiProvider {
                         plan.dedicated(),
                         last);
                 if (answer != null) {
-                    return answer;
+                    return new ModelAnswer(answer.text(), answer.cacheTtl());
                 }
             }
         }
@@ -124,7 +129,7 @@ public final class RoutingProvider implements AiProvider {
      * One provider/model attempt, including key rotation. {@code null} means this model did not answer.
      * Replies go through {@link ChatCaller#exchange}, which applies the same reply filter as the queue.
      */
-    private String tryModel(
+    private ChatExchange tryModel(
             String prompt,
             GenerationOverrides overrides,
             boolean probe,
@@ -178,7 +183,7 @@ public final class RoutingProvider implements AiProvider {
                         queue.observe(queueIndex, exchange.headers(), clock.getAsLong());
                     }
                 }
-                return exchange.text();
+                return exchange;
             } catch (AiRequestException error) {
                 last.error = error;
                 now = clock.getAsLong();
