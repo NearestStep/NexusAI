@@ -58,7 +58,15 @@ public final class LengthCutoff {
     }
 
     public static String trim(String raw) {
-        String text = PlayerInput.stripSectionSigns(raw == null ? "" : raw).strip();
+        return trim(raw, false);
+    }
+
+    /**
+     * @param allowMarkup when true, ampersand hex and MiniMessage tags stay in the text that is cut.
+     *                    Legacy {@code §} and {@code &} codes are still removed before the cut.
+     */
+    public static String trim(String raw, boolean allowMarkup) {
+        String text = PlayerInput.stripSectionSigns(raw == null ? "" : raw, allowMarkup).strip();
         if (text.isEmpty()) {
             return text;
         }

@@ -32,6 +32,7 @@ public final class PoolStore {
     private final long delayMillis;
     private final Logger logger;
     private final boolean enabled;
+    private final boolean allowMarkup;
     private final Object scheduleLock = new Object();
     private final Object ioLock = new Object();
     private ScheduledFuture<?> pending;
@@ -41,11 +42,23 @@ public final class PoolStore {
     private volatile boolean invalidNoted;
 
     public PoolStore(File file, ScheduledExecutorService scheduler, Duration delay, Logger logger, boolean enabled) {
+        this(file, scheduler, delay, logger, enabled, false);
+    }
+
+    public PoolStore(
+            File file,
+            ScheduledExecutorService scheduler,
+            Duration delay,
+            Logger logger,
+            boolean enabled,
+            boolean allowMarkup
+    ) {
         this.file = file;
         this.scheduler = scheduler;
         this.delayMillis = delay == null ? 2_000L : Math.max(1L, delay.toMillis());
         this.logger = Objects.requireNonNull(logger, "logger");
         this.enabled = enabled && file != null && scheduler != null;
+        this.allowMarkup = allowMarkup;
     }
 
     public static PoolStore disabled() {
@@ -90,7 +103,7 @@ public final class PoolStore {
                 if (limit == null) {
                     continue;
                 }
-                List<String> answers = readAnswers(row.get("answers"));
+                List<String> answers = readAnswers(row.get("answers"), allowMarkup);
                 if (answers.size() > limit) {
                     answers = new ArrayList<>(answers.subList(0, limit));
                 }
@@ -250,7 +263,7 @@ public final class PoolStore {
         }
     }
 
-    private static List<String> readAnswers(Object raw) {
+    private static List<String> readAnswers(Object raw, boolean allowMarkup) {
         if (!(raw instanceof List<?> list)) {
             return List.of();
         }
@@ -259,7 +272,7 @@ public final class PoolStore {
             if (item == null) {
                 continue;
             }
-            String text = io.github.neareststep.nexusai.ai.PlayerInput.stripSectionSigns(String.valueOf(item)).trim();
+            String text = io.github.neareststep.nexusai.ai.PlayerInput.stripSectionSigns(String.valueOf(item), allowMarkup).trim();
             if (!text.isEmpty()) {
                 answers.add(text);
             }

@@ -46,6 +46,8 @@ class ConfigMigrationTest {
         YamlConfiguration config = new YamlConfiguration();
         config.load(Path.of("src/main/resources/config.yml").toFile());
         assertEquals(ConfigVersions.CONFIG, config.getInt("config-version"));
+        assertFalse(config.getBoolean("sanitize.allow-markup"));
+        assertTrue(Files.readString(Path.of("src/main/resources/config.yml")).contains(ConfigMerger.SANITIZE_COMMENT));
         assertEquals(256, config.getInt("api.max-tokens"));
         assertEquals("openai-compatible", config.getString("providers.openai.type"));
         assertEquals("https://api.openai.com/v1", config.getString("providers.openai.url"));
@@ -472,6 +474,39 @@ class ConfigMigrationTest {
         assertEquals(0, load(Files.readString(kept, StandardCharsets.UTF_8)).getInt("api.max-tokens"));
         assertEquals(null, new PluginConfig(load(Files.readString(kept))).getMaxTokens());
         assertFalse(Files.exists(dir.resolve("kept.yml.bak")));
+    }
+
+    @Test
+    void appendsSanitizeSectionWithoutBumpingConfigVersion() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        int marker = defaults.indexOf("\n" + ConfigMerger.SANITIZE_COMMENT);
+        assertTrue(marker > 0);
+        String original = defaults.substring(0, marker).stripTrailing() + "\n";
+        assertFalse(original.contains("allow-markup"));
+        assertTrue(original.contains("config-version: " + ConfigVersions.CONFIG));
+
+        Path dir = Files.createTempDirectory("nexusai-sanitize");
+        Path file = dir.resolve("config.yml");
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("migrate-sanitize-" + UUID.randomUUID());
+
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.valid());
+        assertTrue(outcome.addedKeys().contains("sanitize.allow-markup"));
+        assertTrue(outcome.backup() != null);
+        assertEquals(original, Files.readString(outcome.backup(), StandardCharsets.UTF_8));
+
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertEquals(1, written.split(java.util.regex.Pattern.quote(ConfigMerger.SANITIZE_COMMENT), -1).length - 1);
+        assertTrue(written.contains("allow-markup: false"));
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(ConfigVersions.CONFIG, yaml.getInt("config-version"));
+        assertFalse(yaml.getBoolean("sanitize.allow-markup"));
+
+        ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(second.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
     }
 
     private static YamlConfiguration load(String yaml) {
