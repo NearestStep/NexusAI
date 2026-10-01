@@ -79,12 +79,14 @@ public final class DialogueProtocol {
 
     public static ParsedCompletion parse(String body) throws Exception {
         JsonNode tree = MAPPER.readTree(body == null ? "" : body);
-        JsonNode message = tree.path("choices").path(0).path("message");
+        JsonNode choice = tree.path("choices").path(0);
+        JsonNode message = choice.path("message");
+        String finishReason = textOrNull(choice.get("finish_reason"));
         if (message.isMissingNode() || message.isNull()) {
-            return new ParsedCompletion(null, List.of());
+            return new ParsedCompletion(null, List.of(), finishReason);
         }
         String content = ContentTexts.read(message.get("content"));
-        return new ParsedCompletion(content, toolNames(message));
+        return new ParsedCompletion(content, toolNames(message), finishReason);
     }
 
     /**
@@ -160,7 +162,15 @@ public final class DialogueProtocol {
     public record MemoryLine(String role, String text) {
     }
 
-    public record ParsedCompletion(String content, List<String> toolNames) {
+    public record ParsedCompletion(String content, List<String> toolNames, String finishReason) {
+    }
+
+    private static String textOrNull(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        String text = node.asText("");
+        return text.isBlank() ? null : text;
     }
 
     public record TokenBudget(Integer maxTokens, Integer maxCompletionTokens, String reasoningEffort) {

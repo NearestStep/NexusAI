@@ -6,8 +6,8 @@ import java.util.Map;
 
 /**
  * One successful chat completion plus the response headers the queue uses for failover.
- * {@code cacheTtl} is set when this reply should not use the normal cache TTL.
- * Null keeps the prompt TTL or the cache default.
+ * {@code cacheTtl} is an optional per-reply TTL. Null keeps the prompt TTL or the cache default.
+ * A reply trimmed because {@code finish_reason} is {@code length} leaves it null.
  */
 public record ChatExchange(String text, Map<String, List<String>> headers, Duration cacheTtl) {
 
