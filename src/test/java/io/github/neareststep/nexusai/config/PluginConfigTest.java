@@ -400,6 +400,14 @@ class PluginConfigTest {
         return yaml;
     }
 
+    @Test
+    void allowMarkupDefaultsOffAndCanBeEnabled() {
+        assertFalse(new PluginConfig(baseYaml()).allowMarkup());
+        YamlConfiguration enabled = baseYaml();
+        enabled.set("sanitize.allow-markup", true);
+        assertTrue(new PluginConfig(enabled).allowMarkup());
+    }
+
     private static void withClearedApiKey(Runnable body) {
         Function<String, String> previous = PluginConfig.environment;
         PluginConfig.environment = name -> null;

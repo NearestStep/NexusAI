@@ -21,6 +21,13 @@ import java.util.regex.Pattern;
  */
 public final class ConfigMerger {
 
+    /**
+     * Written above a newly appended {@code sanitize:} section. The same sentence is in the
+     * bundled {@code config.yml}.
+     */
+    static final String SANITIZE_COMMENT =
+            "# Enable only if you are sure that no plugin consuming NexusAI placeholders parses MiniMessage or hex colours. Legacy § and & codes are always removed.";
+
     private static final Pattern KEY_LINE = Pattern.compile("^(\\s*)([^\\s:#][^:#]*):(.*)$");
 
     private ConfigMerger() {
@@ -112,6 +119,10 @@ public final class ConfigMerger {
         if (parentSite == null && !lines.isEmpty() && !lines.get(lines.size() - 1).isBlank()) {
             lines.add("");
             at = lines.size();
+        }
+        if (parent.isEmpty() && "sanitize".equals(name)) {
+            lines.add(at, SANITIZE_COMMENT);
+            at++;
         }
         lines.add(at, " ".repeat(indent) + name + ":");
     }

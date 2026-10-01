@@ -1,5 +1,8 @@
 package io.github.neareststep.nexusai.i18n;
 
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.TextComponent;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.ChatColor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -12,11 +15,14 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.logging.Level;
 
 /**
@@ -25,6 +31,12 @@ import java.util.logging.Level;
 public final class MessageService {
 
     private static final String DEFAULT_LOCALE = "en";
+    /**
+     * Model replies. Inserted with {@link Component#text(String)} after the template is coloured,
+     * so {@code &}, {@code §}, hex, and MiniMessage in the reply are not parsed.
+     */
+    private static final Set<String> PLAIN_PLACEHOLDERS = Set.of("reply", "answer");
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
     private final JavaPlugin plugin;
     private String locale = DEFAULT_LOCALE;
@@ -85,16 +97,39 @@ public final class MessageService {
         // Colour codes belong to the template and the prefix. Substituted values, including a
         // model reply, are inserted afterwards so their '&' text is not turned into formatting.
         String message = colorize(raw(key));
-        String prefix = colorize(raw("prefix"));
-        Map<String, String> values = new LinkedHashMap<>();
-        values.put("prefix", prefix);
-        if (placeholders != null) {
-            values.putAll(placeholders);
-        }
+        Map<String, String> values = placeholderValues(placeholders);
         for (Map.Entry<String, String> entry : values.entrySet()) {
             message = message.replace('{' + entry.getKey() + '}', entry.getValue() == null ? "" : entry.getValue());
         }
         return message;
+    }
+
+    /**
+     * Same substitution as {@link #format(String, Map)}, but {@code {reply}} and {@code {answer}}
+     * are {@link Component#text(String)} nodes. The template is legacy-deserialized first, so its
+     * {@code &} codes become colours, and the model reply is not passed through
+     * {@link ChatColor#translateAlternateColorCodes(char, String)} or MiniMessage.
+     */
+    public Component component(String key, Map<String, String> placeholders) {
+        String template = colorize(raw(key));
+        Map<String, String> values = placeholderValues(placeholders);
+        Map<Character, String> plain = new LinkedHashMap<>();
+        char mark = '\uE000';
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            String needle = '{' + entry.getKey() + '}';
+            if (!template.contains(needle)) {
+                continue;
+            }
+            String value = entry.getValue() == null ? "" : entry.getValue();
+            if (PLAIN_PLACEHOLDERS.contains(entry.getKey())) {
+                plain.put(mark, value);
+                template = template.replace(needle, String.valueOf(mark));
+                mark++;
+            } else {
+                template = template.replace(needle, value);
+            }
+        }
+        return replacePlain(LEGACY.deserialize(template), plain);
     }
 
     public String format(String key) {
@@ -107,7 +142,61 @@ public final class MessageService {
 
     public void send(CommandSender sender, String key, Map<String, String> placeholders) {
         Objects.requireNonNull(sender, "sender");
-        sender.sendMessage(format(key, placeholders));
+        sender.sendMessage(component(key, placeholders));
+    }
+
+    private Map<String, String> placeholderValues(Map<String, String> placeholders) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("prefix", colorize(raw("prefix")));
+        if (placeholders != null) {
+            values.putAll(placeholders);
+        }
+        return values;
+    }
+
+    private static Component replacePlain(Component component, Map<Character, String> plain) {
+        if (plain.isEmpty()) {
+            return component;
+        }
+        List<Component> children = new ArrayList<>();
+        for (Component child : component.children()) {
+            children.add(replacePlain(child, plain));
+        }
+        if (!(component instanceof TextComponent text) || !containsMark(text.content(), plain)) {
+            return component.children(children);
+        }
+        Component built = Component.empty();
+        StringBuilder literal = new StringBuilder();
+        String content = text.content();
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            String replacement = plain.get(c);
+            if (replacement == null) {
+                literal.append(c);
+                continue;
+            }
+            if (!literal.isEmpty()) {
+                built = built.append(Component.text(literal.toString()).style(text.style()));
+                literal.setLength(0);
+            }
+            built = built.append(Component.text(replacement).style(text.style()));
+        }
+        if (!literal.isEmpty()) {
+            built = built.append(Component.text(literal.toString()).style(text.style()));
+        }
+        for (Component child : children) {
+            built = built.append(child);
+        }
+        return built;
+    }
+
+    private static boolean containsMark(String content, Map<Character, String> plain) {
+        for (int i = 0; i < content.length(); i++) {
+            if (plain.containsKey(content.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static String colorize(String input) {
