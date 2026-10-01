@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.0.1
+## 1.0.1 (2026-10-01)
 
-The jar version on this branch is `1.0.1-SNAPSHOT`. `config.yml` stays on schema version 2. A missing `sanitize.allow-markup` is appended as `false`, with the usual `<file>.bak` (or `<file>.bak.<timestamp>` when that backup already exists). The comment above the new section says to enable it only when no plugin that reads NexusAI placeholders parses MiniMessage or hex colours.
+One jar, `NexusAI-1.0.1.jar`; replace `NexusAI-1.0.0.jar` with it. `config.yml` stays on schema version 2. A missing `sanitize.allow-markup` is appended as `false`, with the usual `<file>.bak` (or `<file>.bak.<timestamp>` when that backup already exists). The comment above the new section says to enable it only when no plugin that reads NexusAI placeholders parses MiniMessage or hex colours.
 
 ### Security
 
