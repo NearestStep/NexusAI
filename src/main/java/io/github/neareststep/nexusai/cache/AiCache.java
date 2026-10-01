@@ -110,6 +110,17 @@ public final class AiCache {
         return cache.estimatedSize();
     }
 
+    /**
+     * TTL stored for {@code key}, or null when the key is absent.
+     * A length-truncated reply uses a shorter value than the cache default.
+     */
+    public Duration entryTtl(String key) {
+        if (key == null || cache.getIfPresent(key) == null) {
+            return null;
+        }
+        return Duration.ofNanos(ttlNanosFor(key));
+    }
+
     private long ttlNanosFor(String key) {
         Long custom = ttlNanosByKey.get(key);
         return custom == null ? defaultTtlNanos : custom;

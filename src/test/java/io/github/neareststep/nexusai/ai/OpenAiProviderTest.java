@@ -299,6 +299,32 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void lengthFinishReasonTrimsToASentenceAndMarksTheShortCacheTtl() throws Exception {
+        String cut = "The harbor is quiet today. Ships wait at the dock. Then the tide suddenly cu";
+        ChatExchange exchange = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                + mapper.writeValueAsString(cut) + "}}]}");
+        assertEquals("The harbor is quiet today. Ships wait at the dock.", exchange.text());
+        assertEquals(LengthCutoff.CACHE_TTL, exchange.cacheTtl());
+
+        String coloured = "Hello &cworld. The traveler walked toward the §cmount";
+        ChatExchange stripped = exchangeOf("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":"
+                + mapper.writeValueAsString(coloured) + "}}]}");
+        assertEquals("Hello world. The traveler walked toward the…", stripped.text());
+        assertFalse(stripped.text().contains("&"));
+        assertFalse(stripped.text().contains("§"));
+
+        ChatExchange stopped = exchangeOf(
+                "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"The harbor is quiet.\"}}]}");
+        assertEquals("The harbor is quiet.", stopped.text());
+        assertEquals(null, stopped.cacheTtl());
+
+        AiRequestException empty = assertThrows(AiRequestException.class, () -> exchangeOf(
+                "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"&c§l\"}}]}"));
+        assertEquals(AiErrorKind.EMPTY_REPLY, empty.kind());
+        assertEquals(PlayerInput.EMPTY_REPLY, empty.getMessage());
+    }
+
+    @Test
     void blankContentIsAnErrorAndReasoningTextIsUsed() throws Exception {
         assertKind(200, "{\"choices\":[{\"message\":{\"content\":\"\"}}]}", AiErrorKind.OTHER);
         assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"The visible reasoning text.\"}}]}",
@@ -341,6 +367,30 @@ class OpenAiProviderTest {
         assertKind(402, "{\"error\":{\"message\":\"insufficient balance\"}}", AiErrorKind.QUOTA);
         assertKind(401, "{\"error\":{\"message\":\"invalid api key\"}}", AiErrorKind.BAD_KEY);
         assertKind(404, "{\"error\":{\"code\":\"model_not_found\",\"message\":\"no such model\"}}", AiErrorKind.UNKNOWN_MODEL);
+    }
+
+    private ChatExchange exchangeOf(String responseBody) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("gpt-4o-mini", "", -1, 256, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
+            yaml.set("api.base-url", baseUrl);
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-length"));
+            return provider.exchange("ping", GenerationOverrides.none(), baseUrl, "test-key", "gpt-4o-mini");
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
     }
 
     private void assertAnswer(int status, String responseBody, String expected) throws Exception {

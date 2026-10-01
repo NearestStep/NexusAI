@@ -10,12 +10,14 @@
 #
 # config-version is the schema. NexusAI migrates older files (including 0.6.0 files
 # that have no version) and writes <file>.bak before it changes anything.
+# Version 2 replaces a leftover api.max-tokens of 0 (the 0.6.0 and 0.7.0 default)
+# with 256 once. After that, a 0 you set is kept. The log says you can set it back.
 # Appending missing default keys does the same, but one startup writes only one backup
 # of config.yml even when migration and missing keys both change it.
 # When that backup already exists, the copy is config.yml.bak.<timestamp>.
 # The backup path is written to the server log.
 
-config-version: 1
+config-version: 2
 
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
@@ -36,6 +38,8 @@ api:
   temperature: -1
   # 0 or a negative value (for example -1) does not send max_tokens.
   # 256 fits a short placeholder or talk reply. A prompt or pool entry may set a higher max-tokens.
+  # A config-version 1 file that still has the old default 0 is migrated to 256 once.
+  # Groq in the model queue logs one warning when this value is not positive.
   # Reasoning models are raised to at least 2048. o-series models receive max_completion_tokens instead.
   max-tokens: 256
   # Strip markdown and clamp the answer (0 = no limit). Useful for holograms and menus.
