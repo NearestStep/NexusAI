@@ -142,7 +142,12 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             if (config.canSendChatRequests()) {
                 UUID playerId = player != null ? player.getUniqueId() : null;
                 CompletionSupport.onComplete(
-                        httpClient.requestAsync(resolved.text(), playerId, prepared.overrides(), resolved.ttl(), prepared.cacheToken()),
+                        httpClient.requestAsync(
+                                resolved.text(),
+                                playerId,
+                                prepared.overrides().withNoticeId(noticeId(resolved, raw)),
+                                resolved.ttl(),
+                                prepared.cacheToken()),
                         plugin.getLogger(),
                         "Background AI generation failed",
                         (ignored, error) -> {
@@ -153,6 +158,17 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             }
             return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
         });
+    }
+
+    /**
+     * Named prompts key on their id. A literal placeholder keys on the argument before
+     * {@code {player}} and the other built-ins are filled in.
+     */
+    private static String noticeId(ResolvedPrompt resolved, String raw) {
+        if (resolved.id() != null && !resolved.id().isBlank()) {
+            return resolved.id();
+        }
+        return raw == null ? "" : raw;
     }
 
     private ResolvedPrompt resolve(Player player, String raw) {
