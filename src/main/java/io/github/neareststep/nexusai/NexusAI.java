@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai;
 
 import io.github.neareststep.nexusai.ai.AiDiagnostics;
+import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
@@ -8,18 +9,29 @@ import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
+import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
-import io.github.neareststep.nexusai.config.ConfigMerger;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.limit.RateLimiter;
+import io.github.neareststep.nexusai.moderation.ChatModerationListener;
+import io.github.neareststep.nexusai.moderation.FoliaStaffNotifier;
+import io.github.neareststep.nexusai.moderation.ModerationLog;
+import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.AiPlaceholderExpansion;
+import io.github.neareststep.nexusai.config.ModerationSettings;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.pool.PoolStore;
+import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
+import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.dialogue.DialogueListener;
+import io.github.neareststep.nexusai.dialogue.DialogueService;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
@@ -65,8 +77,14 @@ public final class NexusAI extends JavaPlugin {
     private HttpClient sharedHttpClient;
     private AiPlaceholderExpansion placeholderExpansion;
     private volatile PromptCatalog promptCatalog = PromptCatalog.empty();
+    private volatile KnowledgeBase knowledgeBase = KnowledgeBase.empty();
     private volatile ModelQueue modelQueue;
-    private boolean loggedMissingKey;
+    private DialogueService dialogueService;
+    private volatile OpenAiProvider openAiProvider;
+    private volatile ModerationService moderationService;
+    private ChatModerationListener moderationListener;
+    private UnpooledGenerateLog unpooledGenerateLog;
+    private String loggedCredentialWarning = "";
     private boolean loggedMissingPapi;
 
     @Override
@@ -78,8 +96,9 @@ public final class NexusAI extends JavaPlugin {
         if (!new File(getDataFolder(), "prompts.yml").isFile()) {
             saveResource("prompts.yml", false);
         }
-        migrateConfigs();
-        if (!mergeMissingConfig()) {
+        prepareDataFolders();
+        this.unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
+        if (!prepareConfigFile()) {
             getLogger().warning("config.yml has a syntax error. The file was left unchanged, "
                     + "and AI requests stay off until a valid /nai reload.");
             this.pluginConfig = heldDefaults();
@@ -88,8 +107,10 @@ public final class NexusAI extends JavaPlugin {
         }
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
+        loadKnowledge();
         loadPrompts();
         logCredentialState();
+        logGroqMaxTokensWarning();
         logMissingEnvVars();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
@@ -105,6 +126,7 @@ public final class NexusAI extends JavaPlugin {
         startRuntimeServices();
         registerPlaceholderExpansion();
         registerCommands();
+        registerModerationListener();
 
         getLogger().info("NexusAI enabled.");
     }
@@ -112,6 +134,11 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onDisable() {
         unregisterPlaceholderExpansion();
+        if (dialogueService != null) {
+            dialogueService.shutdown();
+            NexusAIApi.bind(null);
+            dialogueService = null;
+        }
         stopRuntimeServices(true);
         closeSharedHttpClient();
         shutdownExecutor(scheduler);
@@ -129,20 +156,23 @@ public final class NexusAI extends JavaPlugin {
                     "prompts.yml has a syntax error. The file and the loaded prompts were left unchanged. "
                             + parsed.error());
         }
-        migrateConfigs();
-        if (!mergeMissingConfig()) {
+        if (!prepareConfigFile()) {
             throw new IllegalStateException(
                     "config.yml has a syntax error. The file and the loaded configuration were left unchanged.");
         }
         reloadConfig();
         pluginConfig.reload(getConfig());
+        loadKnowledge();
         applyPrompts(parsed);
         messageService.reload(pluginConfig.getLocale());
+        getUnpooledGenerateLog().reset();
+        LengthTrimNotices.reset();
 
         stopRuntimeServices(true);
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
+        logGroqMaxTokensWarning();
         logMissingEnvVars();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
@@ -159,6 +189,9 @@ public final class NexusAI extends JavaPlugin {
 
         AiProvider provider = createProvider(pluginConfig);
         RequestGate gate = RequestGate.fromConfig(rateLimiter, pluginConfig);
+        // Enable and /nai reload both build this gate. resetBackoff clears per-prompt backoff,
+        // including an empty-reply ladder, so a changed prompt is sent again.
+        gate.resetBackoff();
         AiDiagnostics diagnostics = new AiDiagnostics(
                 getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
@@ -173,16 +206,24 @@ public final class NexusAI extends JavaPlugin {
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
                 (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS),
-                promptCatalog);
+                promptCatalog, knowledgeBase);
         this.prewarmService = new PrewarmService(
-                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger(), promptCatalog);
+                pluginConfig, aiCache, aiHttpClient, scheduler, getLogger(), promptCatalog, knowledgeBase);
 
         poolService.start();
         prewarmService.start();
         prewarmService.scheduleRefresh();
+        if (dialogueService == null) {
+            dialogueService = new DialogueService(this, httpExecutor, scheduler);
+            dialogueService.start();
+            getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
+            NexusAIApi.bind(dialogueService);
+        }
+        startModeration();
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        this.moderationService = null;
         if (modelQueue != null) {
             modelQueue.save();
         }
@@ -245,30 +286,33 @@ public final class NexusAI extends JavaPlugin {
     }
 
     /**
+     * Migrates {@code config.yml} and appends missing default keys.
+     * A single startup writes one backup, even when both steps change the file.
+     *
      * @return {@code false} when {@code config.yml} is not valid YAML and was left untouched
      */
-    private boolean mergeMissingConfig() {
+    private boolean prepareConfigFile() {
         saveDefaultConfig();
         File file = new File(getDataFolder(), "config.yml");
         try (InputStream in = getResource("config.yml")) {
-            if (in == null || !file.isFile()) {
-                return true;
-            }
-            String defaults = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            String existing = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-            ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
-            if (!result.valid()) {
+            String defaults = in == null ? "" : new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file.toPath(), defaults, getLogger());
+            if (!outcome.valid()) {
+                migrateOtherConfigs();
                 return false;
             }
-            if (result.addedKeys().isEmpty()) {
-                return true;
+            if (outcome.backup() != null) {
+                getLogger().info("Backed up config.yml to " + outcome.backup().toAbsolutePath());
             }
-            Files.writeString(file.toPath(), result.yaml(), StandardCharsets.UTF_8);
-            getLogger().info("Added missing config keys: " + String.join(", ", result.addedKeys()));
-            reloadConfig();
+            if (!outcome.addedKeys().isEmpty()) {
+                getLogger().info("Added missing config keys: " + String.join(", ", outcome.addedKeys()));
+                reloadConfig();
+            }
+            migrateOtherConfigs();
             return true;
         } catch (IOException e) {
             getLogger().log(Level.WARNING, "Failed to merge missing config keys", e);
+            migrateOtherConfigs();
             return true;
         }
     }
@@ -294,20 +338,33 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    /**
+     * One warning per startup and per {@code /nai reload}. Not logged per request.
+     */
+    private void logGroqMaxTokensWarning() {
+        if (pluginConfig.requestsHeld()) {
+            return;
+        }
+        String warning = pluginConfig.groqUnlimitedOutputWarning();
+        if (warning != null) {
+            getLogger().warning(warning);
+        }
+    }
+
     private void logCredentialState() {
         if (pluginConfig.requestsHeld()) {
             return;
         }
-        if (!pluginConfig.canSendRequests()) {
-            if (!loggedMissingKey) {
-                getLogger().warning("API key is not set (env NEXUSAI_API_KEY or api.key). "
-                        + "Plugin will load, but AI requests will not be sent.");
-                loggedMissingKey = true;
+        String warning = pluginConfig.credentialWarning();
+        if (warning != null) {
+            if (!warning.equals(loggedCredentialWarning)) {
+                loggedCredentialWarning = warning;
+                getLogger().warning(warning);
             }
             return;
         }
-        loggedMissingKey = false;
-        if (!pluginConfig.hasApiKey()) {
+        loggedCredentialWarning = "";
+        if (!pluginConfig.hasApiKey() && pluginConfig.allowsKeylessRequests()) {
             getLogger().info("No API key set. Requests to this local endpoint omit the Authorization header.");
         }
     }
@@ -318,6 +375,7 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
         OpenAiProvider http = new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        this.openAiProvider = http;
         this.modelQueue = new ModelQueue(
                 config.modelQueue(),
                 config.modelQueueRemainingThreshold(),
@@ -328,8 +386,7 @@ public final class NexusAI extends JavaPlugin {
         return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger());
     }
 
-    private void migrateConfigs() {
-        ConfigMigrator.migrateFile(new File(getDataFolder(), "config.yml").toPath(), ConfigMigrator::migrateConfig, getLogger());
+    private void migrateOtherConfigs() {
         ConfigMigrator.migrateFile(new File(getDataFolder(), "prompts.yml").toPath(), ConfigMigrator::migratePrompts, getLogger());
         ConfigMigrator.migrateFile(new File(getDataFolder(), "pool.yml").toPath(), ConfigMigrator::migratePool, getLogger());
         ConfigMigrator.migrateFile(new File(getDataFolder(), "usage.yml").toPath(), ConfigMigrator::migrateUsage, getLogger());
@@ -437,8 +494,61 @@ public final class NexusAI extends JavaPlugin {
         return promptCatalog;
     }
 
+    public KnowledgeBase getKnowledgeBase() {
+        return knowledgeBase == null ? KnowledgeBase.empty() : knowledgeBase;
+    }
+
+    public UnpooledGenerateLog getUnpooledGenerateLog() {
+        if (unpooledGenerateLog == null) {
+            unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
+        }
+        return unpooledGenerateLog;
+    }
+
     public ModelQueue getModelQueue() {
         return modelQueue;
+    }
+
+    public DialogueService getDialogueService() {
+        return dialogueService;
+    }
+
+    public ModerationService getModerationService() {
+        return moderationService;
+    }
+
+    private void startModeration() {
+        ModerationSettings settings = pluginConfig.moderation();
+        if (settings.enabled() && settings.provider().isEmpty() != settings.model().isEmpty()) {
+            getLogger().warning("moderation.provider and moderation.model must both be set or both be empty. "
+                    + "Using the model queue.");
+        }
+        if (settings.enabled() && settings.pinned() && pluginConfig.provider(settings.provider()) == null) {
+            getLogger().warning("moderation.provider '" + settings.provider()
+                    + "' is not defined. Chat checks will be skipped until it is.");
+        }
+        if (settings.enabled()) {
+            getLogger().info("Chat moderation is enabled. Public chat is delivered immediately; "
+                    + "the check runs afterwards and never punishes or runs commands.");
+        }
+        this.moderationService = new ModerationService(
+                settings,
+                pluginConfig,
+                modelQueue,
+                openAiProvider,
+                httpExecutor,
+                new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger()),
+                new FoliaStaffNotifier(this),
+                getLogger()
+        );
+    }
+
+    private void registerModerationListener() {
+        if (moderationListener != null) {
+            return;
+        }
+        this.moderationListener = new ChatModerationListener(this);
+        getServer().getPluginManager().registerEvents(moderationListener, this);
     }
 
     private void loadPrompts() {
@@ -457,6 +567,17 @@ public final class NexusAI extends JavaPlugin {
         for (String warning : parsed.warnings()) {
             getLogger().warning(warning);
         }
+        for (String id : promptCatalog.ids()) {
+            NamedPrompt prompt = promptCatalog.find(id).orElse(null);
+            if (prompt == null) {
+                continue;
+            }
+            for (String name : prompt.knowledge()) {
+                if (!knowledgeBase.contains(name)) {
+                    getLogger().warning("Prompt '" + id + "' lists unknown knowledge file '" + name + "'.");
+                }
+            }
+        }
         List<String> poolPrompts = new ArrayList<>();
         for (PoolEntry entry : pluginConfig.getPoolEntries()) {
             poolPrompts.add(entry.prompt());
@@ -465,6 +586,40 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning(warning);
         }
         for (String warning : promptCatalog.unknownIdReferences("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void prepareDataFolders() {
+        File knowledge = new File(getDataFolder(), "knowledge");
+        File imports = new File(getDataFolder(), "import");
+        if (!knowledge.isDirectory() && !knowledge.mkdirs()) {
+            getLogger().warning("Could not create the knowledge folder.");
+        }
+        if (!imports.isDirectory() && !imports.mkdirs()) {
+            getLogger().warning("Could not create the import folder.");
+        }
+        try {
+            KnowledgeBase.ensureExample(knowledge.toPath());
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+        }
+    }
+
+    private void loadKnowledge() {
+        List<String> warnings = new ArrayList<>();
+        try {
+            KnowledgeBase.ensureExample(new File(getDataFolder(), "knowledge").toPath());
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+        }
+        this.knowledgeBase = KnowledgeBase.load(
+                new File(getDataFolder(), "knowledge").toPath(),
+                pluginConfig.knowledgeMaxChars(),
+                pluginConfig.knowledgeMaxFileChars(),
+                warnings,
+                getLogger());
+        for (String warning : warnings) {
             getLogger().warning(warning);
         }
     }

@@ -10,8 +10,14 @@
 #
 # config-version is the schema. NexusAI migrates older files (including 0.6.0 files
 # that have no version) and writes <file>.bak before it changes anything.
+# Version 2 replaces a leftover api.max-tokens of 0 (the 0.6.0 and 0.7.0 default)
+# with 256 once. After that, a 0 you set is kept. The log says you can set it back.
+# Appending missing default keys does the same, but one startup writes only one backup
+# of config.yml even when migration and missing keys both change it.
+# When that backup already exists, the copy is config.yml.bak.<timestamp>.
+# The backup path is written to the server log.
 
-config-version: 1
+config-version: 2
 
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
@@ -30,8 +36,12 @@ api:
   system-prompt: ""
   # Negative = do not send temperature. 0 is a real value.
   temperature: -1
-  # 0 = do not send max_tokens. Reasoning models are raised to at least 2048.
-  max-tokens: 0
+  # 0 or a negative value (for example -1) does not send max_tokens.
+  # 256 fits a short placeholder or talk reply. A prompt or pool entry may set a higher max-tokens.
+  # A config-version 1 file that still has the old default 0 is migrated to 256 once.
+  # Groq in the model queue logs one warning when this value is not positive.
+  # Reasoning models are raised to at least 2048. o-series models receive max_completion_tokens instead.
+  max-tokens: 256
   # Strip markdown and clamp the answer (0 = no limit). Useful for holograms and menus.
   strip-markdown: false
   max-answer-chars: 0
@@ -89,6 +99,28 @@ model-queue:
   # - provider: groq
   #   model: llama-3.3-70b-versatile
   #   daily-request-limit: 500
+
+# One last model after every model-queue entry is unavailable, failed, or rejected for this call.
+# Order: model-queue, then fallback-model, then a pooled answer, then fallback text.
+# Both provider and model are required. Leave either blank to disable.
+# A queue row with the same provider and model keeps that row's daily cap and cooldown and is not called twice.
+# A model that is not in the queue has its own cooldown. It is skipped when every queue row of that provider
+# is already at its daily cap. The reply uses the same player-input filter as the queue.
+# /nai status prints this model. A prompt may set its own fallback-model and that overrides this one.
+fallback-model:
+  provider: ""
+  model: ""
+
+# Server lore from plugins/NexusAI/knowledge/*.md and *.txt. No vector search.
+# A prompt lists file names without the extension: knowledge: [lore, rules]
+# The text is added to the system message after the admin system prompt and before the format instruction.
+# When the request contains wrapped player input, the player-input guard stays last.
+# max-chars is the cap for one request. max-file-chars is the cap for one file.
+# Longer text is truncated and one warning is logged. /nai reload reads the folder again.
+# The example file is created once and is never overwritten.
+knowledge:
+  max-chars: 6000
+  max-file-chars: 4000
 
 # format: presets. Prompts inherit formats.default when they omit format.
 formats:
@@ -219,4 +251,71 @@ prewarm:
   #   - "Welcome, {player}"
   #   - "Server tip of the day"
 
+# Opt-in chat moderation. Off by default.
+# Public chat is still delivered immediately. The check runs afterwards and never
+# cancels, delays, punishes, or runs a command. There is no command-on-flag.
+# When this is enabled, the message text is sent to the provider below, or to the
+# model-queue when provider and model are both empty. Use a local model (Ollama
+# or LM Studio) if chat must not leave the machine.
+# Each check spends the selected model-queue entry's daily-request-limit in usage.yml.
+# The player-input guard is appended after system-prompt only when the request
+# contains wrapped player input. Moderation wraps the chat line, so the guard is sent.
+moderation:
+  enabled: false
+  # Both empty = first available model-queue entry. Set both to pin one endpoint.
+  provider: ""
+  model: ""
+  # Server-wide cap. Further messages in that minute are not checked. Minimum 1.
+  max-checks-per-minute: 30
+  # Seconds before the same player is checked again. 0 = no cooldown.
+  player-cooldown-seconds: 15
+  # Trimmed messages shorter than this are ignored.
+  min-length: 8
+  system-prompt: |
+    Classify the Minecraft chat message in the user turn.
+    Reply with one JSON object and no other text:
+    {"flagged":false,"category":"none","reason":""}
+    Set flagged to true only for toxicity, insult, veiled insult, harassment, or spam.
+    category must be one of: toxicity, insult, veiled insult, harassment, spam, none.
+    reason is one short sentence when flagged, and empty otherwise.
+  # 0 is sent. Negative = omit temperature.
+  temperature: 0
+  # 0 or a negative value omits max_tokens. A positive value is sent for the check only.
+  max-tokens: 80
+
 fallback: "..."
+
+# NPC dialogues (/nai talk). Separate from placeholder limits.
+# /nai talk needs nexusai.talk. That permission defaults to op; grant it to players explicitly.
+# A reply still spends the model queue, key rotation, and the daily request caps.
+# Dialogue lines are not stored in the answer pool. A generated greeting may be cached.
+dialogue:
+  enabled: true
+  # Player and assistant lines kept for the model. 6 to 8 is the intended range.
+  memory-turns: 8
+  # Write plugins/NexusAI/dialogue-memory.yml. false keeps memory only until restart.
+  persist-memory: false
+  memory-max-chars: 8000
+  # Drop a saved transcript after this many hours without a new line. 0 keeps it.
+  memory-expiry-hours: 168
+  # End a session after this many seconds without a player line. 0 disables the timer.
+  session-timeout-seconds: 120
+  # End a session when the player moves farther than this many blocks from where it started. 0 disables it.
+  leave-radius: 8
+  max-replies-per-session: 12
+  message-cooldown-millis: 3000
+  # 0 means no daily cap. A session counts as one conversation. Each one-shot line counts as one.
+  conversations-per-player-per-day: 20
+  max-message-length: 200
+  # Cache a generated greeting. A greeting written under dialogue.greeting is not a model call.
+  # The cache time is cache.ttl. Later lines in the same conversation are never cached.
+  cache-greeting: true
+
+# Character actions. The model may pick a name through OpenAI tools. It cannot change the command.
+# Placeholders never run these. A provider that rejects tools gets one retry with actions off.
+actions:
+  enabled: true
+  # Append plugins/NexusAI/actions.log. The server log always gets one line too.
+  log: true
+  # How many actions from one model reply may run. The rest are refused and the character is told.
+  max-per-reply: 1

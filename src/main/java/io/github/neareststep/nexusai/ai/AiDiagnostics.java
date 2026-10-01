@@ -14,7 +14,9 @@ public final class AiDiagnostics {
     private final Logger logger;
     private final long cooldownMillis;
     private final LongSupplier clock;
+    private final Object logGate = new Object();
     private final ConcurrentHashMap<AiErrorKind, Long> lastLoggedAt = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<AiErrorKind, String> lastLoggedText = new ConcurrentHashMap<>();
     private volatile String lastError;
 
     public AiDiagnostics(Logger logger, Duration cooldown) {
@@ -39,14 +41,22 @@ public final class AiDiagnostics {
             return;
         }
         String message = format(kind, detail, paused);
-        lastError = message;
-        long now = clock.getAsLong();
-        Long previous = lastLoggedAt.get(kind);
-        if (previous != null && now - previous < cooldownMillis) {
-            return;
+        // One pool refill finishes on several threads at once. The cooldown and the
+        // logged text have to be decided together, or each thread writes the same line.
+        synchronized (logGate) {
+            lastError = message;
+            long now = clock.getAsLong();
+            Long previous = lastLoggedAt.get(kind);
+            boolean cooled = previous != null && now - previous < cooldownMillis;
+            // An empty-reply line names a retry time. Write it again when that time changes
+            // so the warning matches Last error. Other kinds keep the first line for the cooldown.
+            if (cooled && (kind != AiErrorKind.EMPTY_REPLY || message.equals(lastLoggedText.get(kind)))) {
+                return;
+            }
+            lastLoggedAt.put(kind, now);
+            lastLoggedText.put(kind, message);
+            logger.warning(message);
         }
-        lastLoggedAt.put(kind, now);
-        logger.warning(message);
     }
 
     public String lastError() {
@@ -62,6 +72,7 @@ public final class AiDiagnostics {
             case TIMEOUT -> "AI provider request timed out.";
             case LOCAL_LIMIT -> "Local rate limit reached.";
             case REJECTED -> "AI answer rejected.";
+            case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case OTHER -> "AI provider request failed.";
         };
         if (paused && kind.pausesProvider()) {

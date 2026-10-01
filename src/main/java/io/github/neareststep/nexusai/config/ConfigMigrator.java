@@ -15,10 +15,14 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Ordered config migrations. A missing {@code config-version} is version 0 (NexusAI 0.6.0).
- * User values are kept. A backup is written before the first byte changes.
+ * config.yml version 1 is migrated once to {@link ConfigVersions#CONFIG}: the old default
+ * {@code api.max-tokens: 0} becomes 256. Any other explicit value is kept. A backup is written
+ * before the first byte changes.
  */
 public final class ConfigMigrator {
 
@@ -37,19 +41,19 @@ public final class ConfigMigrator {
     }
 
     public static Outcome migrateConfig(String yaml) {
-        return migrate(yaml, ConfigMigrator::stepConfig);
+        return migrate(yaml, ConfigMigrator::stepConfig, ConfigVersions.CONFIG);
     }
 
     public static Outcome migratePrompts(String yaml) {
-        return migrate(yaml, ConfigMigrator::stepPrompts);
+        return migrate(yaml, ConfigMigrator::stepPrompts, ConfigVersions.CURRENT);
     }
 
     public static Outcome migratePool(String yaml) {
-        return migrate(yaml, ConfigMigrator::stepPool);
+        return migrate(yaml, ConfigMigrator::stepPool, ConfigVersions.CURRENT);
     }
 
     public static Outcome migrateUsage(String yaml) {
-        return migrate(yaml, ConfigMigrator::stepUsage);
+        return migrate(yaml, ConfigMigrator::stepUsage, ConfigVersions.CURRENT);
     }
 
     /**
@@ -66,10 +70,9 @@ public final class ConfigMigrator {
             if (!outcome.changed()) {
                 return List.of();
             }
-            Path backup = FileBackup.backup(file);
-            Files.writeString(file, outcome.yaml(), StandardCharsets.UTF_8);
+            Path backup = FileBackup.replace(file, outcome.yaml());
             String note = file.getFileName() + " migrated from version " + outcome.fromVersion()
-                    + " to " + outcome.toVersion() + " (backup " + backup.getFileName() + "): "
+                    + " to " + outcome.toVersion() + " (backup " + backup.toAbsolutePath() + "): "
                     + String.join("; ", outcome.changes());
             log.info(note);
             return List.copyOf(outcome.changes());
@@ -79,7 +82,7 @@ public final class ConfigMigrator {
         }
     }
 
-    private static Outcome migrate(String yaml, Function<String, Step> step) {
+    private static Outcome migrate(String yaml, Function<String, Step> step, int targetVersion) {
         String current = yaml == null ? "" : yaml;
         if (!parses(current)) {
             return Outcome.same(current, 0);
@@ -87,7 +90,7 @@ public final class ConfigMigrator {
         int version = readVersion(current);
         int from = version;
         List<String> changes = new ArrayList<>();
-        while (version < ConfigVersions.CURRENT) {
+        while (version < targetVersion) {
             Step applied = step.apply(current);
             if (!applied.changed()) {
                 break;
@@ -102,11 +105,25 @@ public final class ConfigMigrator {
         return new Outcome(current, from, version, changes, true);
     }
 
+    private static final Pattern MAX_TOKENS_LINE = Pattern.compile(
+            "^(\\s*max-tokens\\s*:\\s*)(\"[^\"]*\"|'[^']*'|[^\\s#]+)(\\s*(?:#.*)?)\\s*$");
+
     private static Step stepConfig(String yaml) {
         YamlConfiguration doc = load(yaml);
         if (doc == null) {
             return Step.unchanged(yaml);
         }
+        int version = readVersion(yaml);
+        if (version >= ConfigVersions.CONFIG) {
+            return Step.unchanged(yaml);
+        }
+        if (version >= 1) {
+            return stepConfigToV2(yaml);
+        }
+        return stepConfigToV1(yaml, doc);
+    }
+
+    private static Step stepConfigToV1(String yaml, YamlConfiguration doc) {
         List<String> changes = new ArrayList<>();
         String provider = text(doc, "api.provider", "openai").toLowerCase(Locale.ROOT);
         if (provider.isBlank()) {
@@ -139,10 +156,10 @@ public final class ConfigMigrator {
         }
         String withVersion = yaml;
         if (!doc.contains("config-version")) {
-            withVersion = insertVersionLine(yaml);
+            withVersion = insertVersionLine(yaml, 1);
             changes.add("set config-version to 1");
-        } else if (doc.getInt("config-version", 0) < ConfigVersions.CURRENT) {
-            withVersion = replaceVersion(yaml, ConfigVersions.CURRENT);
+        } else if (doc.getInt("config-version", 0) < 1) {
+            withVersion = replaceVersion(yaml, 1);
             changes.add("set config-version to 1");
         }
         if (changes.isEmpty()) {
@@ -150,6 +167,80 @@ public final class ConfigMigrator {
         }
         String merged = appendBlock(withVersion, addition);
         return new Step(merged, changes, true);
+    }
+
+    /**
+     * Version 1 to 2. {@code api.max-tokens: 0} was the default shipped in 0.6.0 and 0.7.0,
+     * so it is replaced once. Any other explicit value, including negative numbers, is kept.
+     * A missing key is left for the missing-key append, which writes 256.
+     */
+    private static Step stepConfigToV2(String yaml) {
+        List<String> changes = new ArrayList<>();
+        String newline = yaml != null && yaml.contains("\r\n") ? "\r\n" : "\n";
+        String normalized = yaml == null ? "" : yaml.replace("\r\n", "\n").replace("\r", "\n");
+        String[] lines = normalized.split("\n", -1);
+        boolean inApi = false;
+        boolean replaced = false;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line.stripLeading();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            int indent = line.length() - trimmed.length();
+            if (indent == 0) {
+                inApi = isApiKey(trimmed);
+                continue;
+            }
+            if (!inApi) {
+                continue;
+            }
+            Matcher matcher = MAX_TOKENS_LINE.matcher(line);
+            if (!matcher.matches()) {
+                continue;
+            }
+            if (isZeroToken(matcher.group(2))) {
+                lines[i] = matcher.group(1) + PluginConfig.DEFAULT_MAX_TOKENS + matcher.group(3);
+                replaced = true;
+            }
+            break;
+        }
+        for (int i = 0; i < lines.length; i++) {
+            String trimmed = lines[i].stripLeading();
+            if (trimmed.startsWith("config-version:") && !lines[i].startsWith(" ") && !lines[i].startsWith("\t")) {
+                lines[i] = "config-version: " + ConfigVersions.CONFIG;
+                break;
+            }
+        }
+        if (replaced) {
+            changes.add("replaced api.max-tokens 0 with " + PluginConfig.DEFAULT_MAX_TOKENS
+                    + " because 0 was the default shipped in 0.6.0 and 0.7.0, not a value you chose. "
+                    + "Set api.max-tokens back to 0 if you want the field omitted");
+        } else {
+            changes.add("set config-version to " + ConfigVersions.CONFIG);
+        }
+        return new Step(String.join(newline, lines), changes, true);
+    }
+
+    private static boolean isApiKey(String trimmed) {
+        return trimmed.startsWith("api:")
+                && (trimmed.length() == 4
+                || Character.isWhitespace(trimmed.charAt(4))
+                || trimmed.charAt(4) == '#');
+    }
+
+    private static boolean isZeroToken(String token) {
+        if (token == null) {
+            return false;
+        }
+        String value = token.trim();
+        if (value.length() >= 2) {
+            char quote = value.charAt(0);
+            if ((quote == '"' || quote == '\'') && value.charAt(value.length() - 1) == quote) {
+                value = value.substring(1, value.length() - 1).trim();
+            }
+        }
+        return value.equals("0") || value.equals("+0") || value.equals("-0");
     }
 
     private static Step stepPrompts(String yaml) {
@@ -258,6 +349,10 @@ public final class ConfigMigrator {
     }
 
     private static String insertVersionLine(String yaml) {
+        return insertVersionLine(yaml, ConfigVersions.CURRENT);
+    }
+
+    private static String insertVersionLine(String yaml, int version) {
         String newline = yaml != null && yaml.contains("\r\n") ? "\r\n" : "\n";
         String normalized = yaml == null ? "" : yaml.replace("\r\n", "\n").replace("\r", "\n");
         String[] lines = normalized.split("\n", -1);
@@ -273,12 +368,12 @@ public final class ConfigMigrator {
         List<String> rewritten = new ArrayList<>();
         for (int i = 0; i < lines.length; i++) {
             if (i == insertAt) {
-                rewritten.add("config-version: " + ConfigVersions.CURRENT);
+                rewritten.add("config-version: " + version);
             }
             rewritten.add(lines[i]);
         }
         if (insertAt >= lines.length) {
-            rewritten.add("config-version: " + ConfigVersions.CURRENT);
+            rewritten.add("config-version: " + version);
         }
         String joined = String.join(newline, rewritten);
         if (yaml != null && (yaml.endsWith("\n") || yaml.endsWith("\r\n") || yaml.isEmpty()) && !joined.endsWith(newline)) {

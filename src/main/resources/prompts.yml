@@ -18,7 +18,7 @@ config-version: 1
 #
 # These tokens work without PlaceholderAPI. They are read on the player's region thread.
 # A vars: entry of the same name wins: {player} {world} {biome} {time} {weather}
-# {time} looks like "day 14:00" or "night 00:00". {weather} is clear, rain, or thunder.
+# {time} is morning, day, evening, or night. {weather} is clear, rain, or thunder.
 #
 # format: simple, chat, gui, name, hologram, actionbar, or bossbar.
 # Omit it to use formats.default from config.yml. The format is part of the cache key
@@ -30,7 +30,14 @@ config-version: 1
 #   max-prompt-length   cap on the resolved text. Omit it and limits.max-prompt-length
 #                       does not apply to text stored in this file.
 #   model, system-prompt, temperature, max-tokens
-#                       same meaning as the api section / a pool entry override
+#                       same meaning as the api section / a pool entry override.
+#                       0 or a negative max-tokens omits the field. A higher value is sent
+#                       for that prompt, including /nai talk.
+#   fallback-model      provider and model tried once after the model queue fails for this call.
+#                       Omit it to use fallback-model from config.yml.
+#   knowledge           file names from plugins/NexusAI/knowledge without .md or .txt
+#
+# Answer order: model-queue, then fallback-model, then a pooled answer, then fallback text.
 #
 # pool.entries[].prompt and prewarm.prompts may use an id.
 # /nai reload reads this file again. /nai prompts lists the ids. /nai test <id> sends that prompt.
@@ -53,3 +60,24 @@ config-version: 1
 # sign_name:
 #   prompt: "A short shop name for {player}"
 #   format: name
+#
+# Character for /nai talk. dialogue: and actions: are optional.
+# The prompt text is the character. Player chat is wrapped as player input and is not the prompt.
+# Actions are fixed commands. The model only chooses the name. {player} and {uuid} are filled here.
+# as: player (default) or console. Console runs as the server, so keep the command fixed and limited.
+# blacksmith:
+#   prompt: |
+#     You are Bram, a blacksmith. Answer in one or two short sentences.
+#   format: chat
+#   dialogue:
+#     greeting: "Need something forged?"
+#     leave-radius: 6
+#     max-replies: 8
+#   actions:
+#     - name: give_iron
+#       description: Give the player one iron ingot.
+#       command: "give {player} iron_ingot 1"
+#       as: console
+#       cooldown-seconds: 3600
+#       daily-limit: 1
+#       permission: nexusai.action.give_iron

@@ -27,6 +27,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RoutingProviderTest {
 
     @Test
+    void explicitCacheTtlSurvivesTheQueue() {
+        PluginConfig config = config();
+        ModelQueue queue = new ModelQueue(
+                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
+                0,
+                60_000L,
+                300_000L,
+                null,
+                () -> 10_000L,
+                LocalDate::now,
+                ZoneId.of("UTC"),
+                Logger.getLogger("route-ttl"));
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) ->
+                new ChatExchange("The harbor is quiet.", Map.of(), java.time.Duration.ofSeconds(45));
+        RoutingProvider provider = new RoutingProvider(
+                config, queue, http, Executors.newSingleThreadExecutor(), Logger.getLogger("route-ttl"), () -> 10_000L);
+        ModelAnswer answer = provider.answer("ping", GenerationOverrides.none(), false).join();
+        assertEquals("The harbor is quiet.", answer.text());
+        assertEquals(java.time.Duration.ofSeconds(45), answer.cacheTtl());
+
+        ChatCaller trimmed = (prompt, overrides, baseUrl, apiKey, model) ->
+                new ChatExchange("The harbor is quiet.", Map.of());
+        RoutingProvider plain = new RoutingProvider(
+                config, queue, trimmed, Executors.newSingleThreadExecutor(), Logger.getLogger("route-ttl-plain"), () -> 10_000L);
+        ModelAnswer normal = plain.answer("ping", GenerationOverrides.none(), false).join();
+        assertEquals(null, normal.cacheTtl());
+    }
+
+    @Test
     void rotatesKeysAndSkips401ThenFailsOverOn429() throws Exception {
         if (System.getenv("NEXUSAI_API_KEY") != null && !System.getenv("NEXUSAI_API_KEY").isBlank()) {
             return;
@@ -141,6 +170,29 @@ class RoutingProviderTest {
         assertEquals(List.of("gpt-4o-mini", "gpt-4o-mini", "llama"), models);
         assertTrue(harness.queue().status(5_000L).getFirst().state().startsWith("COOLDOWN"));
         assertEquals(3, calls.get());
+    }
+
+    @Test
+    void emptyReplyStopsAtTheFirstModelWithoutCooldown() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(8_000L);
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            throw new AiRequestException(AiErrorKind.EMPTY_REPLY, 200, PlayerInput.EMPTY_REPLY, null);
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                clock,
+                http);
+        AiRequestException error = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.EMPTY_REPLY, error.kind());
+        assertEquals(PlayerInput.EMPTY_REPLY, error.getMessage());
+        assertFalse(error.getMessage().contains("missing choices"));
+        assertEquals(1, calls.get());
+        for (ModelQueue.Status row : harness.queue().status(clock.get())) {
+            assertEquals(0, row.rejected());
+            assertFalse(row.state().startsWith("COOLDOWN"));
+        }
     }
 
     @Test

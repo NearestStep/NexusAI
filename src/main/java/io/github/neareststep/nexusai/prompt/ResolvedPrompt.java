@@ -1,10 +1,12 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.pool.PoolKeys;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -21,6 +23,7 @@ public final class ResolvedPrompt {
     private final Duration ttl;
     private final GenerationOverrides overrides;
     private final String formatId;
+    private final List<String> knowledge;
     private final boolean usable;
 
     private ResolvedPrompt(
@@ -32,6 +35,7 @@ public final class ResolvedPrompt {
             Duration ttl,
             GenerationOverrides overrides,
             String formatId,
+            List<String> knowledge,
             boolean usable
     ) {
         this.named = named;
@@ -42,6 +46,7 @@ public final class ResolvedPrompt {
         this.ttl = ttl;
         this.overrides = overrides;
         this.formatId = formatId;
+        this.knowledge = knowledge == null ? List.of() : List.copyOf(knowledge);
         this.usable = usable;
     }
 
@@ -57,8 +62,9 @@ public final class ResolvedPrompt {
                 config.getFallback(),
                 config.getModel(),
                 null,
-                GenerationOverrides.none().withFormat(format),
+                withFallback(GenerationOverrides.none().withFormat(format), null, config),
                 format,
+                List.of(),
                 usable
         );
     }
@@ -71,17 +77,31 @@ public final class ResolvedPrompt {
         Integer max = prompt.maxPromptLength();
         boolean usable = !body.isBlank() && (max == null || body.length() <= max);
         String format = prompt.format() == null ? config.defaultFormatId() : config.normalizeFormat(prompt.format());
+        GenerationOverrides overrides = withFallback(prompt.overrides().withFormat(format), prompt.fallbackModel(), config);
         return new ResolvedPrompt(
                 true,
                 prompt.id(),
                 body,
                 fallback,
-                prompt.overrides().model(config.getModel()),
+                overrides.model(config.getModel()),
                 prompt.ttl(),
-                prompt.overrides().withFormat(format),
+                overrides,
                 format,
+                prompt.knowledge(),
                 usable
         );
+    }
+
+    private static GenerationOverrides withFallback(GenerationOverrides overrides, FallbackModel promptModel, PluginConfig config) {
+        GenerationOverrides base = overrides == null ? GenerationOverrides.none() : overrides;
+        if (base.fallbackModel() != null) {
+            return base;
+        }
+        FallbackModel chosen = promptModel != null && promptModel.configured() ? promptModel : config.fallbackModel();
+        if (chosen == null || !chosen.configured()) {
+            return base;
+        }
+        return base.withFallbackModel(chosen.provider(), chosen.model());
     }
 
     public boolean named() {
@@ -117,6 +137,10 @@ public final class ResolvedPrompt {
 
     public String formatId() {
         return formatId;
+    }
+
+    public List<String> knowledge() {
+        return knowledge;
     }
 
     public String poolKey() {

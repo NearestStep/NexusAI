@@ -1,8 +1,11 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.dialogue.CharacterAction;
+import io.github.neareststep.nexusai.dialogue.DialogueProfile;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -31,8 +34,13 @@ public final class NamedPrompt {
     private final Integer maxPromptLength;
     private final GenerationOverrides overrides;
     private final String format;
+    private final List<String> knowledge;
+    private final FallbackModel fallbackModel;
     private final boolean playerDependent;
     private final Pattern resolvedPattern;
+
+    private final DialogueProfile dialogue;
+    private final List<CharacterAction> actions;
 
     public NamedPrompt(
             String id,
@@ -56,6 +64,24 @@ public final class NamedPrompt {
             GenerationOverrides overrides,
             String format
     ) {
+        this(id, template, vars, ttl, fallback, maxPromptLength, overrides, format,
+                List.of(), null, DialogueProfile.absent(), List.of());
+    }
+
+    public NamedPrompt(
+            String id,
+            String template,
+            Map<String, String> vars,
+            Duration ttl,
+            String fallback,
+            Integer maxPromptLength,
+            GenerationOverrides overrides,
+            String format,
+            List<String> knowledge,
+            FallbackModel fallbackModel,
+            DialogueProfile dialogue,
+            List<CharacterAction> actions
+    ) {
         this.id = Objects.requireNonNull(id, "id");
         this.template = Objects.requireNonNull(template, "template");
         this.vars = vars == null || vars.isEmpty()
@@ -66,6 +92,10 @@ public final class NamedPrompt {
         this.maxPromptLength = maxPromptLength;
         this.overrides = overrides == null ? GenerationOverrides.none() : overrides;
         this.format = format == null || format.isBlank() ? null : format;
+        this.knowledge = knowledge == null || knowledge.isEmpty() ? List.of() : List.copyOf(knowledge);
+        this.fallbackModel = fallbackModel != null && fallbackModel.configured() ? fallbackModel : null;
+        this.dialogue = dialogue == null ? DialogueProfile.absent() : dialogue;
+        this.actions = actions == null || actions.isEmpty() ? List.of() : List.copyOf(actions);
         this.playerDependent = computePlayerDependent(this.template, this.vars);
         this.resolvedPattern = this.playerDependent ? compileResolved(this.template, this.vars) : null;
     }
@@ -114,12 +144,48 @@ public final class NamedPrompt {
         return format;
     }
 
+    public io.github.neareststep.nexusai.dialogue.DialogueProfile dialogue() {
+        return dialogue;
+    }
+
+    public List<io.github.neareststep.nexusai.dialogue.CharacterAction> actions() {
+        return actions;
+    }
+
+    /**
+     * Knowledge file names without an extension. Empty when the prompt lists none.
+     */
+    public List<String> knowledge() {
+        return knowledge;
+    }
+
+    /**
+     * @return per-prompt fallback model, or {@code null} to inherit {@code fallback-model} from config.yml
+     */
+    public FallbackModel fallbackModel() {
+        return fallbackModel;
+    }
+
     /**
      * {@code true} when a var that appears in the template contains a PlaceholderAPI placeholder.
      * Those prompts must not share a cache or pool entry across different resolved values.
      */
     public boolean playerDependent() {
         return playerDependent;
+    }
+
+    /**
+     * {@code true} when a var that appears in the template contains a PlaceholderAPI placeholder.
+     * Built-in tokens such as {@code {time}} do not count.
+     */
+    public boolean usesPlaceholderApi() {
+        for (Map.Entry<String, String> entry : vars.entrySet()) {
+            String value = entry.getValue();
+            if (value != null && value.indexOf('%') >= 0 && template.contains('{' + entry.getKey() + '}')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public String render(UnaryOperator<String> placeholderResolver) {

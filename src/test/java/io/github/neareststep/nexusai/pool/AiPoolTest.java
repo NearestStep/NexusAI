@@ -18,6 +18,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AiPoolTest {
 
     @Test
+    void legacyColourCodesAreStrippedOnPoolOutput() {
+        AiPool pool = new AiPool();
+        assertFalse(pool.add("static_gen", "§c"));
+        pool.add("static_gen", "COLOR#5 §cSECRED stray§ §zZ &cAMPRED");
+        assertEquals(java.util.Optional.of("COLOR#5 SECRED stray zZ AMPRED"), pool.peek("static_gen"));
+        assertEquals(java.util.Optional.of("COLOR#5 SECRED stray zZ AMPRED"), pool.poll("static_gen"));
+        pool.replace("legacy", List.of("§cHello &lBold", "§k"));
+        assertEquals(List.of("Hello Bold"), pool.copy("legacy"));
+    }
+
+    @Test
     void pollAddAndSize() {
         AiPool pool = new AiPool();
         assertEquals(0, pool.size("p"));

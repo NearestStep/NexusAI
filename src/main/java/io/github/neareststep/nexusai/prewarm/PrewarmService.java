@@ -3,9 +3,12 @@ package io.github.neareststep.nexusai.prewarm;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
@@ -29,6 +32,7 @@ public final class PrewarmService {
     private final ScheduledExecutorService scheduler;
     private final Logger logger;
     private final PromptCatalog catalog;
+    private final KnowledgeBase knowledge;
     private volatile ScheduledFuture<?> refreshTask;
     private volatile boolean running;
 
@@ -50,24 +54,39 @@ public final class PrewarmService {
             Logger logger,
             PromptCatalog catalog
     ) {
+        this(config, cache, httpClient, scheduler, logger, catalog, KnowledgeBase.empty());
+    }
+
+    public PrewarmService(
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            ScheduledExecutorService scheduler,
+            Logger logger,
+            PromptCatalog catalog,
+            KnowledgeBase knowledge
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.catalog = catalog == null ? PromptCatalog.empty() : catalog;
+        this.knowledge = knowledge == null ? KnowledgeBase.empty() : knowledge;
     }
 
     public void start() {
         running = true;
-        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String configured : config.getPrewarmPrompts()) {
             Optional<NamedPrompt> named = catalog.find(configured);
             if (named.isPresent() && named.get().playerDependent()) {
-                logger.info("Prewarm skips \"" + configured
-                        + "\" until a player opens it, because its vars use PlaceholderAPI.");
+                if (named.get().usesPlaceholderApi()) {
+                    logger.info("Prewarm skips \"" + configured
+                            + "\" until a player opens it, because its vars use PlaceholderAPI.");
+                }
                 continue;
             }
             Prepared prepared = prepare(configured);
@@ -78,7 +97,7 @@ public final class PrewarmService {
     }
 
     public void scheduleRefresh() {
-        if (!config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         long periodSeconds = Math.max(1L, config.getPrewarmRefreshBeforeTtl().toSeconds());
@@ -87,7 +106,7 @@ public final class PrewarmService {
 
     public void warmForPlayer(String playerName) {
         Objects.requireNonNull(playerName, "playerName");
-        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String template : config.getPrewarmPrompts()) {
@@ -98,11 +117,15 @@ public final class PrewarmService {
                 }
                 continue;
             }
-            String prompt = template.replace("{player}", io.github.neareststep.nexusai.ai.PlayerInput.wrap(playerName));
+            String prompt = template.replace("{player}", io.github.neareststep.nexusai.ai.PlayerInput.substituteBuiltin("player", playerName));
             if (ContextVariables.usesBuiltIn(prompt, java.util.Set.of())) {
                 continue;
             }
-            warmText(new Prepared(prompt, GenerationOverrides.none().withFormat(config.defaultFormatId()), null));
+            GenerationOverrides overrides = GenerationOverrides.none().withFormat(config.defaultFormatId());
+            if (config.fallbackModel().configured()) {
+                overrides = overrides.withFallbackModel(config.fallbackModel().provider(), config.fallbackModel().model());
+            }
+            warmText(new Prepared(prompt, overrides.withNoticeId(template), null, ""));
         }
     }
 
@@ -116,7 +139,7 @@ public final class PrewarmService {
     }
 
     void refreshStale() {
-        if (!running || !config.isPrewarmEnabled() || !config.canSendRequests()) {
+        if (!running || !config.isPrewarmEnabled() || !config.canSendChatRequests()) {
             return;
         }
         for (String configured : config.getPrewarmPrompts()) {
@@ -127,7 +150,8 @@ public final class PrewarmService {
             String key = httpClient.cacheKey(
                     prepared.overrides().model(config.getModel()),
                     prepared.text(),
-                    prepared.overrides().formatOr(config.defaultFormatId()));
+                    prepared.overrides().formatOr(config.defaultFormatId()),
+                    prepared.knowledgeHash());
             if (cache.isFresh(key)) {
                 continue;
             }
@@ -140,6 +164,7 @@ public final class PrewarmService {
         String text;
         GenerationOverrides overrides = GenerationOverrides.none();
         Duration ttl = null;
+        String knowledgeHash = "";
         if (named.isPresent()) {
             NamedPrompt prompt = named.get();
             if (prompt.playerDependent()) {
@@ -148,15 +173,28 @@ public final class PrewarmService {
             text = prompt.render(value -> value);
             String format = prompt.format() == null ? config.defaultFormatId() : config.normalizeFormat(prompt.format());
             overrides = prompt.overrides().withFormat(format);
+            if (overrides.fallbackModel() == null) {
+                FallbackModel fallback = prompt.fallbackModel() != null ? prompt.fallbackModel() : config.fallbackModel();
+                if (fallback != null && fallback.configured()) {
+                    overrides = overrides.withFallbackModel(fallback.provider(), fallback.model());
+                }
+            }
+            KnowledgeComposer.Prepared composed = KnowledgeComposer.prepare(
+                    overrides, config.getSystemPrompt(), knowledge, prompt.knowledge());
+            overrides = composed.overrides();
+            knowledgeHash = composed.cacheToken();
             ttl = prompt.ttl();
         } else {
             text = configured;
             overrides = GenerationOverrides.none().withFormat(config.defaultFormatId());
+            if (config.fallbackModel().configured()) {
+                overrides = overrides.withFallbackModel(config.fallbackModel().provider(), config.fallbackModel().model());
+            }
         }
         if (text == null || text.isBlank() || ContextVariables.usesBuiltIn(text, java.util.Set.of())) {
             return null;
         }
-        return new Prepared(text, overrides, ttl);
+        return new Prepared(text, overrides.withNoticeId(configured), ttl, knowledgeHash);
     }
 
     private void warmText(Prepared prepared) {
@@ -164,7 +202,8 @@ public final class PrewarmService {
             return;
         }
         CompletionSupport.onComplete(
-                httpClient.requestAsync(prepared.text(), null, prepared.overrides(), prepared.ttl()),
+                httpClient.requestAsync(
+                        prepared.text(), null, prepared.overrides(), prepared.ttl(), prepared.knowledgeHash()),
                 logger,
                 "Prewarm request failed",
                 (ignored, error) -> {
@@ -174,6 +213,6 @@ public final class PrewarmService {
                 });
     }
 
-    private record Prepared(String text, GenerationOverrides overrides, Duration ttl) {
+    private record Prepared(String text, GenerationOverrides overrides, Duration ttl, String knowledgeHash) {
     }
 }
