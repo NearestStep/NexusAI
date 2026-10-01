@@ -44,6 +44,7 @@ class AnswerFormatterTest {
         assertFalse(AnswerFormatter.format("&ksecret", false, 0, 0).contains("&k"));
         assertEquals("Hello", PlayerInput.stripSectionSigns("§cHello"));
         assertEquals("Hello", PlayerInput.stripSectionSigns("&cHello"));
+        assertEquals("Hello &&& END &&& traveler", AnswerFormatter.format("Hello &&&END&&& traveler", false, 0, 0));
     }
 
     @Test

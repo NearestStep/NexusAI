@@ -10,6 +10,7 @@ import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.Executors;
@@ -24,9 +26,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -166,6 +172,57 @@ class PrewarmServiceTest {
         Thread.sleep(40);
         assertEquals(afterPause, calls.get());
         service.shutdown();
+    }
+
+    @Test
+    void placeholderApiSkipIsLoggedOnlyWhenThePromptHasPapiVars() {
+        AtomicInteger calls = new AtomicInteger();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("nope");
+        };
+        List<String> infos = new CopyOnWriteArrayList<>();
+        Logger logger = Logger.getLogger("prewarm-papi");
+        logger.setUseParentHandlers(false);
+        logger.setLevel(Level.INFO);
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.INFO.intValue() && record.getMessage() != null) {
+                    infos.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            PromptCatalog catalog = PromptCatalog.parse("""
+                    t_pre:
+                      prompt: "The time is {time}."
+                    who:
+                      prompt: "Hello {who}"
+                      vars:
+                        who: "%player_name%"
+                    """).catalog();
+            PluginConfig pluginConfig = config("test-key", List.of("t_pre", "who"));
+            AiHttpClient client = new AiHttpClient(cache, provider, pluginConfig, logger);
+            PrewarmService service = new PrewarmService(
+                    pluginConfig, cache, client, scheduler, logger, catalog);
+            service.start();
+            assertEquals(0, calls.get());
+            assertFalse(infos.stream().anyMatch(line -> line.contains("t_pre") && line.contains("PlaceholderAPI")));
+            assertTrue(infos.stream().anyMatch(line -> line.contains("\"who\"") && line.contains("PlaceholderAPI")));
+            service.shutdown();
+        } finally {
+            logger.removeHandler(handler);
+        }
     }
 
     private static void await(Condition condition, long timeout, TimeUnit unit) throws InterruptedException {

@@ -223,6 +223,38 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void colourOnlyContentIsAnEmptyReplyAndGluedMarkersStayReadable() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> mode = new AtomicReference<>("blank");
+        server.createContext("/v1/chat/completions", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            String content = "markers".equals(mode.get()) ? "Hello &&&END&&& traveler" : "&c§l";
+            byte[] response = ("{\"choices\":[{\"message\":{\"content\":\"" + content + "\"}}]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            YamlConfiguration yaml = yaml("gpt-4o-mini", "", -1, 0, "", false, 0, 0, "low");
+            yaml.set("api.key", "test-key");
+            yaml.set("api.base-url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+            OpenAiProvider provider = new OpenAiProvider(new PluginConfig(yaml), executor, Logger.getLogger("openai-empty"));
+            CompletionException error = assertThrows(CompletionException.class, () -> provider.complete("ping").join());
+            assertEquals(AiErrorKind.EMPTY_REPLY, AiErrors.classify(error));
+            assertEquals(PlayerInput.EMPTY_REPLY, AiErrors.detail(error));
+            assertFalse(AiErrors.detail(error).contains("missing choices"));
+            mode.set("markers");
+            assertEquals("Hello &&& END &&& traveler", provider.complete("ping").join());
+        } finally {
+            server.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void blankContentIsAnErrorAndReasoningTextIsUsed() throws Exception {
         assertKind(200, "{\"choices\":[{\"message\":{\"content\":\"\"}}]}", AiErrorKind.OTHER);
         assertAnswer(200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"The visible reasoning text.\"}}]}",
