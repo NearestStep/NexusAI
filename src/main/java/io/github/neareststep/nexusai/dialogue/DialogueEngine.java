@@ -160,7 +160,7 @@ public final class DialogueEngine {
                     request.system(),
                     messages,
                     tools,
-                    request.overrides(),
+                    noticed(request),
                     request.formatId(),
                     request.playerId(),
                     wrapped
@@ -180,7 +180,7 @@ public final class DialogueEngine {
                         request.system() + "\n\n" + note,
                         follow,
                         List.of(),
-                        request.overrides(),
+                        noticed(request),
                         request.formatId(),
                         request.playerId(),
                         wrapped
@@ -219,6 +219,17 @@ public final class DialogueEngine {
         return TalkResult.failed(request.characterId(), detail);
     }
 
+    /**
+     * Length-trim notices key on the persona, not the rendered character sheet.
+     */
+    private static GenerationOverrides noticed(TalkRequest request) {
+        String persona = request.characterId();
+        if (persona == null || persona.isBlank()) {
+            persona = "nai talk";
+        }
+        return request.overrides().withNoticeId(persona);
+    }
+
     private String greeting(TalkRequest request) {
         if (request.profile().greeting() != null) {
             return request.profile().greeting();
@@ -236,7 +247,7 @@ public final class DialogueEngine {
                     request.system(),
                     List.of(new DialogueProtocol.MemoryLine("user", "Greet the player briefly in character.")),
                     List.of(),
-                    request.overrides(),
+                    noticed(request),
                     request.formatId(),
                     request.playerId(),
                     ""
