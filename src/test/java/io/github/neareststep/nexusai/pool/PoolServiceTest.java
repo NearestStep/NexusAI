@@ -192,14 +192,14 @@ class PoolServiceTest {
         AiHttpClient client = gated(pluginConfig, new RateLimiter(100, 100), new AtomicLong(1_000L), provider);
         PoolService service = new PoolService(pluginConfig, pool, client, Logger.getLogger("test"));
         service.start();
-        await(() -> calls.get() == 3, 2, TimeUnit.SECONDS);
+        await(() -> calls.get() == 1, 2, TimeUnit.SECONDS);
         pending.completeExceptionally(new AiRequestException(AiErrorKind.RATE_LIMIT, 429, "HTTP 429", null));
         await(() -> client.isProviderPaused(), 2, TimeUnit.SECONDS);
 
         service.replenish("tip");
         service.onConsume("tip");
         Thread.sleep(40);
-        assertEquals(3, calls.get());
+        assertEquals(1, calls.get());
         assertEquals(0, pool.size("tip"));
         service.shutdown();
     }
@@ -274,6 +274,41 @@ class PoolServiceTest {
         pending.get().run();
         await(() -> pool.size("tip") == 2, 2, TimeUnit.SECONDS);
         assertEquals(3, calls.get());
+        service.shutdown();
+    }
+
+    @Test
+    void markupHoldRefillsAtMostOncePerWindow() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(10_000L);
+        AtomicReference<Runnable> retry = new AtomicReference<>();
+        CompletableFuture<String> pending = new CompletableFuture<>();
+        AiProvider provider = prompt -> {
+            calls.incrementAndGet();
+            return pending;
+        };
+        PluginConfig pluginConfig = config("test-key", 4, 1);
+        AiHttpClient client = gated(pluginConfig, new RateLimiter(100, 100), clock, provider);
+        PoolService service = new PoolService(
+                pluginConfig, pool, client, Logger.getLogger("pool-markup"), PoolStore.disabled(),
+                (delay, task) -> retry.set(task));
+        service.start();
+        await(() -> calls.get() == 1, 2, TimeUnit.SECONDS);
+        assertEquals(1, calls.get(), "a held prompt must not fan out one request per pool slot");
+        pending.complete("<key:key.jump>");
+        await(() -> client.isAdmissionBlocked("tip"), 2, TimeUnit.SECONDS);
+        service.replenish("tip");
+        if (retry.get() != null) {
+            retry.get().run();
+        }
+        Thread.sleep(40);
+        assertEquals(1, calls.get());
+
+        clock.addAndGet(30_000L);
+        assertTrue(retry.get() != null);
+        retry.get().run();
+        await(() -> calls.get() == 2, 2, TimeUnit.SECONDS);
+        assertEquals(2, calls.get());
         service.shutdown();
     }
 

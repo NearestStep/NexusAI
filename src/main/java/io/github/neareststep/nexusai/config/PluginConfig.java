@@ -92,6 +92,8 @@ public final class PluginConfig {
     private Map<String, ProviderSettings> providers = Map.of();
     private List<QueueEntryConfig> modelQueue = List.of();
     private int modelQueueRemainingThreshold;
+    private QueueStrategy modelQueueStrategy = QueueStrategy.FAILOVER;
+    private String modelQueueStrategyWarning;
     private FallbackModel fallbackModel = FallbackModel.none();
     private int knowledgeMaxChars = 6000;
     private int knowledgeMaxFileChars = 4000;
@@ -183,6 +185,16 @@ public final class PluginConfig {
             this.modelQueue = loadModelQueue(config);
         }
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
+        String strategyRaw = config.getString("model-queue-strategy", "failover");
+        QueueStrategy parsedStrategy = QueueStrategy.parse(strategyRaw);
+        if (parsedStrategy == null) {
+            this.modelQueueStrategy = QueueStrategy.FAILOVER;
+            this.modelQueueStrategyWarning = "Unknown model-queue-strategy '" + strategyRaw
+                    + "'. Using failover.";
+        } else {
+            this.modelQueueStrategy = parsedStrategy;
+            this.modelQueueStrategyWarning = null;
+        }
         this.fallbackModel = FallbackModel.of(
                 config.getString("fallback-model.provider", ""),
                 config.getString("fallback-model.model", ""));
@@ -943,6 +955,18 @@ public final class PluginConfig {
 
     public int modelQueueRemainingThreshold() {
         return modelQueueRemainingThreshold;
+    }
+
+    public QueueStrategy modelQueueStrategy() {
+        return modelQueueStrategy == null ? QueueStrategy.FAILOVER : modelQueueStrategy;
+    }
+
+    /**
+     * Non-null when {@code model-queue-strategy} is not {@code failover} or {@code round-robin}.
+     * The plugin logs it once per startup and per {@code /nai reload}.
+     */
+    public String modelQueueStrategyWarning() {
+        return modelQueueStrategyWarning;
     }
 
     public FallbackModel fallbackModel() {

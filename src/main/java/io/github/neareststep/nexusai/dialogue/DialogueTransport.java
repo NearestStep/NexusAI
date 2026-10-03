@@ -3,6 +3,8 @@ package io.github.neareststep.nexusai.dialogue;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.HttpGate;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.AnswerFormatter;
 import io.github.neareststep.nexusai.ai.FormatEnforcer;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
@@ -20,6 +22,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletionException;
 import java.util.function.Supplier;
 
 /**
@@ -29,10 +32,16 @@ public final class DialogueTransport {
 
     private final HttpClient httpClient;
     private final Supplier<PluginConfig> config;
+    private final HttpGate gate;
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient) {
+        this(config, httpClient, HttpGate.unlimited());
+    }
+
+    public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient, HttpGate gate) {
         this.config = Objects.requireNonNull(config, "config");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
+        this.gate = gate == null ? HttpGate.unlimited() : gate;
     }
 
     private PluginConfig config() {
@@ -63,10 +72,10 @@ public final class DialogueTransport {
             if (request.apiKey() != null && !request.apiKey().isBlank()) {
                 builder.header("Authorization", "Bearer " + request.apiKey());
             }
-            HttpResponse<String> response = httpClient.send(
-                    builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build(),
-                    HttpResponse.BodyHandlers.ofString()
-            );
+            HttpRequest httpRequest = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
+            HttpResponse<String> response = gate.schedule(
+                    () -> httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
+            ).join();
             String body = response.body() == null ? "" : response.body();
             Map<String, List<String>> headers = response.headers().map();
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -104,11 +113,23 @@ public final class DialogueTransport {
             );
         } catch (AiRequestException e) {
             throw e;
-        } catch (HttpTimeoutException e) {
-            throw new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling " + host(uri), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", e);
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof AiRequestException ai) {
+                throw ai;
+            }
+            if (cause instanceof HttpTimeoutException timeout) {
+                throw new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling " + host(uri), timeout);
+            }
+            if (HttpPool.isQueueFull(cause)) {
+                throw HttpPool.queueFull(cause);
+            }
+            String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+            throw new AiRequestException(
+                    AiErrors.classify(cause),
+                    0,
+                    SecretMask.redact(message, secrets(request.apiKey())),
+                    cause);
         } catch (Exception e) {
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             throw new AiRequestException(

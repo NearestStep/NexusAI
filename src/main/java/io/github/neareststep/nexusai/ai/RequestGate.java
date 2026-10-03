@@ -173,8 +173,15 @@ public final class RequestGate {
         Objects.requireNonNull(admissionKey, "admissionKey");
         long currentEpoch = failureEpochByKey.getOrDefault(admissionKey, 0L);
         if (currentEpoch == failureEpoch) {
-            // A non-empty reply drops the ladder, so the next empty reply starts again at 5 minutes.
-            backoffByKey.remove(admissionKey);
+            // A non-empty reply drops the empty-reply ladder and a generic backoff.
+            // A markup-only hold stays until its timer or resetBackoff (/nai reload).
+            long now = clock.getAsLong();
+            backoffByKey.compute(admissionKey, (key, backoff) -> {
+                if (backoff != null && backoff.markupOnly && now < backoff.untilMillis) {
+                    return backoff;
+                }
+                return null;
+            });
         }
         if (clearPause && pauseGeneration.get() == pauseStamp) {
             pausedUntil = 0L;
@@ -209,7 +216,7 @@ public final class RequestGate {
                 }
                 int genericAttempt = previous == null ? 0 : previous.attempt;
                 int emptyReplyAttempt = previous == null ? 0 : previous.emptyReplyAttempt;
-                return new Backoff(now + MARKUP_ONLY_BACKOFF_MILLIS, genericAttempt, emptyReplyAttempt);
+                return new Backoff(now + MARKUP_ONLY_BACKOFF_MILLIS, genericAttempt, emptyReplyAttempt, true);
             });
             return;
         }
@@ -230,7 +237,7 @@ public final class RequestGate {
                         : previous.emptyReplyAttempt + 1;
                 int index = Math.min(emptyAttempt, EMPTY_REPLY_BACKOFF_MILLIS.length) - 1;
                 int genericAttempt = previous == null ? 0 : previous.attempt;
-                return new Backoff(now + EMPTY_REPLY_BACKOFF_MILLIS[index], genericAttempt, emptyAttempt);
+                return new Backoff(now + EMPTY_REPLY_BACKOFF_MILLIS[index], genericAttempt, emptyAttempt, false);
             });
             return;
         }
@@ -241,7 +248,7 @@ public final class RequestGate {
             long delay = backoffInitialMillis == 0L
                     ? 0L
                     : Math.min(backoffMaxMillis, backoffInitialMillis * multiplier);
-            return new Backoff(now + delay, attempt, emptyReplyAttempt);
+            return new Backoff(now + delay, attempt, emptyReplyAttempt, false);
         });
         if (armPause && kind.pausesProvider()) {
             long pause = kind == AiErrorKind.RATE_LIMIT ? rateLimitPauseMillis : authPauseMillis;
@@ -271,11 +278,14 @@ public final class RequestGate {
         private final int attempt;
         /** Empty-reply step. Zero when this prompt has not returned an empty reply. */
         private final int emptyReplyAttempt;
+        /** True only for the fixed 30s markup-only hold. Success does not clear it. */
+        private final boolean markupOnly;
 
-        private Backoff(long untilMillis, int attempt, int emptyReplyAttempt) {
+        private Backoff(long untilMillis, int attempt, int emptyReplyAttempt, boolean markupOnly) {
             this.untilMillis = untilMillis;
             this.attempt = attempt;
             this.emptyReplyAttempt = emptyReplyAttempt;
+            this.markupOnly = markupOnly;
         }
     }
 }

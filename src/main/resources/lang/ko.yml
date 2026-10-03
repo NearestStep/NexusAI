@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7마지막 오류: &f{last_error}"
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7모더레이션: &f{state} &8(오늘 검사 {checks}, 표시 {flags})"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport 폴더에서 프롬프트 가져오기"

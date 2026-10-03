@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -34,10 +35,22 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
     private final Logger logger;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
+    private final HttpGate gate;
 
     public OpenAiProvider(PluginConfig config, ExecutorService executor, Logger logger, HttpClient httpClient) {
+        this(config, executor, logger, httpClient, HttpGate.unlimited());
+    }
+
+    public OpenAiProvider(
+            PluginConfig config,
+            ExecutorService executor,
+            Logger logger,
+            HttpClient httpClient,
+            HttpGate gate
+    ) {
         this(config, executor, logger, Objects.requireNonNull(httpClient, "httpClient"),
-                new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL));
+                new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL),
+                gate);
     }
 
     public OpenAiProvider(PluginConfig config, ExecutorService executor, Logger logger) {
@@ -45,19 +58,28 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.objectMapper = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL);
-        // Do not reuse the plugin HTTP pool here. doComplete() blocks on HttpClient.send,
-        // and the client's own timeouts/callbacks must be able to run on a different pool.
+        // sendAsync uses the HttpClient executor, not nexusai-http-*. Those four threads must
+        // stay free to start the next call. The gate caps how many calls are outstanding.
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(config.getConnectTimeout())
                 .build();
+        this.gate = HttpGate.unlimited();
     }
 
-    OpenAiProvider(PluginConfig config, ExecutorService executor, Logger logger, HttpClient httpClient, ObjectMapper objectMapper) {
+    OpenAiProvider(
+            PluginConfig config,
+            ExecutorService executor,
+            Logger logger,
+            HttpClient httpClient,
+            ObjectMapper objectMapper,
+            HttpGate gate
+    ) {
         this.config = config;
         this.executor = executor;
         this.logger = logger;
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
+        this.gate = gate == null ? HttpGate.unlimited() : gate;
     }
 
     @Override
@@ -69,7 +91,11 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
     public CompletableFuture<String> complete(String prompt, GenerationOverrides overrides) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        return CompletableFuture.supplyAsync(() -> doComplete(prompt, effective), executor);
+        // Kept so the constructor argument stays part of the call path for callers that still pass a pool.
+        Objects.requireNonNull(executor, "executor");
+        return gate.schedule(() -> exchangeAsync(
+                prompt, effective, config.getBaseUrl(), config.getApiKey(), null, true
+        ).thenApply(ChatExchange::text));
     }
 
     public static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
@@ -120,7 +146,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
-        return exchange(prompt, overrides, baseUrl, apiKey, model, true);
+        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true)));
+    }
+
+    @Override
+    public CompletableFuture<ChatExchange> exchangeAsync(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model
+    ) {
+        return exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true);
     }
 
     /**
@@ -135,10 +172,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
-        return exchange(prompt, overrides, baseUrl, apiKey, model, false);
+        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, false)));
     }
 
-    private ChatExchange exchange(
+    private CompletableFuture<ChatExchange> exchangeAsync(
             String prompt,
             GenerationOverrides overrides,
             String baseUrl,
@@ -153,6 +190,8 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
         URI parsedUri = URI.create(trimSlash(root) + "/chat/completions");
         logger.log(Level.FINE, "POST {0}", parsedUri);
+        final GenerationOverrides callOverrides = effective;
+        final HttpRequest request;
         try {
             ChatCompletionRequest body = buildBody(config, prompt, effective);
             byte[] json = objectMapper.writeValueAsBytes(body);
@@ -166,9 +205,27 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (apiKey != null && !apiKey.isBlank()) {
                 builder.header("Authorization", "Bearer " + apiKey);
             }
-            HttpRequest request = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
+            request = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(toAi(e, parsedUri, apiKey));
+        }
+        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString()).handle((response, error) -> {
+            if (error != null) {
+                throw toAi(unwrap(error), parsedUri, apiKey);
+            }
+            return readExchange(response, parsedUri, prompt, apiKey, callOverrides, filterAnswer);
+        });
+    }
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    private ChatExchange readExchange(
+            HttpResponse<String> response,
+            URI parsedUri,
+            String prompt,
+            String apiKey,
+            GenerationOverrides effective,
+            boolean filterAnswer
+    ) {
+        try {
             String responseBody = response.body() == null ? "" : response.body();
             boolean htmlBody = looksLikeHtml(responseBody);
             Map<String, List<String>> headers = response.headers().map();
@@ -239,21 +296,55 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             return new ChatExchange(formatted, headers);
         } catch (AiRequestException e) {
             throw e;
-        } catch (HttpTimeoutException e) {
-            throw new AiRequestException(
+        } catch (Exception e) {
+            throw toAi(e, parsedUri, apiKey);
+        }
+    }
+
+    private static ChatExchange join(CompletableFuture<ChatExchange> future) {
+        try {
+            return future.join();
+        } catch (CompletionException e) {
+            Throwable cause = unwrap(e);
+            if (cause instanceof AiRequestException ai) {
+                throw ai;
+            }
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new AiRequestException(AiErrorKind.OTHER, 0, cause.getMessage(), cause);
+        }
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while ((current instanceof CompletionException || current instanceof java.util.concurrent.ExecutionException)
+                && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private AiRequestException toAi(Throwable error, URI parsedUri, String apiKey) {
+        Throwable cause = unwrap(error);
+        if (cause instanceof AiRequestException ai) {
+            return ai;
+        }
+        if (cause instanceof HttpTimeoutException) {
+            return new AiRequestException(
                     AiErrorKind.TIMEOUT,
                     0,
                     "Request timed out calling " + parsedUri.getHost() + " after " + config.getReadTimeout().toSeconds() + "s",
-                    e
+                    cause
             );
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", e);
-        } catch (Exception e) {
-            AiErrorKind kind = AiErrors.classify(e);
-            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            throw new AiRequestException(kind, 0, SecretMask.redact(message, secrets(apiKey)), null);
         }
+        if (cause instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+            return new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", cause);
+        }
+        AiErrorKind kind = AiErrors.classify(cause);
+        String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+        return new AiRequestException(kind, 0, SecretMask.redact(message, secrets(apiKey)), cause);
     }
 
     /**
@@ -279,10 +370,6 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             }
         }
         return secrets;
-    }
-
-    private String doComplete(String prompt, GenerationOverrides overrides) {
-        return exchange(prompt, overrides, config.getBaseUrl(), config.getApiKey(), null).text();
     }
 
     private static String trimSlash(String url) {

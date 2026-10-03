@@ -179,7 +179,7 @@ class EmptyReplyBackoffTest {
     }
 
     @Test
-    void parallelPoolBatchTakesOneLadderStepAndLogsThatRetryTime() {
+    void oneInFlightEmptyReplyTakesOneLadderStepAndLogsThatRetryTime() {
         AtomicInteger calls = new AtomicInteger();
         AtomicLong clock = new AtomicLong(1_700_000_000_000L);
         List<String> warnings = new CopyOnWriteArrayList<>();
@@ -201,7 +201,7 @@ class EmptyReplyBackoffTest {
         });
         service.start();
 
-        assertEquals(3, calls.get());
+        assertEquals(1, calls.get());
         complete(inbound, 0, "&c§l");
         long firstUntil = clock.get() + FIVE_MINUTES;
         assertEquals(0, pool.size("blank"));
@@ -215,35 +215,36 @@ class EmptyReplyBackoffTest {
             service.replenish("blank");
             service.onConsume("blank");
         }
-        assertEquals(3, calls.get());
+        assertEquals(1, calls.get());
         assertEquals(1, delays.size());
 
         clock.addAndGet(FIVE_MINUTES);
         pending.get().run();
-        assertEquals(6, calls.get());
-        complete(inbound, 3, "&c§l");
+        assertEquals(2, calls.get());
+        complete(inbound, 1, "&c§l");
         long secondUntil = clock.get() + FIFTEEN_MINUTES;
         assertEquals(FIFTEEN_MINUTES + 25L, delays.getLast());
         assertRetry(client, warnings, secondUntil);
 
         clock.addAndGet(FIFTEEN_MINUTES);
         pending.get().run();
-        assertEquals(9, calls.get());
-        List<CompletableFuture<String>> resetBatch = new ArrayList<>(inbound.subList(6, inbound.size()));
-        resetBatch.get(0).complete("Hello");
-        resetBatch.get(1).complete("&c§l");
-        resetBatch.get(2).complete("&c§l");
+        assertEquals(3, calls.get());
+        complete(inbound, 2, "Hello");
+        assertEquals(Optional.of("Hello"), pool.poll("blank"));
+        assertFalse(client.isAdmissionBlocked("blank"));
+        assertEquals(4, calls.get());
+
+        complete(inbound, 3, "&c§l");
         long resetUntil = clock.get() + FIVE_MINUTES;
         assertEquals(FIVE_MINUTES + 25L, delays.getLast());
         assertTrue(client.isAdmissionBlocked("blank"));
         assertRetry(client, warnings, resetUntil);
-        assertEquals(Optional.of("Hello"), pool.poll("blank"));
 
         client.resetBackoff();
         assertFalse(client.isAdmissionBlocked("blank"));
         service.replenish("blank");
-        assertEquals(12, calls.get());
-        complete(inbound, 9, "&c§l");
+        assertEquals(5, calls.get());
+        complete(inbound, 4, "&c§l");
         assertRetry(client, warnings, clock.get() + FIVE_MINUTES);
         service.shutdown();
     }
@@ -341,6 +342,31 @@ class EmptyReplyBackoffTest {
         service.replenish("blank");
         assertEquals(afterStart, calls.get());
         service.shutdown();
+    }
+
+    @Test
+    void concurrentSuccessOnTheSameKeyDoesNotClearMarkupHold() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(5_000L);
+        CompletableFuture<String> first = new CompletableFuture<>();
+        CompletableFuture<String> second = new CompletableFuture<>();
+        AiHttpClient client = client(new AiCache(Duration.ofMinutes(5), 100), clock, Logger.getLogger("markup-race"), prompt -> {
+            int n = calls.incrementAndGet();
+            return n == 1 ? first : second;
+        });
+        CompletableFuture<String> markup = client.generateFreshAsync("<key:key.jump>", "tags");
+        CompletableFuture<String> success = client.generateFreshAsync("hello", "tags");
+        first.complete("<key:key.jump>");
+        assertTrue(markup.isCompletedExceptionally());
+        assertTrue(client.isAdmissionBlocked("tags"));
+        second.complete("Hello");
+        assertEquals("Hello", success.join());
+        assertTrue(client.isAdmissionBlocked("tags"));
+        assertEquals(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS, client.admissionDelayMillis("tags"));
+        assertEquals("Hello", client.testAsync("tags").join());
+        assertTrue(client.isAdmissionBlocked("tags"));
+        client.resetBackoff();
+        assertFalse(client.isAdmissionBlocked("tags"));
     }
 
     @Test

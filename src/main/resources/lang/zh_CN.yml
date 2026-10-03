@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI：&f{papi}"
   status-last-error: "&7最近错误：&f{last_error}"
   status-provider-pause: "&7提供商暂停：&f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7审核: &f{state} &8(今日检查 {checks}，标记 {flags})"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &f从 import 文件夹导入提示词"

@@ -92,6 +92,12 @@ providers:
     url: "https://openrouter.ai/api/v1"
     api-key: ""
 
+# failover (default): every request starts at the first available row. The next row is used only
+# after a failure, a cooldown, a daily cap, or remaining budget at or below the threshold.
+# round-robin: each new request starts at the next available row, then walks the circle the same way.
+# Rows on cooldown, at daily-request-limit, or at or below the threshold are skipped.
+# Unknown values are treated as failover and logged once per startup and /nai reload.
+model-queue-strategy: failover
 # Switch to the next entry when remaining header budget hits the threshold, the daily cap is reached,
 # the provider returns 429, or the call errors or times out. A prompt's model: override still wins.
 # 0 threshold means "remaining is zero".

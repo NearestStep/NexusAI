@@ -94,6 +94,26 @@ class RequestGateTest {
     }
 
     @Test
+    void markupHoldIsClearedOnlyByTheTimerOrReload() {
+        RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
+        long epoch = gate.failureEpoch("tags");
+        gate.recordFailure("tags", AiErrorKind.MARKUP_ONLY);
+        assertEquals(clock.get() + RequestGate.MARKUP_ONLY_BACKOFF_MILLIS, gate.blockedUntilMillis("tags"));
+        gate.recordSuccess("tags", gate.pauseStamp(), epoch, true);
+        gate.recordSuccess("tags", gate.pauseStamp(), gate.failureEpoch("tags"), false);
+        assertTrue(gate.isBlocked("tags"));
+        clock.addAndGet(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS - 1L);
+        assertTrue(gate.isBlocked("tags"));
+        clock.addAndGet(1L);
+        assertFalse(gate.isBlocked("tags"));
+
+        gate.recordFailure("tags", AiErrorKind.MARKUP_ONLY);
+        gate.resetBackoff();
+        assertFalse(gate.isBlocked("tags"));
+        assertEquals(0L, gate.blockedUntilMillis("tags"));
+    }
+
+    @Test
     void aContentRejectionDoesNotBackOffOrPause() {
         RequestGate gate = gate(100, 1_000, 8_000, 60_000, 300_000);
         gate.recordFailure("tip", AiErrorKind.REJECTED);

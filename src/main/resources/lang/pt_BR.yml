@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Último erro: &f{last_error}"
   status-provider-pause: "&7Pausa do provedor: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderação: &f{state} &8({checks} verificações, {flags} alertas hoje)"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportar prompts da pasta import"
