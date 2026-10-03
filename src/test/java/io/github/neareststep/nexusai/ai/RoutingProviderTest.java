@@ -196,6 +196,28 @@ class RoutingProviderTest {
     }
 
     @Test
+    void markupOnlyStopsAtTheFirstModelWithoutPause() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(8_000L);
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
+        };
+        Harness harness = harness(
+                List.of(entry("openai", "gpt-4o-mini", 0), entry("groq", "llama", 0)),
+                clock,
+                http);
+        AiRequestException error = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.MARKUP_ONLY, error.kind());
+        assertEquals(PlayerInput.MARKUP_ONLY, error.getMessage());
+        assertEquals(1, calls.get());
+        for (ModelQueue.Status row : harness.queue().status(clock.get())) {
+            assertEquals(0, row.rejected());
+            assertFalse(row.state().startsWith("COOLDOWN"));
+        }
+    }
+
+    @Test
     void contentRejectionTriesTheNextEntryWithoutCooldown() {
         AtomicLong clock = new AtomicLong(8_000L);
         List<String> models = new ArrayList<>();

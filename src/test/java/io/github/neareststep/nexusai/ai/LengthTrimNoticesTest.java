@@ -56,14 +56,34 @@ class LengthTrimNoticesTest {
             assertTrue(LengthTrimNotices.message("harbor").contains("increase max-tokens"));
 
             String longPrompt = "x".repeat(200);
-            String label = LengthTrimNotices.label(longPrompt);
-            assertTrue(label.endsWith("..."));
-            assertTrue(label.length() <= 120);
+            assertEquals("(length 200)", LengthTrimNotices.label(longPrompt));
+            assertFalse(LengthTrimNotices.message(longPrompt).contains("xxx"));
+            assertTrue(LengthTrimNotices.message(longPrompt).contains("(length 200)"));
+            String template = "LIT101 <red>tale</red> &#FF0000for {player} " + "word ".repeat(30);
+            String templateLine = LengthTrimNotices.message(template);
+            assertFalse(templateLine.contains("tale"));
+            assertFalse(templateLine.contains("<red>"));
+            assertFalse(templateLine.contains("{player}"));
+            assertFalse(templateLine.contains("LIT101"));
+            assertTrue(templateLine.contains("length"));
             assertEquals("(blank)", LengthTrimNotices.label(" \n\t "));
         } finally {
             logger.removeHandler(handler);
             LengthTrimNotices.reset();
         }
+    }
+
+    @Test
+    void aShortLiteralIsNotPrinted() {
+        String literal = "short_LT:long";
+        String line = LengthTrimNotices.message(literal);
+        assertFalse(line.contains(literal), line);
+        assertFalse(line.contains("short_LT"), line);
+        assertTrue(line.contains("(length " + literal.length() + ")"), line);
+        assertEquals("(length " + literal.length() + ")", LengthTrimNotices.label(literal));
+        assertTrue(LengthTrimNotices.message("harbor").contains("harbor"));
+        assertTrue(LengthTrimNotices.message("nai talk").contains("nai talk"));
+        assertFalse(LengthTrimNotices.message("other prompt").contains("other prompt"));
     }
 
     @Test
@@ -85,7 +105,7 @@ class LengthTrimNoticesTest {
                 assertFalse(line.contains("Steve"));
             }
             assertEquals("(blank)", LengthTrimNotices.label("&c§l"));
-            assertEquals("Steve", LengthTrimNotices.label("§cSteve"));
+            assertEquals("(length 5)", LengthTrimNotices.label("§cSteve"));
             assertFalse(LengthTrimNotices.message("a&b§c").contains("&"));
             assertFalse(LengthTrimNotices.message("a&b§c").contains("§"));
         } finally {

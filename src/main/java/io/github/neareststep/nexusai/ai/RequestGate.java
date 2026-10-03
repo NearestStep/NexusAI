@@ -29,6 +29,12 @@ public final class RequestGate {
             30L * 60_000L,
             60L * 60_000L
     };
+    /**
+     * One fixed hold after a markup-only reply. It does not climb, and it is not the
+     * empty-reply ladder. Placeholders and the pool serve fallback until it ends.
+     * {@code /nai test} does not start it and is not blocked by it.
+     */
+    static final long MARKUP_ONLY_BACKOFF_MILLIS = 30_000L;
 
     private final ConcurrentHashMap<String, Backoff> backoffByKey = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> failureEpochByKey = new ConcurrentHashMap<>();
@@ -192,6 +198,21 @@ public final class RequestGate {
      */
     public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds, boolean armPause) {
         Objects.requireNonNull(admissionKey, "admissionKey");
+        if (kind == AiErrorKind.MARKUP_ONLY) {
+            if (!armPause) {
+                return;
+            }
+            long now = clock.getAsLong();
+            backoffByKey.compute(admissionKey, (key, previous) -> {
+                if (previous != null && now < previous.untilMillis) {
+                    return previous;
+                }
+                int genericAttempt = previous == null ? 0 : previous.attempt;
+                int emptyReplyAttempt = previous == null ? 0 : previous.emptyReplyAttempt;
+                return new Backoff(now + MARKUP_ONLY_BACKOFF_MILLIS, genericAttempt, emptyReplyAttempt);
+            });
+            return;
+        }
         if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
             return;
         }

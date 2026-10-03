@@ -73,8 +73,69 @@ class ReplyMarkupTest {
         assertEquals("left", PlayerInput.stripSectionSigns("<<red>red>left"));
         assertEquals("", PlayerInput.stripSectionSigns("&#<red>FF0000"));
         assertEquals("{\"text\":\"Hi\"}", PlayerInput.stripSectionSigns("{\"text\":\"Hi\"}"));
+        assertEquals("<3>", PlayerInput.stripSectionSigns("<3>"));
+        assertEquals("Hi <red there", PlayerInput.stripSectionSigns("Hi <red there"));
         assertEquals("<red>Hi</red>", PlayerInput.sanitize("<red>Hi</red>"));
         assertEquals("&#FF0000Hi", PlayerInput.sanitize("&#FF0000Hi"));
+    }
+
+    @Test
+    void quotedTagArgumentsAndInteractiveJsonAreStrippedWithoutManglingBraceText() {
+        assertEquals("tip", PlayerInput.stripSectionSigns("<hover:show_text:'hello>world'>tip</hover>"));
+        assertEquals("tip", PlayerInput.stripSectionSigns("<hover:show_text:\"hello>world\">tip</hover>"));
+        assertEquals("tip", PlayerInput.stripSectionSigns("<hover:show_text:'it\\'s > here'>tip</hover>"));
+        assertEquals("tip", PlayerInput.stripSectionSigns("<hover:show_text:'<red>hi>there'>tip</hover>"));
+        assertEquals("x", PlayerInput.stripSectionSigns("<hover:show_text:\"say '>' now\">x</hover>"));
+
+        String click = "{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}";
+        String array = "[\"\",{\"text\":\"Hi\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/say pwned\"}}]";
+        String hover = "{\"text\":\"tip\",\"hoverEvent\":{\"action\":\"show_text\",\"value\":\"secret\"}}";
+        String modern = "{\"text\":\"x\",\"click_event\":{\"action\":\"run_command\",\"command\":\"/op me\"}}";
+        String insertion = "{\"text\":\"Hi\",\"insertion\":\"/op me\"}";
+        String extra = "{\"text\":\"Hello \",\"extra\":[{\"text\":\"world\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}]}";
+        String pretty = "{\n  \"text\": \"Hi\",\n  \"clickEvent\": { \"action\": \"run_command\", \"value\": \"/op me\" }\n}";
+        String escaped = "{\"text\":\"H\\u0069\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}";
+
+        assertEquals("x", PlayerInput.stripSectionSigns(click));
+        assertEquals("Hi", PlayerInput.stripSectionSigns(array));
+        assertEquals("tip", PlayerInput.stripSectionSigns(hover));
+        assertEquals("x", PlayerInput.stripSectionSigns(modern));
+        assertEquals("Hi", PlayerInput.stripSectionSigns(insertion));
+        assertEquals("Hello world", PlayerInput.stripSectionSigns(extra));
+        assertEquals("Hi", PlayerInput.stripSectionSigns(pretty));
+        assertEquals("Hi", PlayerInput.stripSectionSigns(escaped));
+        assertEquals("Hello x world", PlayerInput.stripSectionSigns("Hello " + click + " world"));
+        assertEquals("code { return 1; } and <3 and x",
+                PlayerInput.stripSectionSigns("code { return 1; } and <3 and " + click));
+        assertEquals("{\"text\":\"Hi\"}", PlayerInput.stripSectionSigns("{\"text\":\"Hi\"}"));
+        assertEquals("{\"text\":\"Hi\",\"color\":\"red\"}", PlayerInput.stripSectionSigns("{\"text\":\"Hi\",\"color\":\"red\"}"));
+        assertEquals("{^_^}", PlayerInput.stripSectionSigns("{^_^}"));
+        assertEquals("{ :D }", PlayerInput.stripSectionSigns("{ :D }"));
+        assertEquals("if (x) { return 1; }", PlayerInput.stripSectionSigns("if (x) { return 1; }"));
+        assertEquals("[1, 2, 3]", PlayerInput.stripSectionSigns("[1, 2, 3]"));
+        String wrapped = "{\"note\":{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}";
+        assertEquals("x", PlayerInput.stripSectionSigns(wrapped));
+        assertEquals("hello x world", PlayerInput.stripSectionSigns("hello " + wrapped + " world"));
+        assertEquals("", PlayerInput.stripSectionSigns(
+                "{\"note\":{\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}"));
+        assertEquals("seex", PlayerInput.stripSectionSigns(
+                "{\"note\":\"see\",\"child\":{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}"));
+        assertEquals("{\"note\":\"just text\"}", PlayerInput.stripSectionSigns("{\"note\":\"just text\"}"));
+        assertEquals("rock & stone {^_^}", PlayerInput.stripSectionSigns("rock & stone {^_^}"));
+        assertEquals("<3", PlayerInput.stripSectionSigns("<3"));
+        assertEquals("x < y", PlayerInput.stripSectionSigns("x < y"));
+        assertEquals("1<2", PlayerInput.stripSectionSigns("1<2"));
+        assertEquals("<- back", PlayerInput.stripSectionSigns("<- back"));
+        assertEquals(click, PlayerInput.stripSectionSigns(click, true));
+        assertEquals("<hover:show_text:'hello>world'>tip</hover>",
+                PlayerInput.stripSectionSigns("<hover:show_text:'hello>world'>tip</hover>", true));
+
+        assertTrue(PlayerInput.emptiedByMarkup("<key:key.jump>", false));
+        assertTrue(PlayerInput.emptiedByMarkup("&#<red>FF0000", false));
+        assertFalse(PlayerInput.emptiedByMarkup("&c§l", false));
+        assertFalse(PlayerInput.emptiedByMarkup("<key:key.jump>", true));
+        assertFalse(PlayerInput.emptiedByMarkup("Hello", false));
+        assertFalse(PlayerInput.emptiedByMarkup("{^_^}", false));
     }
 
     @Test
@@ -94,8 +155,12 @@ class ReplyMarkupTest {
         AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
         cache.put("old", "<click:run_command:/say pwned>CLICK</click>");
         cache.put("hex", "&#FF0000[ADMIN]&r Test");
+        cache.put("json", "{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}");
+        cache.put("quoted", "<hover:show_text:'hello>world'>tip</hover>");
         assertEquals("CLICK", cache.get("old").orElseThrow());
         assertEquals("[ADMIN] Test", cache.get("hex").orElseThrow());
+        assertEquals("x", cache.get("json").orElseThrow());
+        assertEquals("tip", cache.get("quoted").orElseThrow());
 
         AiCache kept = new AiCache(Duration.ofMinutes(5), 10, true);
         kept.put("old", "<red>Hi</red>");
@@ -116,19 +181,23 @@ class ReplyMarkupTest {
                     answers:
                       - "<click:run_command:/say pwned>CLICK</click>"
                       - "&#FF0000[ADMIN]&r Test"
+                      - "{\\"text\\":\\"x\\",\\"clickEvent\\":{\\"action\\":\\"run_command\\",\\"value\\":\\"/op me\\"}}"
                 """);
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         try {
             PoolStore store = new PoolStore(file.toFile(), scheduler, Duration.ofMillis(50), Logger.getLogger("markup-pool"), true);
             AiPool loaded = new AiPool();
             store.load(loaded, Map.of("greet", 5));
-            assertEquals(List.of("CLICK", "[ADMIN] Test"), loaded.copy("greet"));
+            assertEquals(List.of("CLICK", "[ADMIN] Test", "x"), loaded.copy("greet"));
 
             PoolStore open = new PoolStore(file.toFile(), scheduler, Duration.ofMillis(50), Logger.getLogger("markup-pool"), true, true);
             AiPool passed = new AiPool(true);
             open.load(passed, Map.of("greet", 5));
             assertEquals(
-                    List.of("<click:run_command:/say pwned>CLICK</click>", "&#FF0000[ADMIN] Test"),
+                    List.of(
+                            "<click:run_command:/say pwned>CLICK</click>",
+                            "&#FF0000[ADMIN] Test",
+                            "{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}"),
                     passed.copy("greet"));
         } finally {
             scheduler.shutdownNow();

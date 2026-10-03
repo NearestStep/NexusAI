@@ -26,7 +26,7 @@ public final class ConfigMerger {
      * bundled {@code config.yml}.
      */
     static final String SANITIZE_COMMENT =
-            "# Enable only if you are sure that no plugin consuming NexusAI placeholders parses MiniMessage or hex colours. Legacy § and & codes are always removed.";
+            "# WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.";
 
     private static final Pattern KEY_LINE = Pattern.compile("^(\\s*)([^\\s:#][^:#]*):(.*)$");
 
