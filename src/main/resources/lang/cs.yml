@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&cImport selhal: &f{error}"
   status-fallback-model: "&7Záložní model: &f{entry}"
   status-knowledge: "&7Soubory znalostí: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ požadován, ale není v poolu: &f{prompts}"
 
 common:

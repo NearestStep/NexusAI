@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&c导入失败：&f{error}"
   status-fallback-model: "&7备用模型：&f{entry}"
   status-knowledge: "&7知识库文件：&f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ 已请求但不在池中：&f{prompts}"
 
 common:

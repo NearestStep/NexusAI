@@ -338,6 +338,18 @@ actions:
   # How many actions from one model reply may run. The rest are refused and the character is told.
   max-per-reply: 1
 
+# Context from other plugins (balance, rank, quest) for prompts that list context:.
+# Providers never run on the main thread. A slow provider is skipped, not waited for.
+context:
+  enabled: true
+  max-provider-timeout-millis: 200   # 10..1000; provider.timeout() is clamped to this
+  total-timeout-millis: 300          # 10..2000
+  max-chars-per-provider: 200        # 20..1000
+  max-chars: 600                     # 50..4000, whole block before wrapping
+  refresh-seconds: 30                # 1..3600, snapshot age for cached_ placeholders
+  suspend-after-timeouts: 5          # 1..100
+  suspend-seconds: 60                # 1..3600
+
 # WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:
   allow-markup: false

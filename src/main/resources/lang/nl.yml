@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&cImporteren mislukt: &f{error}"
   status-fallback-model: "&7Reservemodel: &f{entry}"
   status-knowledge: "&7Kennisbestanden: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ gevraagd maar niet in de pool: &f{prompts}"
 
 common:

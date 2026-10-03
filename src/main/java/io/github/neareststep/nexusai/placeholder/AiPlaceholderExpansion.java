@@ -3,13 +3,16 @@ package io.github.neareststep.nexusai.placeholder;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
+import io.github.neareststep.nexusai.context.CachedContextCoordinator;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
@@ -137,27 +140,89 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 config.getSystemPrompt(),
                 plugin.getKnowledgeBase(),
                 resolved.knowledge());
-        String key = httpClient.cacheKey(resolved.model(), resolved.text(), resolved.formatId(), prepared.cacheToken());
+        NamedPrompt named = contextPrompt(player, resolved);
+        if (named == null) {
+            return cachedLookup(player, raw, resolved, resolved.text(), prepared);
+        }
+        CachedContextCoordinator coordinator = plugin.getContextCoordinator();
+        if (coordinator == null || plugin.getContextService() == null) {
+            return cachedLookup(player, raw, resolved, resolved.text(), prepared);
+        }
+        org.bukkit.Location location = player.getLocation();
+        String world = location.getWorld() == null ? "" : location.getWorld().getName();
+        ContextRequest request = new ContextRequest(
+                player.getUniqueId(),
+                player.getName(),
+                world,
+                named.id(),
+                ContextRequest.Purpose.PLACEHOLDER);
+        CachedContextCoordinator.Decision decision = coordinator.decide(
+                player.getUniqueId(),
+                named.id(),
+                resolved.text(),
+                true,
+                System.currentTimeMillis(),
+                () -> plugin.getContextService().collect(request, named.context()),
+                text -> startBackground(player, raw, resolved, text, prepared));
+        if (decision.phase() == CachedContextCoordinator.Phase.PENDING) {
+            return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
+        }
+        return cachedLookup(player, raw, resolved, decision.promptText(), prepared);
+    }
+
+    /**
+     * Named prompts with {@code context:} and an online player. Literal placeholders, the console,
+     * and {@code context.enabled: false} stay on the historical path.
+     */
+    private NamedPrompt contextPrompt(Player player, ResolvedPrompt resolved) {
+        if (player == null || resolved.id() == null || resolved.id().isBlank() || !config.contextSettings().enabled()) {
+            return null;
+        }
+        NamedPrompt named = prompts.find(resolved.id()).orElse(null);
+        if (named == null || !named.context().active()) {
+            return null;
+        }
+        return named;
+    }
+
+    private String cachedLookup(
+            Player player,
+            String raw,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        String key = httpClient.cacheKey(resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
             if (config.canSendChatRequests()) {
-                UUID playerId = player != null ? player.getUniqueId() : null;
-                CompletionSupport.onComplete(
-                        httpClient.requestAsync(
-                                resolved.text(),
-                                playerId,
-                                prepared.overrides().withNoticeId(noticeId(resolved, raw)),
-                                resolved.ttl(),
-                                prepared.cacheToken()),
-                        plugin.getLogger(),
-                        "Background AI generation failed",
-                        (ignored, error) -> {
-                            if (error != null) {
-                                plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
-                            }
-                        });
+                startBackground(player, raw, resolved, promptText, prepared);
             }
             return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
         });
+    }
+
+    private void startBackground(
+            Player player,
+            String raw,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        UUID playerId = player != null ? player.getUniqueId() : null;
+        CompletionSupport.onComplete(
+                httpClient.requestAsync(
+                        promptText,
+                        playerId,
+                        prepared.overrides().withNoticeId(noticeId(resolved, raw)),
+                        resolved.ttl(),
+                        prepared.cacheToken()),
+                plugin.getLogger(),
+                "Background AI generation failed",
+                (ignored, error) -> {
+                    if (error != null) {
+                        plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
+                    }
+                });
     }
 
     /**

@@ -22,6 +22,8 @@ class LocaleFilesTest {
             "command.prompts-import-fail",
             "command.status-fallback-model",
             "command.status-knowledge",
+            "command.status-context",
+            "command.status-context-line",
             "command.status-unpooled",
             "command.prompts-header",
             "command.prompts-line",
@@ -117,6 +119,8 @@ class LocaleFilesTest {
                 assertTrue(yaml.getString("command.prompts-import-fail").contains("{error}"), file.getFileName() + " {error}");
                 assertTrue(yaml.getString("command.status-fallback-model").contains("{entry}"), file.getFileName() + " {entry}");
                 assertTrue(yaml.getString("command.status-knowledge").contains("{files}"), file.getFileName() + " {files}");
+                assertTrue(yaml.getString("command.status-context").contains("{count}"), file.getFileName() + " {count}");
+                assertTrue(yaml.getString("command.status-context-line").contains("{line}"), file.getFileName() + " {line}");
                 assertTrue(yaml.getString("command.status-unpooled").contains("{prompts}"), file.getFileName() + " {prompts}");
                 assertTrue(yaml.getString("command.status-unpooled").contains("generate_"), file.getFileName() + " generate_");
             }

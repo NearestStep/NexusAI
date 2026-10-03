@@ -5,6 +5,10 @@ import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.context.ContextBlock;
+import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -279,6 +283,16 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-knowledge", Map.of(
                 "files", String.valueOf(plugin.getKnowledgeBase().size())
         ));
+        ContextService context = plugin.getContextService();
+        java.util.List<ContextService.StatusRow> providers = context == null
+                ? java.util.List.of()
+                : context.status(System.currentTimeMillis());
+        messages.send(sender, "command.status-context", Map.of(
+                "count", String.valueOf(providers.size())
+        ));
+        for (ContextService.StatusRow row : providers) {
+            messages.send(sender, "command.status-context-line", Map.of("line", row.format()));
+        }
     }
 
     /**
@@ -375,7 +389,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
         GenerationOverrides overrides = GenerationOverrides.none();
         String noticeId = prompt;
-        if (plugin.getPromptCatalog().find(prompt).isPresent()) {
+        NamedPrompt namedPrompt = plugin.getPromptCatalog().find(prompt).orElse(null);
+        if (namedPrompt != null) {
             Player player = sender instanceof Player online ? online : null;
             ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
                     prompt,
@@ -396,14 +411,37 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                     plugin.getPluginConfig().getSystemPrompt(),
                     plugin.getKnowledgeBase(),
                     resolved.knowledge()).overrides();
+            overrides = overrides.withNoticeId(noticeId);
+            if (player != null
+                    && namedPrompt.context().active()
+                    && plugin.getPluginConfig().contextSettings().enabled()
+                    && plugin.getContextService() != null) {
+                org.bukkit.Location location = player.getLocation();
+                String world = location.getWorld() == null ? "" : location.getWorld().getName();
+                ContextRequest request = new ContextRequest(
+                        player.getUniqueId(),
+                        player.getName(),
+                        world,
+                        namedPrompt.id(),
+                        ContextRequest.Purpose.PLACEHOLDER);
+                messages.send(sender, "command.test-sending");
+                long started = System.nanoTime();
+                String template = prompt;
+                GenerationOverrides requestOverrides = overrides;
+                plugin.getContextService().collect(request, namedPrompt.context()).thenAccept(block ->
+                        deliverTest(sender, started, ContextBlock.appendUser(template, block), requestOverrides));
+                return;
+            }
         } else if (args.length > 1) {
             prompt = outgoingTestPrompt(prompt, true);
         }
         overrides = overrides.withNoticeId(noticeId);
         messages.send(sender, "command.test-sending");
         long started = System.nanoTime();
-        String requestPrompt = prompt;
-        GenerationOverrides requestOverrides = overrides;
+        deliverTest(sender, started, prompt, overrides);
+    }
+
+    private void deliverTest(CommandSender sender, long started, String requestPrompt, GenerationOverrides requestOverrides) {
         CompletionSupport.onComplete(
                 plugin.getAiHttpClient().testAsync(requestPrompt, requestOverrides),
                 plugin.getLogger(),
