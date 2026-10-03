@@ -2,7 +2,7 @@
 
 ## 1.0.2 (2026-10-03)
 
-One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys. This build is `1.0.2-SNAPSHOT` until the release jar is cut.
+One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys.
 
 ### Security
 
@@ -18,7 +18,7 @@ One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` 
 - A length-trim INFO line names the prompt only when the id is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. A literal placeholder is not printed, including a short one such as `short_LT:long`.
 - `/nai talk` still matches a character id without regard to case. The chat line shows the id as it was typed, so a JSON id keeps its capitals. The console unknown-character line does the same.
 - The first save that removes markup from answers already in `pool.yml` copies the file to `pool.yml.bak` (or `pool.yml.bak.<timestamp>` when that backup already exists), keeps the file mode, and replaces the file with an atomic write. The backup path is logged. A later save of clean answers does not write another backup.
-- A length-trim INFO line prints the prompt id and its length when the id is a short name: `reply for prompt <name> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt`. Template content is not printed. When the id contains `<`, `>`, `{`, `}`, `#`, or is longer than 64 characters, the line is `reply for prompt (length <n>) ...`. The notice key is still that id (named prompt, pool entry, or talk character; `nai talk` when the character id is blank). The map is an access-order LRU of 256 ids. `/nai reload` clears it.
+- A length-trim INFO line is `reply for prompt <id> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt` only when the id, after `&` and `§` codes are removed, is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. For any other id, such as a literal placeholder, the text is not printed and the line is `reply for prompt (length <n>) ...`. `<n>` is the length of the id, not of the reply. A blank id prints `(blank)`. A literal that has the same form as a `prompts.yml` id is printed like one. The notice key is still that id (named prompt, pool entry, or talk character; `nai talk` when the character id is blank). The map is an access-order LRU of 256 ids. `/nai reload` clears it.
 - A `locale:` that is not bundled and has no file logs two warnings: the path, that English is the fallback, and the bundled locale codes. It does not say the file is missing from the jar. A locale file that is not valid YAML logs one warning with the path, the parser reason (line and column when the parser reports them), and the fallback (the bundled locale, or English). The stack trace is logged only at FINE.
 
 ### Documentation
