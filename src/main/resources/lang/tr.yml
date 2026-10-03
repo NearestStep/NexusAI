@@ -37,6 +37,7 @@ command:
   status-provider-pause: "&7Sağlayıcı duraklaması: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderasyon: &f{state} &8(bugün {checks} kontrol, {flags} işaret)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport klasöründen istemleri içe aktar"
   prompts-import-ok: "{prefix}&aİçe aktarıldı &f{file}&a. Eklenen: &f{added}&a. Atlanan: &f{skipped}&a. Çakışan: &f{conflicting}&a."

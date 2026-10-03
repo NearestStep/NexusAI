@@ -17,6 +17,7 @@ import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.PromptImporter;
@@ -277,6 +278,10 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 "state", moderationOn ? enabled : disabled,
                 "checks", String.valueOf(moderation == null ? 0 : moderation.checksToday()),
                 "flags", String.valueOf(moderation == null ? 0 : moderation.flagsToday())
+        ));
+        DialogueService dialogues = plugin.getDialogueService();
+        messages.send(sender, "command.status-dialogue-summary", Map.of(
+                "summary", dialogues == null ? "off" : dialogues.summaryStatus(System.currentTimeMillis())
         ));
         FallbackModel fallback = config.fallbackModel();
         String fallbackEntry = messages.raw("common.none");

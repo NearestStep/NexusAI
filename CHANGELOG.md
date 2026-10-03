@@ -2,7 +2,7 @@
 
 ## 1.1.0
 
-`config.yml` stays on schema version 2. Existing values keep their meaning. `api-key-file` is not inserted into an existing file. On startup, missing `context.*` keys are appended from the jar default (`context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`). That write uses the usual single `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists). `prompts.yml` stays on version 1. `context:` on a prompt is optional. A prompt that omits it keeps the 1.0.x text and cache key.
+`config.yml` stays on schema version 2. Existing values keep their meaning. `api-key-file` is not inserted into an existing file. On startup, missing `context.*` keys are appended from the jar default (`context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`), and missing `dialogue.summary.*` keys are inserted into an existing `dialogue:` section. That write uses the usual single `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists). `prompts.yml` stays on version 1. `context:` on a prompt is optional. A prompt that omits it keeps the 1.0.x text and cache key.
 
 ### Keys
 
@@ -24,6 +24,16 @@
 - Prompts that list `context:` (a list of ids, or `all`) append a sanitized player-context block to `%ainexus_cached_%` and to `/nai talk` / `NexusAIApi.talk`. `/nai test <id>` from a player uses that player's context. `generate_`, the pool, prewarm, console `/nai test`, and literal placeholders do not call providers. Pool or prewarm entries that name such a prompt log that context is ignored there.
 - Providers run on `nexusai-context-N` (2 threads, queue 256), never on the main thread. A slow provider is skipped. Five timeouts or exceptions in a row suspend it. `/nai status` lists providers and does not print their values.
 - The context block is part of the `cached_` cache key. Snapshots last `context.refresh-seconds`. Greeting cache keys are SHA-256 of the system text.
+- In `/nai talk`, the context block is placed after a stored dialogue summary and before the format instruction.
+
+### Dialogues
+
+- `dialogue.summary.enabled` defaults to false. While it is false, `/nai talk` and `dialogue-memory.yml` behave as in 1.0.2.
+- While it is true, lines that fall out of `memory-turns` / `memory-max-chars` are folded by one model call after `dialogue.summary.threshold-turns` player lines have dropped. The summary is wrapped as player input and placed in the character system prompt, after the sheet and before a context block. The recent window is unchanged. Each summary is its own request.
+- A refused summary drops the waiting lines and keeps the previous summary. Waiting lines are not written to disk. A restart before the call trims them.
+- With summaries on, `dialogue-memory.yml` stores `summary`, `summary-updated`, and `format: 2`. The first rewrite of a file that is not format 2 copies it to `dialogue-memory.yml.bak` once. Saves write a temporary file and move it into place.
+- `/nai status` adds `Dialogue summaries: off` or `Dialogue summaries: on (N ok, M failed today)`. The counters reset at local midnight and on `/nai reload`.
+- An unpinned summary follows `model-queue-strategy`, including round-robin. A pin does not move that cursor. `HTTP queue is full` is a normal summary refusal: the waiting lines are dropped, the previous summary stays, and the model-queue row is not cooled down.
 
 ### HTTP pool
 

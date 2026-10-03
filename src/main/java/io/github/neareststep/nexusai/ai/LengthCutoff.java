@@ -65,6 +65,49 @@ public final class LengthCutoff {
      * @param allowMarkup when true, ampersand hex and MiniMessage tags stay in the text that is cut.
      *                    Legacy {@code §} and {@code &} codes are still removed before the cut.
      */
+    /**
+     * Keeps at most {@code maxChars} characters, cutting on whitespace when the text has a word
+     * break inside the cap, and appends {@code …} when something was removed. The result is never
+     * longer than {@code maxChars}. A cut does not split a surrogate pair.
+     */
+    public static String limit(String text, int maxChars) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        int cap = Math.max(1, maxChars);
+        if (text.length() <= cap) {
+            return text;
+        }
+        int room = cap - 1;
+        if (room <= 0) {
+            return "…";
+        }
+        String prefix = head(text, room);
+        int lastBreak = -1;
+        for (int i = 0; i < prefix.length(); i++) {
+            if (Character.isWhitespace(prefix.charAt(i))) {
+                lastBreak = i;
+            }
+        }
+        String kept = lastBreak > 0 ? prefix.substring(0, lastBreak).stripTrailing() : prefix.stripTrailing();
+        if (kept.isEmpty()) {
+            return "…";
+        }
+        if (kept.endsWith("…") || kept.endsWith("...")) {
+            return kept.length() <= cap ? kept : "…";
+        }
+        String limited = kept + "…";
+        return limited.length() <= cap ? limited : "…";
+    }
+
+    private static String head(String text, int maxChars) {
+        int end = Math.min(text.length(), Math.max(0, maxChars));
+        if (end > 0 && end < text.length() && Character.isHighSurrogate(text.charAt(end - 1))) {
+            end--;
+        }
+        return text.substring(0, end);
+    }
+
     public static String trim(String raw, boolean allowMarkup) {
         String text = PlayerInput.stripSectionSigns(raw == null ? "" : raw, allowMarkup).strip();
         if (text.isEmpty()) {

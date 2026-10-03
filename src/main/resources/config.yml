@@ -334,6 +334,20 @@ dialogue:
   # Cache a generated greeting. A greeting written under dialogue.greeting is not a model call.
   # The cache time is cache.ttl. Later lines in the same conversation are never cached.
   cache-greeting: true
+  # Fold lines that fall out of memory-turns into one short summary. false keeps the 1.0.2 trim.
+  # Each summary is its own model request. There is no per-character override.
+  # Lines waiting to be folded are not written to disk. A restart before the call trims them.
+  summary:
+    enabled: false
+    # Summarise once this many player turns have dropped out of memory-turns / memory-max-chars.
+    threshold-turns: 2
+    # Stored summary cap.
+    max-chars: 400
+    # Sent for the summary call only. 0 or a negative value omits max_tokens.
+    max-tokens: 200
+    # Both empty = model-queue. Both set = pin this provider/model (same rule as moderation).
+    provider: ""
+    model: ""
 
 # Character actions. The model may pick a name through OpenAI tools. It cannot change the command.
 # Placeholders never run these. A provider that rejects tools gets one retry with actions off.
