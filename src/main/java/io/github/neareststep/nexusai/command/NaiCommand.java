@@ -314,7 +314,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return new ConsoleTalkError("talk.unknown-player", Map.of("player", args[1]));
         }
         if (!characterKnown) {
-            String id = args[2] == null ? "" : args[2].toLowerCase(Locale.ROOT);
+            String id = args[2] == null ? "" : args[2];
             return new ConsoleTalkError("talk.unknown-character", Map.of("id", id));
         }
         return null;
