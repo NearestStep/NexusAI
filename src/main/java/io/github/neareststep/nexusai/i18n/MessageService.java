@@ -41,11 +41,14 @@ public final class MessageService {
      */
     private static final Set<String> PLAIN_PLACEHOLDERS = Set.of("reply", "answer");
     /**
-     * Values that are inserted into the legacy template before it is deserialized.
-     * A {@code §} or MiniMessage tag in these would colour chat or, for a consumer of the
-     * formatted string, survive as markup. They are stripped the same way as a model reply.
+     * Left as written when substituted. {@code prefix} is the locale colour template.
+     * {@code reply} and {@code answer} are inserted as plain text after the template is
+     * deserialized, so they are not parsed as legacy codes.
+     * Every other placeholder is data (a character or prompt id, a player name, an error,
+     * a config value, an import name, moderation text) and is stripped before it is
+     * written into the legacy string.
      */
-    private static final Set<String> SANITIZED_PLACEHOLDERS = Set.of("error", "character");
+    private static final Set<String> UNSANITIZED_PLACEHOLDERS = Set.of("prefix", "reply", "answer");
     private static final Pattern YAML_LOCATION = Pattern.compile("line \\d+, column \\d+");
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
@@ -157,16 +160,17 @@ public final class MessageService {
     }
 
     /**
-     * {@code {error}} and {@code {character}} are written into the legacy template, so a
-     * section sign in either one becomes a colour. Strip them before that insertion.
-     * {@code {reply}} and {@code {answer}} stay raw here; they are inserted as plain text later.
+     * Anything except {@code prefix}, {@code reply}, and {@code answer} is written into the
+     * legacy template, so a section sign in it becomes a colour and a click tag can survive
+     * for a later parser. Strip those values first. {@code reply} and {@code answer} stay raw
+     * here; {@link #component(String, Map)} inserts them as plain text later.
      */
     private static String inserted(String key, String value) {
         String text = value == null ? "" : value;
-        if (SANITIZED_PLACEHOLDERS.contains(key)) {
-            return PlayerInput.stripSectionSigns(text);
+        if (UNSANITIZED_PLACEHOLDERS.contains(key)) {
+            return text;
         }
-        return text;
+        return PlayerInput.stripSectionSigns(text);
     }
 
     private Map<String, String> placeholderValues(Map<String, String> placeholders) {
