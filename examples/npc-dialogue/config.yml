@@ -1,0 +1,49 @@
+# /nai talk character. Copy to plugins/NexusAI/config.yml.
+# Set GROQ_API_KEY on the server process. Do not put the key in url.
+config-version: 2
+locale: en
+
+api:
+  provider: groq
+  model: llama-3.3-70b-versatile
+  base-url: ""
+  key: ""
+  max-tokens: 256
+  temperature: -1
+
+providers:
+  groq:
+    type: openai-compatible
+    url: "https://api.groq.com/openai/v1"
+    api-key: "${ENV:GROQ_API_KEY}"
+
+model-queue-strategy: failover
+model-queue-remaining-threshold: 0
+model-queue:
+  - provider: groq
+    model: llama-3.3-70b-versatile
+    daily-request-limit: 1000
+
+fallback: "..."
+
+dialogue:
+  enabled: true
+  memory-turns: 8
+  persist-memory: false
+  max-replies-per-session: 12
+  message-cooldown-millis: 3000
+  conversations-per-player-per-day: 20
+  max-message-length: 200
+  cache-greeting: true
+  summary:
+    enabled: false
+    threshold-turns: 2
+    max-chars: 400
+    max-tokens: 200
+    provider: ""
+    model: ""
+
+actions:
+  enabled: true
+  log: true
+  max-per-reply: 1

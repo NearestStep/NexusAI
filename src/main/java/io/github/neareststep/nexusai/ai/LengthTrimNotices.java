@@ -1,20 +1,22 @@
 package io.github.neareststep.nexusai.ai;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
-import java.util.regex.Pattern;
 
 /**
  * INFO when a reply was cut off by {@code max_tokens}. Each distinct prompt id is logged
  * twice, then suppressed, so a placeholder that always hits the cap does not write a line
  * on every refresh. The key is a stable id (prompt id, placeholder name, pool name, or
  * talk persona), never the rendered prompt, so {@code {player}} does not mint a new key
- * per player. The line prints a named id ({@code [a-z0-9_-]+} or {@code nai talk}) and
- * its length. Literal placeholder text is not printed. The map holds at most
- * {@value #MAX_KEYS} keys.
+ * per player. The line prints a name only when that id is loaded from {@code prompts.yml}
+ * or when it is {@code nai talk}. A string that merely looks like an id is not printed.
+ * The map holds at most {@value #MAX_KEYS} keys.
  * {@link #reset()} runs on {@code /nai reload}.
  */
 public final class LengthTrimNotices {
@@ -26,10 +28,8 @@ public final class LengthTrimNotices {
      * recently used one once this many keys are stored.
      */
     static final int MAX_KEYS = 256;
-    /** A prompt id is logged by name. Anything else, including a short literal, is not. */
-    private static final int NAME_LIMIT = 64;
-    /** Same shape as a {@code prompts.yml} id. Upper case and other punctuation are literals. */
-    private static final Pattern NAMED_ID = Pattern.compile("[a-z0-9_-]+");
+    /** Ids loaded from {@code prompts.yml}. A matching shape is not enough to print a name. */
+    private static final AtomicReference<Set<String>> KNOWN_IDS = new AtomicReference<>(Set.of());
     private static final Map<String, AtomicInteger> COUNTS = Collections.synchronizedMap(
             new LinkedHashMap<>(64, 0.75f, true) {
                 @Override
@@ -57,9 +57,21 @@ public final class LengthTrimNotices {
     }
 
     /**
-     * The line names the prompt id when that id is a {@code prompts.yml} id or {@code nai talk}.
-     * A literal placeholder, including a short one such as {@code short_LT:long}, is not written;
-     * only its length is.
+     * Replaces the set of ids that may be printed by name. Called when prompts are loaded.
+     * {@code nai talk} is always printable and does not need to be in this set.
+     */
+    public static void usePromptIds(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            KNOWN_IDS.set(Set.of());
+            return;
+        }
+        KNOWN_IDS.set(Set.copyOf(ids));
+    }
+
+    /**
+     * The line names the prompt only when that id is loaded from {@code prompts.yml}, or when it
+     * is {@code nai talk}. A literal that only matches {@code [a-z0-9_-]{1,64}} is not written;
+     * only its length is. The same is true of a short literal such as {@code short_LT:long}.
      */
     public static String message(String id) {
         String clean = cleaned(id);
@@ -134,6 +146,6 @@ public final class LengthTrimNotices {
         if ("nai talk".equals(clean)) {
             return true;
         }
-        return clean.length() <= NAME_LIMIT && NAMED_ID.matcher(clean).matches();
+        return KNOWN_IDS.get().contains(clean);
     }
 }

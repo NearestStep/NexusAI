@@ -6,6 +6,10 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -503,6 +507,90 @@ class ConfigMigrationTest {
         yaml.loadFromString(written);
         assertEquals(ConfigVersions.CONFIG, yaml.getInt("config-version"));
         assertFalse(yaml.getBoolean("sanitize.allow-markup"));
+
+        ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(second.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void migrationCopiesTheRawApiKeyPlaceholder() {
+        Function<String, String> previous = PluginConfig.environment;
+        PluginConfig.environment = name -> "sk-canary-resolved";
+        try {
+            String yaml = """
+                    api:
+                      provider: groq
+                      model: llama-3.3-70b-versatile
+                      key: "${GROQ}"
+                    """;
+            ConfigMigrator.Outcome outcome = ConfigMigrator.migrateConfig(yaml);
+            assertTrue(outcome.yaml().contains("${GROQ}"), outcome.yaml());
+            assertFalse(outcome.yaml().contains("sk-canary-resolved"), outcome.yaml());
+            assertEquals("${GROQ}", load(outcome.yaml()).getString("providers.groq.api-key"));
+            String rendered = ConfigMigrator.renderProviders("groq", "https://example.test/v1", "${GROQ}");
+            assertTrue(rendered.contains("${GROQ}"), rendered);
+            assertFalse(rendered.contains("sk-canary-resolved"), rendered);
+        } finally {
+            PluginConfig.environment = previous;
+        }
+    }
+
+    @Test
+    void backupKeepsOwnerOnlyPosixPermissions() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-bak-mode");
+        Path source = dir.resolve("config.yml");
+        Files.writeString(source, "api:\n  key: \"literal\"\n", StandardCharsets.UTF_8);
+        PosixFileAttributeView view = Files.getFileAttributeView(source, PosixFileAttributeView.class);
+        org.junit.jupiter.api.Assumptions.assumeTrue(view != null, "POSIX permissions are not available");
+        Files.setPosixFilePermissions(source, Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+        Path bak = FileBackup.backup(source);
+        Set<PosixFilePermission> copied = Files.getPosixFilePermissions(bak);
+        assertTrue(copied.contains(PosixFilePermission.OWNER_READ));
+        assertFalse(copied.contains(PosixFilePermission.GROUP_READ));
+        assertFalse(copied.contains(PosixFilePermission.OTHERS_READ));
+    }
+
+    @Test
+    void replaceKeepsOwnerOnlyPosixPermissions() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-replace-mode");
+        Path source = dir.resolve("config.yml");
+        Files.writeString(source, "api:\n  key: \"literal\"\n", StandardCharsets.UTF_8);
+        PosixFileAttributeView view = Files.getFileAttributeView(source, PosixFileAttributeView.class);
+        org.junit.jupiter.api.Assumptions.assumeTrue(view != null, "POSIX permissions are not available");
+        Set<PosixFilePermission> mode = Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+        Files.setPosixFilePermissions(source, mode);
+        FileBackup.replace(source, "api:\n  key: \"\"\n");
+        assertEquals(mode, Files.getPosixFilePermissions(source));
+        assertTrue(Files.readString(source).contains("key: \"\""));
+    }
+
+    @Test
+    void httpLimitsAreAppendedOnceAndCommentsStay() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-http-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                  max-tokens: 256
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("http-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("http.max-in-flight"));
+        assertTrue(outcome.addedKeys().contains("http.queue-size"));
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("max-in-flight:", -1).length - 1, written);
+        assertEquals(1, written.split("queue-size:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(64, yaml.getInt("http.max-in-flight"));
+        assertEquals(64, yaml.getInt("http.queue-size"));
 
         ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(second.addedKeys().isEmpty());

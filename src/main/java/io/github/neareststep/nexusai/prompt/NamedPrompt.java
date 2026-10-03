@@ -41,6 +41,7 @@ public final class NamedPrompt {
 
     private final DialogueProfile dialogue;
     private final List<CharacterAction> actions;
+    private final PromptContext context;
 
     public NamedPrompt(
             String id,
@@ -65,7 +66,7 @@ public final class NamedPrompt {
             String format
     ) {
         this(id, template, vars, ttl, fallback, maxPromptLength, overrides, format,
-                List.of(), null, DialogueProfile.absent(), List.of());
+                List.of(), null, DialogueProfile.absent(), List.of(), PromptContext.none());
     }
 
     public NamedPrompt(
@@ -80,7 +81,8 @@ public final class NamedPrompt {
             List<String> knowledge,
             FallbackModel fallbackModel,
             DialogueProfile dialogue,
-            List<CharacterAction> actions
+            List<CharacterAction> actions,
+            PromptContext context
     ) {
         this.id = Objects.requireNonNull(id, "id");
         this.template = Objects.requireNonNull(template, "template");
@@ -96,6 +98,7 @@ public final class NamedPrompt {
         this.fallbackModel = fallbackModel != null && fallbackModel.configured() ? fallbackModel : null;
         this.dialogue = dialogue == null ? DialogueProfile.absent() : dialogue;
         this.actions = actions == null || actions.isEmpty() ? List.of() : List.copyOf(actions);
+        this.context = context == null ? PromptContext.none() : context;
         this.playerDependent = computePlayerDependent(this.template, this.vars);
         this.resolvedPattern = this.playerDependent ? compileResolved(this.template, this.vars) : null;
     }
@@ -150,6 +153,13 @@ public final class NamedPrompt {
 
     public List<io.github.neareststep.nexusai.dialogue.CharacterAction> actions() {
         return actions;
+    }
+
+    /**
+     * Providers listed on this prompt. {@link PromptContext#none()} keeps the 1.0.x prompt text and cache key.
+     */
+    public PromptContext context() {
+        return context;
     }
 
     /**

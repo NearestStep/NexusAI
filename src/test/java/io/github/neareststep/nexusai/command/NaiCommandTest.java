@@ -2,11 +2,13 @@ package io.github.neareststep.nexusai.command;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.context.ContextService;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
-
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -106,5 +108,18 @@ class NaiCommandTest {
     void colorCodeConsumesTheFollowingLetter() {
         assertEquals("A", PlayerInput.sanitize("A§B"));
         assertEquals(PlayerInput.wrap("A"), NaiCommand.outgoingTestPrompt("A§B", true));
+    }
+
+    @Test
+    void contextStatusLinesDoNotIncludePlayerValues() {
+        ZoneId zone = ZoneId.of("UTC");
+        String ok = new ContextService.StatusRow("economy", "MyEco", 10, 100, false, 0, 0, zone).format();
+        assertEquals("economy (MyEco) prio 10, 100ms, ok, timeouts 0", ok);
+        long until = Instant.parse("2026-10-12T18:03:11Z").toEpochMilli();
+        String suspended = new ContextService.StatusRow("rank", "RankBridge", 100, 200, true, until, 7, zone).format();
+        assertEquals("rank (RankBridge) prio 100, 200ms, suspended until 2026-10-12 18:03:11, timeouts 7", suspended);
+        assertFalse(ok.contains("~12k"));
+        assertFalse(suspended.contains("balance"));
+        assertFalse(suspended.contains("§"));
     }
 }

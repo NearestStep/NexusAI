@@ -47,9 +47,16 @@ public final class DialogueListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        if (event.getPlayer() == null) {
+            return;
+        }
+        java.util.UUID playerId = event.getPlayer().getUniqueId();
         DialogueService service = plugin.getDialogueService();
         if (service != null) {
-            service.quit(event.getPlayer().getUniqueId());
+            service.quit(playerId);
+        }
+        if (plugin.getContextSnapshots() != null) {
+            plugin.getContextSnapshots().forget(playerId);
         }
     }
 

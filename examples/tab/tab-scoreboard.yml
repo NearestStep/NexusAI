@@ -1,0 +1,10 @@
+# Fragment for plugins/TAB/config.yml. Merge under scoreboard:, do not replace the whole file.
+# Requires the survival_tips prompt from examples/placeholders.
+scoreboard:
+  enabled: true
+  scoreboards:
+    nexusai-tips:
+      title: "&bServer"
+      lines:
+        - "&7Tip"
+        - "%ainexus_cached_survival_tips%"

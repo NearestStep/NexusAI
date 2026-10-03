@@ -3,6 +3,8 @@ package io.github.neareststep.nexusai.dialogue;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.HttpGate;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.AnswerFormatter;
 import io.github.neareststep.nexusai.ai.FormatEnforcer;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
@@ -20,6 +22,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletionException;
 import java.util.function.Supplier;
 
 /**
@@ -29,20 +32,35 @@ public final class DialogueTransport {
 
     private final HttpClient httpClient;
     private final Supplier<PluginConfig> config;
+    private final HttpGate gate;
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient) {
+        this(config, httpClient, HttpGate.unlimited());
+    }
+
+    public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient, HttpGate gate) {
         this.config = Objects.requireNonNull(config, "config");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
+        this.gate = gate == null ? HttpGate.unlimited() : gate;
     }
 
     private PluginConfig config() {
         return config.get();
     }
 
+    /**
+     * True when both the in-flight cap and the wait queue are full, so the next call would fail
+     * with {@link HttpPool#QUEUE_FULL} without being sent.
+     */
+    public boolean saturated() {
+        HttpGate.Snapshot snapshot = gate.snapshot();
+        return snapshot.inFlight() >= snapshot.maxInFlight() && snapshot.waiting() >= snapshot.waitCapacity();
+    }
+
     public Result send(Request request) {
         Objects.requireNonNull(request, "request");
         String root = request.baseUrl() == null || request.baseUrl().isBlank() ? config().getBaseUrl() : request.baseUrl();
-        URI uri = URI.create(trimSlash(root) + "/chat/completions");
+        URI uri = io.github.neareststep.nexusai.ai.ChatEndpoints.chatCompletions(root);
         try {
             byte[] json = DialogueProtocol.requestJson(
                     request.model(),
@@ -63,10 +81,10 @@ public final class DialogueTransport {
             if (request.apiKey() != null && !request.apiKey().isBlank()) {
                 builder.header("Authorization", "Bearer " + request.apiKey());
             }
-            HttpResponse<String> response = httpClient.send(
-                    builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build(),
-                    HttpResponse.BodyHandlers.ofString()
-            );
+            HttpRequest httpRequest = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
+            HttpResponse<String> response = gate.schedule(
+                    () -> httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
+            ).join();
             String body = response.body() == null ? "" : response.body();
             Map<String, List<String>> headers = response.headers().map();
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -104,13 +122,27 @@ public final class DialogueTransport {
             );
         } catch (AiRequestException e) {
             throw e;
-        } catch (HttpTimeoutException e) {
-            throw new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling " + host(uri), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", e);
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof AiRequestException ai) {
+                throw ai;
+            }
+            if (cause instanceof HttpTimeoutException timeout) {
+                throw new AiRequestException(AiErrorKind.TIMEOUT, 0, "Request timed out calling " + host(uri), timeout);
+            }
+            if (HttpPool.isQueueFull(cause)) {
+                throw HttpPool.queueFull(cause);
+            }
+            String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+            throw new AiRequestException(
+                    AiErrors.classify(cause),
+                    0,
+                    SecretMask.redact(message, secrets(request.apiKey())),
+                    cause);
         } catch (Exception e) {
-            throw new AiRequestException(AiErrors.classify(e), 0, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), e);
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            throw new AiRequestException(
+                    AiErrors.classify(e), 0, SecretMask.redact(message, secrets(request.apiKey())), null);
         }
     }
 
@@ -135,7 +167,7 @@ public final class DialogueTransport {
                 allowMarkup
         );
         formatted = FormatEnforcer.enforce(formatted, current.presetFor(formatId));
-        formatted = SecretMask.redact(formatted, apiKey == null || apiKey.isBlank() ? current.configuredSecrets() : List.of(apiKey));
+        formatted = SecretMask.redact(formatted, secrets(apiKey));
         if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw, allowMarkup).isBlank()) {
             if (PlayerInput.emptiedByMarkup(raw, allowMarkup)) {
                 throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
@@ -163,6 +195,19 @@ public final class DialogueTransport {
         }
     }
 
+    private List<String> secrets(String apiKey) {
+        List<String> secrets = new java.util.ArrayList<>();
+        if (apiKey != null && !apiKey.isBlank()) {
+            secrets.add(apiKey.trim());
+        }
+        for (String configured : config().configuredSecrets()) {
+            if (configured != null && !secrets.contains(configured)) {
+                secrets.add(configured);
+            }
+        }
+        return secrets;
+    }
+
     private static boolean looksLikeHtml(String body) {
         String head = body.length() > 64 ? body.substring(0, 64).toLowerCase(Locale.ROOT) : body.toLowerCase(Locale.ROOT);
         return head.contains("<!doctype html") || head.contains("<html");
@@ -170,14 +215,6 @@ public final class DialogueTransport {
 
     private static String host(URI uri) {
         return uri.getHost() == null ? uri.toString() : uri.getHost();
-    }
-
-    private static String trimSlash(String url) {
-        String trimmed = url.trim();
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return trimmed;
     }
 
     public record Request(

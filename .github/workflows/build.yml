@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,13 +14,21 @@ jobs:
         with:
           distribution: temurin
           java-version: "25"
+      - name: Load-harness self-check
+        run: python3 .github/scripts/paper-load.py --self-check
       - name: Test and build the shaded jar
-        run: chmod +x ./gradlew && ./gradlew test shadowJar --no-daemon
+        run: chmod +x ./gradlew && ./gradlew test shadowJar loadDriverJar --no-daemon
       - uses: actions/upload-artifact@v4
         if: success()
         with:
           name: NexusAI
           path: build/libs/NexusAI-*.jar
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: NexusAI-LoadDriver
+          path: build/loadtest/NexusAI-LoadDriver.jar
           if-no-files-found: error
 
   smoke:
@@ -56,3 +65,47 @@ jobs:
           MC_VERSION: ${{ matrix.mc }}
           PLUGIN_DIR: dist
         run: python3 .github/scripts/paper-smoke.py
+
+  load:
+    name: Load ${{ matrix.mc }} (Java ${{ matrix.java }})
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mc: "1.20.6"
+            java: "21"
+          - mc: "26.2"
+            java: "25"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: NexusAI
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: NexusAI-LoadDriver
+          path: driver
+      - name: Mode A load scenarios
+        env:
+          MC_VERSION: ${{ matrix.mc }}
+          PLUGIN_DIR: dist
+          DRIVER_DIR: driver
+        run: python3 .github/scripts/paper-load.py --version "$MC_VERSION" --plugins-dir dist --driver-dir driver --scenario S1,S2,S3,S-pool --out load-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-${{ matrix.mc }}
+          path: |
+            load-out/report.json
+            load-out/mock-requests.jsonl
+            load-out/jfr-summary.txt
+          if-no-files-found: warn

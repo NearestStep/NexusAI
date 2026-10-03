@@ -35,13 +35,17 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7마지막 오류: &f{last_error}"
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7모더레이션: &f{state} &8(오늘 검사 {checks}, 표시 {flags})"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport 폴더에서 프롬프트 가져오기"
   prompts-import-ok: "{prefix}&a가져옴 &f{file}&a. 추가: &f{added}&a. 건너뜀: &f{skipped}&a. 충돌: &f{conflicting}&a."
   prompts-import-fail: "{prefix}&c가져오기 실패: &f{error}"
   status-fallback-model: "&7대체 모델: &f{entry}"
   status-knowledge: "&7지식 파일: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ 가 요청되었지만 풀에 없음: &f{prompts}"
 
 common:

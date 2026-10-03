@@ -4,10 +4,12 @@ import io.github.neareststep.nexusai.ai.AiDiagnostics;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
@@ -29,6 +31,10 @@ import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.context.CachedContextCoordinator;
+import io.github.neareststep.nexusai.context.ContextRegistry;
+import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.context.ContextSnapshots;
 import io.github.neareststep.nexusai.dialogue.DialogueListener;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
@@ -56,8 +62,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-
 public final class NexusAI extends JavaPlugin {
 
     private static final Set<String> KNOWN_PROVIDERS = Set.of(
@@ -72,6 +76,7 @@ public final class NexusAI extends JavaPlugin {
     private AiPool aiPool;
     private PoolService poolService;
     private PrewarmService prewarmService;
+    private HttpPool httpPool;
     private ExecutorService httpExecutor;
     private ScheduledExecutorService scheduler;
     private HttpClient sharedHttpClient;
@@ -86,16 +91,20 @@ public final class NexusAI extends JavaPlugin {
     private UnpooledGenerateLog unpooledGenerateLog;
     private String loggedCredentialWarning = "";
     private boolean loggedMissingPapi;
+    private ExecutorService contextExecutor;
+    private ContextRegistry contextRegistry;
+    private ContextSnapshots contextSnapshots;
+    private ContextService contextService;
+    private CachedContextCoordinator contextCoordinator;
 
     @Override
     public void onEnable() {
         if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
-        saveDefaultConfig();
-        if (!new File(getDataFolder(), "prompts.yml").isFile()) {
-            saveResource("prompts.yml", false);
-        }
+        PluginConfig.secretsBase = getDataFolder().toPath();
+        installBundled("config.yml");
+        installBundled("prompts.yml");
         prepareDataFolders();
         this.unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
         if (!prepareConfigFile()) {
@@ -108,10 +117,17 @@ public final class NexusAI extends JavaPlugin {
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
         loadKnowledge();
+        this.contextRegistry = new ContextRegistry(getLogger());
+        NexusAIApi.bindContextRegistry(contextRegistry);
+        getServer().getPluginManager().registerEvents(contextRegistry, this);
+        contextRegistry.load(getServer().getServicesManager());
         loadPrompts();
         logCredentialState();
         logGroqMaxTokensWarning();
         logMissingEnvVars();
+        logKeyFileWarnings();
+        logQueueStrategy();
+        logHttpLimitWarning();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -121,8 +137,24 @@ public final class NexusAI extends JavaPlugin {
             getLogger().info("API keys: " + maskedKeys);
         }
 
-        this.httpExecutor = createHttpExecutor();
+        this.httpPool = HttpPool.create(
+                getLogger(), pluginConfig.httpMaxInFlight(), pluginConfig.httpQueueSize());
+        this.httpExecutor = httpPool.executor();
         this.scheduler = createScheduler();
+        this.contextExecutor = ContextService.newWorkerPool(ContextService.THREADS, ContextService.QUEUE_CAPACITY);
+        this.contextSnapshots = new ContextSnapshots();
+        this.contextService = new ContextService(
+                contextRegistry,
+                pluginConfig.contextSettings(),
+                contextExecutor,
+                scheduler,
+                getLogger(),
+                System::currentTimeMillis,
+                pluginConfig.getErrorLogCooldownSeconds());
+        this.contextCoordinator = new CachedContextCoordinator(
+                contextSnapshots,
+                System::currentTimeMillis,
+                () -> pluginConfig.contextSettings().refresh());
         startRuntimeServices();
         registerPlaceholderExpansion();
         registerCommands();
@@ -141,8 +173,10 @@ public final class NexusAI extends JavaPlugin {
         }
         stopRuntimeServices(true);
         closeSharedHttpClient();
+        shutdownExecutor(contextExecutor);
         shutdownExecutor(scheduler);
         shutdownExecutor(httpExecutor);
+        NexusAIApi.bindContextRegistry(null);
         getLogger().info("NexusAI disabled.");
     }
 
@@ -150,6 +184,7 @@ public final class NexusAI extends JavaPlugin {
      * Reloads config.yml, prompts.yml, and the locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
      */
     public void reloadPlugin() {
+        PluginConfig.secretsBase = getDataFolder().toPath();
         PromptCatalog.Parsed parsed = readPrompts();
         if (!parsed.valid()) {
             throw new IllegalStateException(
@@ -169,11 +204,17 @@ public final class NexusAI extends JavaPlugin {
         LengthTrimNotices.reset();
 
         stopRuntimeServices(true);
+        if (httpPool != null) {
+            httpPool.applyLimits(pluginConfig.httpMaxInFlight(), pluginConfig.httpQueueSize());
+        }
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
         logGroqMaxTokensWarning();
         logMissingEnvVars();
+        logKeyFileWarnings();
+        logQueueStrategy();
+        logHttpLimitWarning();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -193,7 +234,9 @@ public final class NexusAI extends JavaPlugin {
         // including an empty-reply ladder, so a changed prompt is sent again.
         gate.resetBackoff();
         AiDiagnostics diagnostics = new AiDiagnostics(
-                getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
+                getLogger(),
+                Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()),
+                pluginConfig::configuredSecrets);
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
         this.aiPool = new AiPool(pluginConfig.allowMarkup());
         PoolStore poolStore = new PoolStore(
@@ -219,11 +262,20 @@ public final class NexusAI extends JavaPlugin {
             dialogueService.start();
             getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
             NexusAIApi.bind(dialogueService);
+        } else {
+            dialogueService.resetSummaryStats();
         }
         startModeration();
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        // Context providers stay registered across /nai reload. Only snapshots and health reset.
+        if (contextSnapshots != null) {
+            contextSnapshots.clear();
+        }
+        if (contextService != null && pluginConfig != null) {
+            contextService.apply(pluginConfig.contextSettings(), pluginConfig.getErrorLogCooldownSeconds());
+        }
         this.moderationService = null;
         if (modelQueue != null) {
             modelQueue.save();
@@ -293,6 +345,7 @@ public final class NexusAI extends JavaPlugin {
      * @return {@code false} when {@code config.yml} is not valid YAML and was left untouched
      */
     private boolean prepareConfigFile() {
+        installBundled("config.yml");
         saveDefaultConfig();
         File file = new File(getDataFolder(), "config.yml");
         try (InputStream in = getResource("config.yml")) {
@@ -339,6 +392,23 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    private void logKeyFileWarnings() {
+        for (String warning : pluginConfig.keyFileWarnings()) {
+            getLogger().warning(warning);
+        }
+        for (String warning : pluginConfig.shortKeyWarnings()) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void logHttpLimitWarning() {
+        for (String warning : pluginConfig.httpLimitWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
     /**
      * One warning per startup and per {@code /nai reload}. Not logged per request.
      */
@@ -375,7 +445,8 @@ public final class NexusAI extends JavaPlugin {
         if (!KNOWN_PROVIDERS.contains(provider)) {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
-        OpenAiProvider http = new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        OpenAiProvider http = new OpenAiProvider(
+                config, httpExecutor, getLogger(), sharedClient(config), httpPool.gate());
         this.openAiProvider = http;
         this.modelQueue = new ModelQueue(
                 config.modelQueue(),
@@ -383,8 +454,16 @@ public final class NexusAI extends JavaPlugin {
                 config.getProviderPauseSeconds() * 1000L,
                 config.getAuthPauseSeconds() * 1000L,
                 new File(getDataFolder(), "usage.yml"),
-                getLogger());
-        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger());
+                getLogger(),
+                config.modelQueueStrategy());
+        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
+    }
+
+    private void logQueueStrategy() {
+        String warning = pluginConfig.modelQueueStrategyWarning();
+        if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
+        }
     }
 
     private void migrateOtherConfigs() {
@@ -418,16 +497,6 @@ public final class NexusAI extends JavaPlugin {
         } catch (RuntimeException ignored) {
             // A closed client must not fail reload or shutdown.
         }
-    }
-
-    private static ExecutorService createHttpExecutor() {
-        AtomicInteger sequence = new AtomicInteger();
-        ThreadFactory factory = runnable -> {
-            Thread thread = new Thread(runnable, "nexusai-http-" + sequence.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        };
-        return Executors.newFixedThreadPool(4, factory);
     }
 
     private static ScheduledExecutorService createScheduler() {
@@ -491,6 +560,13 @@ public final class NexusAI extends JavaPlugin {
         return httpExecutor;
     }
 
+    /**
+     * Bounded worker queue and in-flight HTTP cap. Load tests read {@link HttpPool#snapshot()}.
+     */
+    public HttpPool getHttpPool() {
+        return httpPool;
+    }
+
     public PromptCatalog getPromptCatalog() {
         return promptCatalog;
     }
@@ -508,6 +584,22 @@ public final class NexusAI extends JavaPlugin {
 
     public ModelQueue getModelQueue() {
         return modelQueue;
+    }
+
+    public ContextRegistry getContextRegistry() {
+        return contextRegistry;
+    }
+
+    public ContextSnapshots getContextSnapshots() {
+        return contextSnapshots;
+    }
+
+    public ContextService getContextService() {
+        return contextService;
+    }
+
+    public CachedContextCoordinator getContextCoordinator() {
+        return contextCoordinator;
     }
 
     public DialogueService getDialogueService() {
@@ -558,6 +650,7 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("prompts.yml has a syntax error (" + parsed.error()
                     + "). Named prompts are disabled until the file is fixed. Literal placeholders still work.");
             this.promptCatalog = PromptCatalog.empty();
+            LengthTrimNotices.usePromptIds(java.util.List.of());
             return;
         }
         applyPrompts(parsed);
@@ -565,6 +658,7 @@ public final class NexusAI extends JavaPlugin {
 
     private void applyPrompts(PromptCatalog.Parsed parsed) {
         this.promptCatalog = parsed.catalog();
+        LengthTrimNotices.usePromptIds(promptCatalog.ids());
         for (String warning : parsed.warnings()) {
             getLogger().warning(warning);
         }
@@ -574,7 +668,7 @@ public final class NexusAI extends JavaPlugin {
                 continue;
             }
             for (String name : prompt.knowledge()) {
-                if (!knowledgeBase.contains(name)) {
+                if (knowledgeBase.unknown(name)) {
                     getLogger().warning("Prompt '" + id + "' lists unknown knowledge file '" + name + "'.");
                 }
             }
@@ -588,6 +682,47 @@ public final class NexusAI extends JavaPlugin {
         }
         for (String warning : promptCatalog.unknownIdReferences("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
             getLogger().warning(warning);
+        }
+        if (contextRegistry != null) {
+            for (String warning : promptCatalog.unknownContextProviders(contextRegistry.activeIds())) {
+                getLogger().warning(warning);
+            }
+        }
+        for (String warning : promptCatalog.sharedContextWarnings("pool.entries", poolPrompts)) {
+            getLogger().warning(warning);
+        }
+        for (String warning : promptCatalog.sharedContextWarnings("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
+            getLogger().warning(warning);
+        }
+    }
+
+    /**
+     * Copies a bundled YAML into the data folder the first time it is needed.
+     * A new {@code config.yml} or {@code prompts.yml} is mode {@code 0600} on POSIX,
+     * because {@code config.yml} may later hold an API key. An existing file keeps its mode.
+     */
+    private void installBundled(String name) {
+        File target = new File(getDataFolder(), name);
+        if (target.isFile()) {
+            return;
+        }
+        try (InputStream in = getResource(name)) {
+            if (in != null) {
+                AtomicFiles.installPrivate(target.toPath(), in);
+            }
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create " + name, e);
+        }
+        if (target.isFile()) {
+            return;
+        }
+        if ("config.yml".equals(name)) {
+            saveDefaultConfig();
+        } else {
+            saveResource(name, false);
+        }
+        if (target.isFile()) {
+            AtomicFiles.restrictOwnerReadWrite(target.toPath());
         }
     }
 
@@ -628,7 +763,7 @@ public final class NexusAI extends JavaPlugin {
     private PromptCatalog.Parsed readPrompts() {
         File file = new File(getDataFolder(), "prompts.yml");
         if (!file.exists()) {
-            saveResource("prompts.yml", false);
+            installBundled("prompts.yml");
         }
         if (!file.isFile()) {
             return PromptCatalog.Parsed.invalid("prompts.yml is missing");

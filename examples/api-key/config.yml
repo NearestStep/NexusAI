@@ -1,0 +1,35 @@
+# Groq reads secrets/groq.key. Gemini reads ${ENV:GEMINI_API_KEY}.
+# Copy this file to plugins/NexusAI/config.yml and the key file to plugins/NexusAI/secrets/groq.key.
+# Replace the placeholder line in the key file. Do not put a key in url.
+config-version: 2
+locale: en
+
+api:
+  provider: groq
+  model: llama-3.3-70b-versatile
+  base-url: ""
+  key: ""
+  max-tokens: 256
+  temperature: -1
+
+providers:
+  groq:
+    type: openai-compatible
+    url: "https://api.groq.com/openai/v1"
+    api-key-file: secrets/groq.key
+  gemini:
+    type: gemini
+    url: "https://generativelanguage.googleapis.com/v1beta/openai"
+    api-key: "${ENV:GEMINI_API_KEY}"
+
+model-queue-strategy: failover
+model-queue-remaining-threshold: 0
+model-queue:
+  - provider: groq
+    model: llama-3.3-70b-versatile
+    daily-request-limit: 1000
+  - provider: gemini
+    model: gemini-2.0-flash
+    daily-request-limit: 1000
+
+fallback: "..."

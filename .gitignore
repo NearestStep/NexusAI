@@ -2,6 +2,8 @@
 .env
 .env.*
 *.key
+# Sample key file shipped with examples/api-key. Real keys stay ignored.
+!examples/**/*.key
 *.pem
 id_rsa
 id_ed25519

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -117,9 +118,9 @@ public final class PromptImporter {
             if (Files.isRegularFile(promptsFile)) {
                 backup = FileBackup.backup(promptsFile);
             } else {
-                Files.createDirectories(dataFolder);
+                AtomicFiles.createPrivate(promptsFile);
             }
-            Files.writeString(promptsFile, updated, StandardCharsets.UTF_8);
+            AtomicFiles.preserving(promptsFile, () -> Files.writeString(promptsFile, updated, StandardCharsets.UTF_8));
         } catch (IOException e) {
             return Report.failed("could not update prompts.yml");
         }

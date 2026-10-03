@@ -4,6 +4,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,7 +33,14 @@ public final class PluginConfig {
     /** Test seam. Production reads the process environment. */
     static Function<String, String> environment = System::getenv;
 
+    /**
+     * Directory relative {@code api-key-file} paths are resolved from.
+     * Production sets this to the plugin data folder before each load. Absolute paths ignore it.
+     */
+    public static volatile Path secretsBase;
+
     private final Set<String> missingEnvVars = new LinkedHashSet<>();
+    private final List<String> keyFileWarnings = new ArrayList<>();
 
     private static final Map<String, String> PROVIDER_BASE_URLS = Map.of(
             "openai", "https://api.openai.com/v1",
@@ -84,6 +92,8 @@ public final class PluginConfig {
     private Map<String, ProviderSettings> providers = Map.of();
     private List<QueueEntryConfig> modelQueue = List.of();
     private int modelQueueRemainingThreshold;
+    private QueueStrategy modelQueueStrategy = QueueStrategy.FAILOVER;
+    private String modelQueueStrategyWarning;
     private FallbackModel fallbackModel = FallbackModel.none();
     private int knowledgeMaxChars = 6000;
     private int knowledgeMaxFileChars = 4000;
@@ -92,6 +102,12 @@ public final class PluginConfig {
     private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
             io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
     private ModerationSettings moderation = ModerationSettings.defaults();
+    private io.github.neareststep.nexusai.context.ContextSettings contextSettings =
+            io.github.neareststep.nexusai.context.ContextSettings.defaults();
+    private int httpMaxInFlight = io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT;
+    private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
+    private final List<String> httpLimitWarnings = new ArrayList<>();
+    private final List<String> shortKeyWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -100,6 +116,9 @@ public final class PluginConfig {
     public void reload(FileConfiguration config) {
         Objects.requireNonNull(config, "config");
         missingEnvVars.clear();
+        keyFileWarnings.clear();
+        shortKeyWarnings.clear();
+        httpLimitWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -153,19 +172,35 @@ public final class PluginConfig {
             this.modelQueue = loadModelQueue(config);
             applyActiveProvider();
         } else {
+            KeySource source = KeySource.CONFIG;
             if (envKey != null && !envKey.isBlank()) {
                 this.apiKey = envKey.trim();
+                source = KeySource.ENV;
             } else {
                 this.apiKey = substitute(yamlKey).trim();
+                if (EnvSubstitutor.referencesEnv(yamlKey)) {
+                    source = KeySource.ENV;
+                }
             }
             this.providers = Map.of(provider, new ProviderSettings(
                     provider,
                     ProviderCatalog.typeFor(provider),
                     baseUrl,
-                    apiKey.isBlank() ? List.of() : List.of(apiKey)));
+                    apiKey.isBlank() ? List.of() : List.of(apiKey),
+                    source));
             this.modelQueue = loadModelQueue(config);
         }
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
+        String strategyRaw = config.getString("model-queue-strategy", "failover");
+        QueueStrategy parsedStrategy = QueueStrategy.parse(strategyRaw);
+        if (parsedStrategy == null) {
+            this.modelQueueStrategy = QueueStrategy.FAILOVER;
+            this.modelQueueStrategyWarning = "Unknown model-queue-strategy '" + strategyRaw
+                    + "'. Using failover.";
+        } else {
+            this.modelQueueStrategy = parsedStrategy;
+            this.modelQueueStrategyWarning = null;
+        }
         this.fallbackModel = FallbackModel.of(
                 config.getString("fallback-model.provider", ""),
                 config.getString("fallback-model.model", ""));
@@ -175,6 +210,47 @@ public final class PluginConfig {
         this.formats = loadFormats(config);
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
+        this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
+        readHttpLimits(config);
+        noteShortKeys();
+    }
+
+    private void readHttpLimits(FileConfiguration config) {
+        this.httpMaxInFlight = positiveHttp(
+                config, "http.max-in-flight", io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT);
+        this.httpQueueSize = positiveHttp(
+                config, "http.queue-size", io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY);
+    }
+
+    private int positiveHttp(FileConfiguration config, String key, int fallback) {
+        int value = config.getInt(key, fallback);
+        if (value > 0) {
+            return value;
+        }
+        httpLimitWarnings.add(key + " is " + value + ". It must be greater than 0. Using " + fallback + ".");
+        return fallback;
+    }
+
+    private void noteShortKeys() {
+        if (providers == null) {
+            return;
+        }
+        for (ProviderSettings settings : providers.values()) {
+            boolean noted = false;
+            for (String key : settings.apiKeys()) {
+                if (key == null) {
+                    continue;
+                }
+                String trimmed = key.trim();
+                if (trimmed.isEmpty() || trimmed.length() > SecretMask.SUFFIX_LENGTH || noted) {
+                    continue;
+                }
+                noted = true;
+                shortKeyWarnings.add("providers." + settings.id()
+                        + " has an API key of " + trimmed.length()
+                        + " characters. A key this short is masked as **** and cannot show a suffix.");
+            }
+        }
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -200,8 +276,9 @@ public final class PluginConfig {
                 url = trimTrailingSlash(url);
             }
             boolean active = normalizedId.equals(provider);
-            List<String> keys = resolveKeys(one.get("api-key"), active, legacyKey, envKey);
-            loaded.put(normalizedId, new ProviderSettings(normalizedId, type, url, keys));
+            ResolvedKeys resolved = resolveKeys(normalizedId, one, active, legacyKey, envKey);
+            loaded.put(normalizedId, new ProviderSettings(
+                    normalizedId, type, url, resolved.keys(), resolved.source()));
         }
         return Map.copyOf(loaded);
     }
@@ -284,29 +361,92 @@ public final class PluginConfig {
         return FormatPresets.known(id) ? id : FormatPresets.SIMPLE;
     }
 
-    private List<String> resolveKeys(Object raw, boolean active, String legacyKey, String envKey) {
+    private ResolvedKeys resolveKeys(
+            String providerId,
+            ConfigurationSection one,
+            boolean active,
+            String legacyKey,
+            String envKey
+    ) {
+        Object raw = one.get("api-key");
+        String filePath = one.getString("api-key-file", "");
+        filePath = filePath == null ? "" : filePath.trim();
+        if (!filePath.isEmpty()) {
+            if (rawKeyPresent(raw)) {
+                keyFileWarnings.add("providers." + providerId
+                        + ".api-key is ignored because api-key-file is set.");
+            }
+            KeyFiles.Loaded file = KeyFiles.read(resolveSecretPath(filePath));
+            keyFileWarnings.addAll(file.warnings());
+            if (!file.keys().isEmpty()) {
+                return new ResolvedKeys(file.keys(), KeySource.FILE);
+            }
+            if (!active) {
+                return new ResolvedKeys(List.of(), KeySource.FILE);
+            }
+            return activeFallback(legacyKey, envKey, KeySource.FILE);
+        }
         boolean multi = raw instanceof List<?> list && list.size() > 1;
         boolean explicit = referencesEnv(raw);
         List<String> configured = readKeyList(raw);
         if (active && !multi && !explicit && envKey != null && !envKey.isBlank()) {
-            return List.of(envKey.trim());
+            return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
         }
         if (!configured.isEmpty()) {
-            return configured;
+            return new ResolvedKeys(configured, explicit ? KeySource.ENV : KeySource.CONFIG);
         }
-        if (active && legacyKey != null && !legacyKey.isBlank()) {
+        if (!active) {
+            return new ResolvedKeys(List.of(), KeySource.CONFIG);
+        }
+        return activeFallback(legacyKey, envKey, KeySource.CONFIG);
+    }
+
+    /**
+     * Used when the chosen source produced no keys. {@code NEXUSAI_API_KEY} still fills the
+     * active provider. An explicit {@code api-key-file} does not revive a neighbouring {@code api-key}.
+     */
+    private ResolvedKeys activeFallback(String legacyKey, String envKey, KeySource emptySource) {
+        if (legacyKey != null && !legacyKey.isBlank()) {
             if (envKey != null && !envKey.isBlank() && !EnvSubstitutor.referencesEnv(legacyKey)) {
-                return List.of(envKey.trim());
+                return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
             }
             String substituted = substitute(legacyKey).trim();
             if (!substituted.isBlank()) {
-                return List.of(substituted);
+                KeySource source = EnvSubstitutor.referencesEnv(legacyKey) ? KeySource.ENV : KeySource.CONFIG;
+                return new ResolvedKeys(List.of(substituted), source);
             }
         }
-        if (active && envKey != null && !envKey.isBlank()) {
-            return List.of(envKey.trim());
+        if (envKey != null && !envKey.isBlank()) {
+            return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
         }
-        return List.of();
+        return new ResolvedKeys(List.of(), emptySource);
+    }
+
+    private static boolean rawKeyPresent(Object raw) {
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                if (item != null && !String.valueOf(item).isBlank()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return raw != null && !String.valueOf(raw).isBlank();
+    }
+
+    static Path resolveSecretPath(String configured) {
+        Path path = Path.of(configured);
+        if (path.isAbsolute()) {
+            return path;
+        }
+        Path base = secretsBase;
+        if (base == null) {
+            return path;
+        }
+        return base.resolve(path).normalize();
+    }
+
+    private record ResolvedKeys(List<String> keys, KeySource source) {
     }
 
     private static boolean referencesEnv(Object raw) {
@@ -863,6 +1003,18 @@ public final class PluginConfig {
         return modelQueueRemainingThreshold;
     }
 
+    public QueueStrategy modelQueueStrategy() {
+        return modelQueueStrategy == null ? QueueStrategy.FAILOVER : modelQueueStrategy;
+    }
+
+    /**
+     * Non-null when {@code model-queue-strategy} is not {@code failover} or {@code round-robin}.
+     * The plugin logs it once per startup and per {@code /nai reload}.
+     */
+    public String modelQueueStrategyWarning() {
+        return modelQueueStrategyWarning;
+    }
+
     public FallbackModel fallbackModel() {
         return fallbackModel == null ? FallbackModel.none() : fallbackModel;
     }
@@ -901,6 +1053,12 @@ public final class PluginConfig {
         return dialogueSettings;
     }
 
+    public io.github.neareststep.nexusai.context.ContextSettings contextSettings() {
+        return contextSettings == null
+                ? io.github.neareststep.nexusai.context.ContextSettings.defaults()
+                : contextSettings;
+    }
+
     /**
      * Names of {@code ${ENV_VAR}} placeholders whose variable was unset at the last reload.
      * The placeholder text itself is not a key and is not returned.
@@ -910,23 +1068,58 @@ public final class PluginConfig {
     }
 
     /**
-     * Resolved secrets longer than four characters. Used only to strip them from command text.
+     * Warnings from {@code api-key-file} on the last reload. Paths may appear. Key text does not.
+     */
+    public List<String> keyFileWarnings() {
+        return List.copyOf(keyFileWarnings);
+    }
+
+    /**
+     * Resolved secrets, including keys too short to show a suffix. Used only to strip them from
+     * command text and error bodies. The key text is not logged from here.
      */
     public List<String> configuredSecrets() {
         List<String> secrets = new ArrayList<>();
         if (providers != null) {
             for (ProviderSettings settings : providers.values()) {
                 for (String key : settings.apiKeys()) {
-                    if (key != null && key.trim().length() > 4) {
-                        secrets.add(key.trim());
+                    if (key == null) {
+                        continue;
+                    }
+                    String trimmed = key.trim();
+                    if (!trimmed.isEmpty() && !secrets.contains(trimmed)) {
+                        secrets.add(trimmed);
                     }
                 }
             }
         }
-        if (apiKey != null && apiKey.trim().length() > 4 && !secrets.contains(apiKey.trim())) {
+        if (apiKey != null && !apiKey.isBlank() && !secrets.contains(apiKey.trim())) {
             secrets.add(apiKey.trim());
         }
         return secrets;
+    }
+
+    public int httpMaxInFlight() {
+        return httpMaxInFlight;
+    }
+
+    public int httpQueueSize() {
+        return httpQueueSize;
+    }
+
+    /**
+     * One warning per key when {@code http.max-in-flight} or {@code http.queue-size} is not positive.
+     * Each line names the key, the rejected value, and the value that is used. Empty when both were accepted.
+     */
+    public List<String> httpLimitWarnings() {
+        return List.copyOf(httpLimitWarnings);
+    }
+
+    /**
+     * Load warnings for keys too short to show a suffix. The key text is not included.
+     */
+    public List<String> shortKeyWarnings() {
+        return List.copyOf(shortKeyWarnings);
     }
 
     private String substitute(String value) {
@@ -949,6 +1142,9 @@ public final class PluginConfig {
             }
             masked.append(token);
         }
-        return masked.toString();
+        if (masked.isEmpty()) {
+            return "";
+        }
+        return masked + active.keySource().statusSuffix();
     }
 }
