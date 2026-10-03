@@ -12,6 +12,18 @@ java {
     }
 }
 
+sourceSets {
+    create("loadtest") {
+        java.setSrcDirs(listOf("src/loadtest/java"))
+        resources.setSrcDirs(listOf("src/loadtest/resources"))
+    }
+    create("loadtestTest") {
+        java.setSrcDirs(listOf("src/loadtest-test/java"))
+        compileClasspath += sourceSets["loadtest"].output
+        runtimeClasspath += sourceSets["loadtest"].output
+    }
+}
+
 repositories {
     mavenCentral()
     maven("https://repo.papermc.io/repository/maven-public/")
@@ -31,6 +43,14 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    "loadtestCompileOnly"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
+    "loadtestCompileOnly"("me.clip:placeholderapi:2.11.6")
+    "loadtestCompileOnly"(sourceSets.main.get().output)
+    "loadtestTestImplementation"(platform("org.junit:junit-bom:5.12.1"))
+    "loadtestTestImplementation"("org.junit.jupiter:junit-jupiter")
+    "loadtestTestImplementation"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
+    "loadtestTestRuntimeOnly"("org.junit.platform:junit-platform-launcher")
 }
 
 tasks {
@@ -55,11 +75,12 @@ tasks {
     }
 
     build {
-        dependsOn(shadowJar)
+        dependsOn(shadowJar, "loadDriverJar")
     }
 
     test {
         useJUnitPlatform()
+        dependsOn("loadtestTest")
     }
 
     compileJava {
@@ -70,5 +91,32 @@ tasks {
     compileTestJava {
         options.encoding = "UTF-8"
         options.release.set(21)
+    }
+
+    register<Jar>("loadDriverJar") {
+        group = "build"
+        description = "Paper load-test plugin. Not shaded into the release jar."
+        archiveFileName.set("NexusAI-LoadDriver.jar")
+        destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
+        from(sourceSets["loadtest"].output)
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
+
+    named<JavaCompile>("compileLoadtestJava") {
+        options.encoding = "UTF-8"
+        options.release.set(21)
+    }
+
+    named<JavaCompile>("compileLoadtestTestJava") {
+        options.encoding = "UTF-8"
+        options.release.set(21)
+    }
+
+    register<Test>("loadtestTest") {
+        group = "verification"
+        description = "Self-check for the Paper load driver."
+        testClassesDirs = sourceSets["loadtestTest"].output.classesDirs
+        classpath = sourceSets["loadtestTest"].runtimeClasspath
+        useJUnitPlatform()
     }
 }

@@ -222,6 +222,36 @@ class ContextServiceTest {
     }
 
     @Test
+    void workerPoolPrestartsTheConfiguredDaemonThreads() throws Exception {
+        ThreadPoolExecutor pool = (ThreadPoolExecutor) ContextService.newWorkerPool(ContextService.THREADS, 8);
+        try {
+            assertEquals(ContextService.THREADS, pool.getPoolSize());
+            assertEquals(ContextService.THREADS, pool.getMaximumPoolSize());
+            CountDownLatch done = new CountDownLatch(ContextService.THREADS);
+            AtomicInteger daemons = new AtomicInteger();
+            AtomicInteger named = new AtomicInteger();
+            for (int i = 0; i < ContextService.THREADS; i++) {
+                pool.execute(() -> {
+                    Thread current = Thread.currentThread();
+                    if (current.isDaemon() && current.getName().startsWith("nexusai-context-")) {
+                        daemons.incrementAndGet();
+                    }
+                    if (current.getName().startsWith("nexusai-context-")) {
+                        named.incrementAndGet();
+                    }
+                    done.countDown();
+                });
+            }
+            assertTrue(done.await(2, TimeUnit.SECONDS));
+            assertEquals(ContextService.THREADS, daemons.get());
+            assertEquals(ContextService.THREADS, named.get());
+            assertEquals(ContextService.THREADS, pool.getPoolSize());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void fullQueueSkipsTheProvider() throws Exception {
         ThreadPoolExecutor tiny = (ThreadPoolExecutor) ContextService.newWorkerPool(1, 1);
         CountDownLatch started = new CountDownLatch(1);
@@ -268,6 +298,78 @@ class ContextServiceTest {
     }
 
     @Test
+    void timeoutBeforeStartDoesNotSuspendTheWaitingProvider() throws Exception {
+        ThreadPoolExecutor one = (ThreadPoolExecutor) ContextService.newWorkerPool(1, 8);
+        AtomicInteger quickCalls = new AtomicInteger();
+        try {
+            registry.add("Plug", new NexusContextProvider() {
+                @Override
+                public String id() {
+                    return "blocker";
+                }
+
+                @Override
+                public int priority() {
+                    return 1;
+                }
+
+                @Override
+                public Duration timeout() {
+                    return Duration.ofMillis(40);
+                }
+
+                @Override
+                public CompletableFuture<String> provide(ContextRequest request) {
+                    try {
+                        Thread.sleep(5_000);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return CompletableFuture.completedFuture("blocked");
+                }
+            });
+            registry.add("Plug", new NexusContextProvider() {
+                @Override
+                public String id() {
+                    return "quick";
+                }
+
+                @Override
+                public int priority() {
+                    return 50;
+                }
+
+                @Override
+                public Duration timeout() {
+                    return Duration.ofMillis(40);
+                }
+
+                @Override
+                public CompletableFuture<String> provide(ContextRequest request) {
+                    quickCalls.incrementAndGet();
+                    return CompletableFuture.completedFuture("ready");
+                }
+            });
+            ContextService tight = service(one, settings(40, 200, 5, 60, 200, 600));
+            String blocked = tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+            assertFalse(blocked.contains("quick"), blocked);
+            assertEquals(0, quickCalls.get());
+            ContextService.StatusRow quick = row(tight, "quick");
+            ContextService.StatusRow blocker = row(tight, "blocker");
+            assertEquals(0, quick.timeouts(), quick.format());
+            assertFalse(quick.suspended(), quick.format());
+            assertTrue(blocker.timeouts() >= 1, blocker.format());
+
+            String later = tight.collect(request(), PromptContext.of(List.of("quick"))).get(1, TimeUnit.SECONDS);
+            assertTrue(later.contains("quick: ready"), later);
+            assertEquals(1, quickCalls.get());
+            assertEquals(0, row(tight, "quick").timeouts());
+        } finally {
+            one.shutdownNow();
+        }
+    }
+
+    @Test
     void disabledContextDoesNotCallProviders() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         registry.add("Plug", new NexusContextProvider() {
@@ -285,6 +387,13 @@ class ContextServiceTest {
         ContextService off = service(workers, new ContextSettings(false, 200, 300, 200, 600, 30, 5, 60));
         assertEquals("", off.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS));
         assertEquals(0, calls.get());
+    }
+
+    private ContextService.StatusRow row(ContextService service, String id) {
+        return service.status(clock.get(), ZoneId.of("UTC")).stream()
+                .filter(item -> item.id().equals(id))
+                .findFirst()
+                .orElseThrow();
     }
 
     private ContextService service(ExecutorService pool, ContextSettings settings) {
