@@ -47,7 +47,7 @@ These caps are local. They do not pause the provider. A player who hits a person
 
 `/nai talk` also has its own caps (`dialogue.message-cooldown-millis`, `dialogue.conversations-per-player-per-day`, `dialogue.max-replies-per-session`). A dialogue line still spends the server and player request caps.
 
-A full HTTP queue fails immediately with `HTTP queue is full`. The placeholder already returned the fallback. One warning is written per `limits.error-log-cooldown-seconds` (default 30). The four `nexusai-http-*` threads stay at four. Extra calls are not queued without a bound.
+A full HTTP queue fails immediately with `HTTP queue is full`. The placeholder already returned the fallback. One warning is written at most once per 30 seconds. That interval is fixed. The four `nexusai-http-*` threads stay at four. Extra calls are not queued without a bound.
 
 Groq's free tier also has an output-token quota per minute. `api.max-tokens: 256` keeps one short reply inside a cap of about 1000. It does not remove the quota. A longer `ttl` and a shorter prompt avoid sending the same call on every refresh.
 
@@ -191,7 +191,7 @@ One jar runs on Paper and Purpur **1.20.6 through 26.2**, Java **21** or newer. 
 
 Valid `config.yml` keeps the values and comments you wrote. Missing default keys are appended. The log says `Added missing config keys: …`. Before that write, NexusAI copies the file to `<file>.bak`, or `<file>.bak.<timestamp>` when that backup already exists. One startup writes one backup of `config.yml`. `config-version` for a current file is 2.
 
-From 1.0.x to 1.1.0 the appended keys are `model-queue-strategy`, `context.*`, and `dialogue.summary.*`. Nothing you already set is rewritten. Details and rollback: [Migration to 1.1.0](migration-1.1.0.md).
+From 1.0.x to 1.1.0 the appended keys are `model-queue-strategy`, `context.*`, `dialogue.summary.*`, `http.max-in-flight`, and `http.queue-size`. Both HTTP keys are appended as `64`. A `0` or a negative value on either key is treated as 64. Nothing you already set is rewritten. Details and rollback: [Migration to 1.1.0](migration-1.1.0.md).
 
 If `config.yml` is not valid YAML, startup and `/nai reload` leave the file as it is. Reload reports the failure and keeps the configuration already in memory.
 
