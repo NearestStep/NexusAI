@@ -124,6 +124,11 @@ public final class DialogueRouter {
                 } catch (AiRequestException error) {
                     last = error;
                     now = clock.getAsLong();
+                    if (error.kind() == AiErrorKind.MARKUP_ONLY) {
+                        logger.fine(error.getMessage());
+                        last = error;
+                        break;
+                    }
                     if (error.kind() == AiErrorKind.EMPTY_REPLY) {
                         logger.warning(error.getMessage());
                         last = error;
@@ -152,7 +157,7 @@ public final class DialogueRouter {
                 }
             }
         }
-        if (last != null && last.kind() == AiErrorKind.EMPTY_REPLY) {
+        if (last != null && (last.kind() == AiErrorKind.EMPTY_REPLY || last.kind() == AiErrorKind.MARKUP_ONLY)) {
             throw last;
         }
         if (last != null && last.kind() != AiErrorKind.REJECTED && last.kind() != AiErrorKind.LOCAL_LIMIT) {

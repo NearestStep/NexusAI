@@ -32,6 +32,12 @@ public final class PlayerInput {
     /** Shown when colour codes were the whole reply, so nothing is left to show. */
     public static final String EMPTY_REPLY =
             "The model reply was empty after removing colour codes.";
+    /**
+     * Shown when markup (tags, hex, or a JSON click/hover component) was the whole reply.
+     * This is not a provider failure and does not start the empty-reply pause.
+     */
+    public static final String MARKUP_ONLY =
+            "The model reply was empty after removing markup.";
     /** Shown when the reply is mostly an attack span copied from the wrapped player text. */
     public static final String ECHO_REJECTION =
             "The model echoed player input instead of answering.";
@@ -49,12 +55,11 @@ public final class PlayerInput {
     private static final Pattern AMP_HEX = Pattern.compile(
             "&#[0-9A-Fa-f]{6}|&#[0-9A-Fa-f]{3}(?![0-9A-Fa-f])");
     /**
-     * A MiniMessage-like tag. The name starts with a letter, {@code #}, or {@code !}
-     * immediately after {@code <} or {@code </}. A space, digit, or other character after
-     * {@code <} is ordinary text ({@code <3}, {@code a < b}, {@code <- }).
+     * A MiniMessage-like tag starts with a letter, {@code #}, or {@code !} immediately
+     * after {@code <} or {@code </}. A space, digit, or other character after {@code <}
+     * is ordinary text ({@code <3}, {@code a < b}, {@code <- }). A {@code >} inside a
+     * single- or double-quoted argument does not end the tag.
      */
-    private static final Pattern MINI_TAG = Pattern.compile(
-            "</?[\\p{L}#!][^<>]*>", UNICODE);
     /**
      * Two or more {@code &} or {@code §} glued to {@code end} or {@code player input}.
      * A colour-code pass would eat {@code &E} or {@code §E} and leave a half-eaten word,
@@ -281,8 +286,11 @@ public final class PlayerInput {
     /**
      * Removes Minecraft formatting from model output, pool rows, and cached answers.
      * Legacy {@code §} and {@code &} codes are always removed. {@code &#RRGGBB}, {@code &#RGB},
-     * {@code <#RRGGBB>}, and MiniMessage tags are removed as well.
+     * {@code <#RRGGBB>}, MiniMessage tags, and JSON chat components that carry a click,
+     * hover, or insertion are removed as well.
      * A bare {@code &} is kept, so {@code rock & stone} stays text.
+     * A JSON object that is not an interactive chat component stays, including
+     * {@code {"text":"Hi"}} and brace text that is not JSON.
      * A run of two or more {@code &} or {@code §} glued to {@code END} or {@code PLAYER INPUT}
      * is spaced first, so {@code Hello &&&END&&& traveler} stays readable
      * ({@code Hello &&& END &&& traveler}) instead of losing the {@code E}.
@@ -292,8 +300,9 @@ public final class PlayerInput {
     }
 
     /**
-     * Same as {@link #stripSectionSigns(String)}. When {@code allowMarkup} is true, ampersand hex
-     * and MiniMessage tags are kept. Legacy {@code §} and {@code &} codes are still removed.
+     * Same as {@link #stripSectionSigns(String)}. When {@code allowMarkup} is true, ampersand hex,
+     * MiniMessage tags, and JSON click/hover components are kept. Legacy {@code §} and {@code &}
+     * codes are still removed.
      */
     public static String stripSectionSigns(String raw, boolean allowMarkup) {
         String legacy = removeFormatting(raw);
@@ -301,6 +310,20 @@ public final class PlayerInput {
             return legacy;
         }
         return stripMarkup(legacy);
+    }
+
+    /**
+     * True when {@code raw} still has text after legacy colour codes are removed, and nothing
+     * remains once hex, MiniMessage tags, and interactive JSON components are removed.
+     * A colour-only reply such as {@code &c§l} is not this case: that one is
+     * {@link #EMPTY_REPLY}. When {@code allowMarkup} is true the markup is kept, so this is false.
+     */
+    public static boolean emptiedByMarkup(String raw, boolean allowMarkup) {
+        if (allowMarkup || raw == null || raw.isBlank()) {
+            return false;
+        }
+        String legacy = removeFormatting(raw);
+        return !legacy.isBlank() && stripSectionSigns(raw, false).isBlank();
     }
 
     private static String removeFormatting(String raw) {
@@ -312,9 +335,10 @@ public final class PlayerInput {
     }
 
     /**
-     * Drops ampersand hex and MiniMessage tags until a pass changes nothing, so
-     * {@code <<red>red>} cannot reassemble a tag. Only the tag is removed, so
-     * {@code <red>Hi</red>} stays {@code Hi}.
+     * Drops ampersand hex, MiniMessage tags, and interactive JSON chat components until a pass
+     * changes nothing, so {@code <<red>red>} cannot reassemble a tag. Only the tag is removed, so
+     * {@code <red>Hi</red>} stays {@code Hi}. A {@code >} inside a quoted tag argument stays inside
+     * the tag and is removed with it.
      */
     private static String stripMarkup(String text) {
         String current = text;
@@ -322,9 +346,79 @@ public final class PlayerInput {
         do {
             previous = current;
             current = AMP_HEX.matcher(current).replaceAll("");
-            current = MINI_TAG.matcher(current).replaceAll("");
+            current = stripMiniTags(current);
+            current = JsonChatComponents.strip(current);
         } while (!current.equals(previous));
         return current;
+    }
+
+    /**
+     * Removes one MiniMessage-like tag at a time. Quoted arguments (single or double quotes,
+     * with backslash escapes) may contain {@code >}. An unclosed quote or an unclosed tag is
+     * left in place, as is {@code <3}, {@code x < y}, {@code 1<2}, and {@code <- back}.
+     */
+    private static String stripMiniTags(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        int i = 0;
+        while (i < text.length()) {
+            if (text.charAt(i) == '<') {
+                int end = miniTagEnd(text, i);
+                if (end > i) {
+                    i = end;
+                    continue;
+                }
+            }
+            out.append(text.charAt(i));
+            i++;
+        }
+        return out.toString();
+    }
+
+    /** Index just after the closing {@code >}, or {@code -1} when {@code start} is not a tag. */
+    private static int miniTagEnd(String text, int start) {
+        int i = start + 1;
+        if (i >= text.length()) {
+            return -1;
+        }
+        if (text.charAt(i) == '/') {
+            i++;
+        }
+        if (i >= text.length()) {
+            return -1;
+        }
+        int name = text.codePointAt(i);
+        if (name != '#' && name != '!' && !Character.isLetter(name)) {
+            return -1;
+        }
+        i += Character.charCount(name);
+        char quote = 0;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (quote != 0) {
+                if (c == '\\' && i + 1 < text.length()) {
+                    i += 2;
+                    continue;
+                }
+                if (c == quote) {
+                    quote = 0;
+                }
+                i++;
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                i++;
+                continue;
+            }
+            if (c == '>') {
+                return i + 1;
+            }
+            if (c == '<') {
+                return -1;
+            }
+            i++;
+        }
+        return -1;
     }
 
     private static String separateGluedMarkers(String raw) {

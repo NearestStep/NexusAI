@@ -218,6 +218,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
             formatted = SecretMask.redact(formatted, List.of(apiKey));
             if (PlayerInput.stripSectionSigns(text, allowMarkup).isBlank()) {
+                if (PlayerInput.emptiedByMarkup(text, allowMarkup)) {
+                    throw new AiRequestException(
+                            AiErrorKind.MARKUP_ONLY, response.statusCode(), PlayerInput.MARKUP_ONLY, null);
+                }
                 throw new AiRequestException(
                         AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null);
             }
@@ -308,6 +312,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case LOCAL_LIMIT -> "Local rate limit reached";
             case REJECTED -> "Rejected model answer from " + host;
             case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
+            case MARKUP_ONLY -> PlayerInput.MARKUP_ONLY;
             case OTHER -> html && status == 403
                     ? "HTTP 403 returned an HTML page (likely a firewall) from " + host
                     : "HTTP " + status + " from " + host + ": " + truncated;

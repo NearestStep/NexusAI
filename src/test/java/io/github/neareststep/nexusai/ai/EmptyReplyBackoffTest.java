@@ -28,8 +28,11 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
+import java.util.concurrent.CompletionException;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmptyReplyBackoffTest {
@@ -280,6 +283,45 @@ class EmptyReplyBackoffTest {
         assertTrue(client.requestAsync("blank").isCompletedExceptionally());
         assertEquals(4, calls.get());
         assertRetry(client, warnings, clock.get() + FIVE_MINUTES);
+    }
+
+    @Test
+    void markupOnlyReplyUsesFallbackWithoutPausing() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicLong clock = new AtomicLong(5_000L);
+        List<String> warnings = new CopyOnWriteArrayList<>();
+        Logger logger = quietLogger("markup-only", warnings);
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        AiHttpClient client = client(cache, clock, logger, prompt -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("<key:key.jump>");
+        });
+
+        CompletionException error = assertThrows(CompletionException.class, () -> client.requestAsync("tags").join());
+        assertEquals(AiErrorKind.MARKUP_ONLY, AiErrors.classify(error));
+        assertEquals(PlayerInput.MARKUP_ONLY, AiErrors.detail(error));
+        assertFalse(AiErrors.detail(error).contains("Retry after"));
+        assertFalse(client.isAdmissionBlocked("tags"));
+        assertTrue(cache.get(client.cacheKey("tags")).isEmpty());
+        assertTrue(warnings.stream().noneMatch(line -> line.contains("Retry after") || line.contains("empty after")));
+        assertEquals(1, calls.get());
+
+        assertThrows(CompletionException.class, () -> client.requestAsync("tags").join());
+        assertEquals(2, calls.get());
+        assertFalse(client.isAdmissionBlocked("tags"));
+
+        AiPool pool = new AiPool();
+        List<Long> delays = new CopyOnWriteArrayList<>();
+        PoolService service = new PoolService(poolConfig(), pool, client, logger, null, (delay, task) -> delays.add(delay));
+        service.start();
+        assertEquals(0, pool.size("blank"));
+        assertTrue(delays.isEmpty());
+        assertFalse(client.isAdmissionBlocked("blank"));
+        int afterStart = calls.get();
+        service.replenish("blank");
+        assertTrue(calls.get() > afterStart);
+        assertTrue(delays.isEmpty());
+        service.shutdown();
     }
 
     @Test

@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.ConfigVersions;
+import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.config.YamlStrings;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -9,7 +11,10 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -213,6 +218,12 @@ public final class PoolStore {
                 return;
             }
             try {
+                Set<PosixFilePermission> permissions = readPermissions(file);
+                if (file.isFile() && containsUncleanAnswers(file)) {
+                    Path backup = FileBackup.backup(file.toPath());
+                    applyPermissions(backup, permissions);
+                    logger.info("Backed up pool.yml to " + backup.toAbsolutePath());
+                }
                 StringBuilder yaml = new StringBuilder();
                 yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
                 yaml.append("pools:\n");
@@ -248,10 +259,60 @@ public final class PoolStore {
                 }
                 File temporary = new File(parent == null ? new File(".") : parent, file.getName() + ".tmp");
                 java.nio.file.Files.writeString(temporary.toPath(), yaml.toString(), java.nio.charset.StandardCharsets.UTF_8);
+                applyPermissions(temporary.toPath(), permissions);
                 moveIntoPlace(temporary);
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Failed to save answer pool to " + file.getName(), e);
             }
+        }
+    }
+
+    /**
+     * True when a stored answer would change or disappear under {@link PlayerInput#stripSectionSigns}.
+     * A later save of already-clean text does not take another backup.
+     */
+    private boolean containsUncleanAnswers(File source) throws IOException, InvalidConfigurationException {
+        String raw = Files.readString(source.toPath());
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(raw);
+        for (Map<?, ?> row : yaml.getMapList("pools")) {
+            Object answers = row.get("answers");
+            if (!(answers instanceof List<?> list)) {
+                continue;
+            }
+            for (Object item : list) {
+                if (item == null) {
+                    continue;
+                }
+                String text = String.valueOf(item);
+                String cleaned = PlayerInput.stripSectionSigns(text, allowMarkup).trim();
+                if (!cleaned.equals(text)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static Set<PosixFilePermission> readPermissions(File source) {
+        if (source == null || !source.isFile()) {
+            return null;
+        }
+        try {
+            return Files.getPosixFilePermissions(source.toPath());
+        } catch (UnsupportedOperationException | IOException e) {
+            return null;
+        }
+    }
+
+    private static void applyPermissions(Path target, Set<PosixFilePermission> permissions) {
+        if (target == null || permissions == null) {
+            return;
+        }
+        try {
+            Files.setPosixFilePermissions(target, permissions);
+        } catch (UnsupportedOperationException | IOException ignored) {
+            // The write still replaces the bytes. A non-POSIX volume has no mode to copy.
         }
     }
 
@@ -272,7 +333,7 @@ public final class PoolStore {
             if (item == null) {
                 continue;
             }
-            String text = io.github.neareststep.nexusai.ai.PlayerInput.stripSectionSigns(String.valueOf(item), allowMarkup).trim();
+            String text = PlayerInput.stripSectionSigns(String.valueOf(item), allowMarkup).trim();
             if (!text.isEmpty()) {
                 answers.add(text);
             }
