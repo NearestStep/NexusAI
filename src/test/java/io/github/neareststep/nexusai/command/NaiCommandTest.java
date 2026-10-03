@@ -68,7 +68,11 @@ class NaiCommandTest {
         NaiCommand.ConsoleTalkError unknown = NaiCommand.consoleTalkError(
                 new String[] {"talk", "QABot2", "NoSuchNPC", "hi"}, true, false);
         assertEquals("talk.unknown-character", unknown.messageKey());
-        assertEquals("nosuchnpc", unknown.placeholders().get("id"));
+        assertEquals("NoSuchNPC", unknown.placeholders().get("id"));
+        String jsonId = "{\"text\":\"Hi\"}";
+        NaiCommand.ConsoleTalkError json = NaiCommand.consoleTalkError(
+                new String[] {"talk", "QABot2", jsonId, "hi"}, true, false);
+        assertEquals(jsonId, json.placeholders().get("id"));
 
         NaiCommand.ConsoleTalkError offline = NaiCommand.consoleTalkError(
                 new String[] {"talk", "NoSuchPlayer", "npc", "hi"}, false, true);

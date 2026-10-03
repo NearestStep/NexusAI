@@ -7,9 +7,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Drops Minecraft JSON chat components that carry a click, hover, or insertion,
- * and keeps the visible text. A brace run that is not that kind of component
- * (code, an emoticon, a plain {@code {"text":"Hi"}} object) is left as it was.
+ * Drops JSON that carries a click, hover, or insertion, including a click nested
+ * inside an object that is not itself a chat component, and keeps the visible text.
+ * A brace run with no such event (code, an emoticon, a plain {@code {"text":"Hi"}}
+ * object) is left as it was.
  */
 final class JsonChatComponents {
 
@@ -34,8 +35,8 @@ final class JsonChatComponents {
             char c = text.charAt(i);
             if (c == '{' || c == '[') {
                 Node node = parseAt(text, i);
-                if (node != null && node.end > i && interactiveComponent(node)) {
-                    out.append(plain(node));
+                if (node != null && node.end > i && containsEvent(node)) {
+                    out.append(extractVisible(node));
                     i = node.end;
                     continue;
                 }
@@ -49,10 +50,6 @@ final class JsonChatComponents {
     private static Node parseAt(String text, int start) {
         Cursor cursor = new Cursor(text, start);
         return parseValue(cursor, 0);
-    }
-
-    private static boolean interactiveComponent(Node node) {
-        return looksLikeComponent(node) && containsEvent(node);
     }
 
     private static boolean looksLikeComponent(Node node) {
@@ -108,6 +105,42 @@ final class JsonChatComponents {
             return value.kind == Kind.STRING && !value.text.isEmpty();
         }
         return value.kind == Kind.OBJECT;
+    }
+
+    /**
+     * Visible chat text from a value that contains a click, hover, or insertion.
+     * A component contributes {@code text}, {@code extra}, and {@code with}. A wrapper
+     * that is not itself a component contributes the same text from nested components
+     * and any plain strings, and the braces and event payload are dropped.
+     */
+    private static String extractVisible(Node node) {
+        if (node == null) {
+            return "";
+        }
+        if (node.kind == Kind.STRING) {
+            return node.text;
+        }
+        if (node.kind == Kind.ARRAY) {
+            StringBuilder sb = new StringBuilder();
+            for (Node element : node.elements) {
+                sb.append(extractVisible(element));
+            }
+            return sb.toString();
+        }
+        if (node.kind == Kind.OBJECT) {
+            if (looksLikeComponent(node)) {
+                return plain(node);
+            }
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, Node> entry : node.fields.entrySet()) {
+                if (EVENT_KEYS.contains(entry.getKey())) {
+                    continue;
+                }
+                sb.append(extractVisible(entry.getValue()));
+            }
+            return sb.toString();
+        }
+        return "";
     }
 
     /**

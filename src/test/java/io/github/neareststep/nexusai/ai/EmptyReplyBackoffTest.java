@@ -294,6 +294,9 @@ class EmptyReplyBackoffTest {
         AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
         AiHttpClient client = client(cache, clock, logger, prompt -> {
             calls.incrementAndGet();
+            if ("probe".equals(prompt)) {
+                return CompletableFuture.completedFuture("pong");
+            }
             return CompletableFuture.completedFuture("<key:key.jump>");
         });
 
@@ -301,26 +304,42 @@ class EmptyReplyBackoffTest {
         assertEquals(AiErrorKind.MARKUP_ONLY, AiErrors.classify(error));
         assertEquals(PlayerInput.MARKUP_ONLY, AiErrors.detail(error));
         assertFalse(AiErrors.detail(error).contains("Retry after"));
-        assertFalse(client.isAdmissionBlocked("tags"));
+        assertTrue(client.isAdmissionBlocked("tags"));
+        assertEquals(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS, client.admissionDelayMillis("tags"));
         assertTrue(cache.get(client.cacheKey("tags")).isEmpty());
         assertTrue(warnings.stream().noneMatch(line -> line.contains("Retry after") || line.contains("empty after")));
         assertEquals(1, calls.get());
 
+        for (int i = 0; i < 10; i++) {
+            assertThrows(CompletionException.class, () -> client.requestAsync("tags").join());
+        }
+        assertEquals(1, calls.get());
+        assertEquals("pong", client.testAsync("probe").join());
+        assertEquals(2, calls.get());
+        assertTrue(client.isAdmissionBlocked("tags"));
+        assertEquals(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS, client.admissionDelayMillis("tags"));
+
+        clock.addAndGet(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS - 1L);
         assertThrows(CompletionException.class, () -> client.requestAsync("tags").join());
         assertEquals(2, calls.get());
-        assertFalse(client.isAdmissionBlocked("tags"));
+        clock.addAndGet(1L);
+        assertThrows(CompletionException.class, () -> client.requestAsync("tags").join());
+        assertEquals(3, calls.get());
+        assertEquals(RequestGate.MARKUP_ONLY_BACKOFF_MILLIS, client.admissionDelayMillis("tags"));
+        assertTrue(client.admissionDelayMillis("tags") < FIVE_MINUTES);
 
         AiPool pool = new AiPool();
         List<Long> delays = new CopyOnWriteArrayList<>();
         PoolService service = new PoolService(poolConfig(), pool, client, logger, null, (delay, task) -> delays.add(delay));
         service.start();
         assertEquals(0, pool.size("blank"));
-        assertTrue(delays.isEmpty());
-        assertFalse(client.isAdmissionBlocked("blank"));
+        assertFalse(delays.isEmpty());
+        assertTrue(delays.stream().allMatch(delay -> delay >= RequestGate.MARKUP_ONLY_BACKOFF_MILLIS
+                && delay < FIVE_MINUTES));
+        assertTrue(client.isAdmissionBlocked("blank"));
         int afterStart = calls.get();
         service.replenish("blank");
-        assertTrue(calls.get() > afterStart);
-        assertTrue(delays.isEmpty());
+        assertEquals(afterStart, calls.get());
         service.shutdown();
     }
 
