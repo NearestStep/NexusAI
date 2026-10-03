@@ -323,14 +323,15 @@ public final class AiHttpClient {
                         ? error
                         : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
                 AiErrorKind kind = AiErrors.classify(failure);
-                if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED && kind != AiErrorKind.MARKUP_ONLY) {
+                if (kind == AiErrorKind.MARKUP_ONLY) {
+                    // clearPause is false for /nai test, so a probe does not start the hold.
+                    gate.recordFailure(admissionKey, kind, 0L, clearPause);
+                    logger.fine(PlayerInput.MARKUP_ONLY);
+                } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
                     diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
-                }
-                if (kind == AiErrorKind.MARKUP_ONLY) {
-                    logger.fine(PlayerInput.MARKUP_ONLY);
                 }
                 if (kind == AiErrorKind.REJECTED) {
                     logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));

@@ -74,6 +74,19 @@ class LengthTrimNoticesTest {
     }
 
     @Test
+    void aShortLiteralIsNotPrinted() {
+        String literal = "short_LT:long";
+        String line = LengthTrimNotices.message(literal);
+        assertFalse(line.contains(literal), line);
+        assertFalse(line.contains("short_LT"), line);
+        assertTrue(line.contains("(length " + literal.length() + ")"), line);
+        assertEquals("(length " + literal.length() + ")", LengthTrimNotices.label(literal));
+        assertTrue(LengthTrimNotices.message("harbor").contains("harbor"));
+        assertTrue(LengthTrimNotices.message("nai talk").contains("nai talk"));
+        assertFalse(LengthTrimNotices.message("other prompt").contains("other prompt"));
+    }
+
+    @Test
     void colourCodesAreStrippedAndShareOneKey() {
         LengthTrimNotices.reset();
         Logger logger = logger();
@@ -92,7 +105,7 @@ class LengthTrimNoticesTest {
                 assertFalse(line.contains("Steve"));
             }
             assertEquals("(blank)", LengthTrimNotices.label("&c§l"));
-            assertEquals("Steve", LengthTrimNotices.label("§cSteve"));
+            assertEquals("(length 5)", LengthTrimNotices.label("§cSteve"));
             assertFalse(LengthTrimNotices.message("a&b§c").contains("&"));
             assertFalse(LengthTrimNotices.message("a&b§c").contains("§"));
         } finally {

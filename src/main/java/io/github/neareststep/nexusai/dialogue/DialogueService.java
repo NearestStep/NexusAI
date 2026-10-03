@@ -18,6 +18,7 @@ import java.net.http.HttpClient;
 import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -187,11 +188,13 @@ public final class DialogueService {
             return future;
         }
         Runnable run = () -> {
-            String id = characterId == null ? "" : characterId.toLowerCase(java.util.Locale.ROOT);
+            String typed = characterId == null ? "" : characterId;
+            String id = lookupId(typed);
             DialogueEngine.TalkRequest request = build(player, id, message, sessionChat);
             httpExecutor.execute(() -> {
                 try {
-                    future.complete(present(player, engine.talk(request), notifyReply, notifyStart));
+                    TalkResult result = withDisplayId(engine.talk(request), typed);
+                    future.complete(present(player, result, notifyReply, notifyStart));
                 } catch (Throwable thrown) {
                     plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
                     future.completeExceptionally(thrown);
@@ -205,6 +208,25 @@ public final class DialogueService {
                     future.completeExceptionally(new IllegalStateException("player unavailable")));
         }
         return future;
+    }
+
+    /**
+     * Catalog ids are {@code [a-z0-9_-]}, so lookup is case-insensitive.
+     * The string the player typed is kept for chat display.
+     */
+    static String lookupId(String typed) {
+        return typed == null ? "" : typed.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Shows {@code typed} in {@code talk.started}, {@code talk.unknown-character}, and the
+     * character name. The engine still matches on {@link #lookupId(String)}.
+     */
+    static TalkResult withDisplayId(TalkResult result, String typed) {
+        if (result == null || typed == null || typed.isEmpty() || typed.equals(result.characterId())) {
+            return result;
+        }
+        return new TalkResult(result.code(), typed, result.text(), result.error(), result.limit());
     }
 
     private String present(Player player, TalkResult result, boolean notifyReply, boolean notifyStart) {
