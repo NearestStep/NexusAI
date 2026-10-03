@@ -201,7 +201,7 @@ cache:
   max-size: 1000
   # Length-trim notices are not this cache. Each prompt id is logged twice, then suppressed.
   # The notice key is that id (named prompt, pool entry, or talk character), not the template.
-  # The line prints the name and its length. It does not print placeholder template text.
+  # The line names a prompts.yml id or "nai talk", plus its length. A literal is not printed.
   # The notice map is an access-order LRU of 256 ids. /nai reload clears it.
 
 limits:

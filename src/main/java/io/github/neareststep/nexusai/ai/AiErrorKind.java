@@ -21,8 +21,10 @@ public enum AiErrorKind {
     EMPTY_REPLY("empty-reply"),
     /**
      * The reply was empty only after hex, MiniMessage, or an interactive JSON component
-     * was removed. Not cached, and it does not start the empty-reply pause. Callers use
-     * pool or fallback text. A colour-only reply is still {@link #EMPTY_REPLY}.
+     * was removed. Not cached. Placeholders and the pool wait {@code 30s} before asking
+     * again and serve fallback during that hold. The hold does not climb and is not the
+     * empty-reply pause. {@code /nai test} stays immediate. A colour-only reply is still
+     * {@link #EMPTY_REPLY}.
      */
     MARKUP_ONLY("markup-only");
 

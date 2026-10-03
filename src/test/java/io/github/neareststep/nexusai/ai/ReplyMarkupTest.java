@@ -113,6 +113,14 @@ class ReplyMarkupTest {
         assertEquals("{ :D }", PlayerInput.stripSectionSigns("{ :D }"));
         assertEquals("if (x) { return 1; }", PlayerInput.stripSectionSigns("if (x) { return 1; }"));
         assertEquals("[1, 2, 3]", PlayerInput.stripSectionSigns("[1, 2, 3]"));
+        String wrapped = "{\"note\":{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}";
+        assertEquals("x", PlayerInput.stripSectionSigns(wrapped));
+        assertEquals("hello x world", PlayerInput.stripSectionSigns("hello " + wrapped + " world"));
+        assertEquals("", PlayerInput.stripSectionSigns(
+                "{\"note\":{\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}"));
+        assertEquals("seex", PlayerInput.stripSectionSigns(
+                "{\"note\":\"see\",\"child\":{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}}"));
+        assertEquals("{\"note\":\"just text\"}", PlayerInput.stripSectionSigns("{\"note\":\"just text\"}"));
         assertEquals("rock & stone {^_^}", PlayerInput.stripSectionSigns("rock & stone {^_^}"));
         assertEquals("<3", PlayerInput.stripSectionSigns("<3"));
         assertEquals("x < y", PlayerInput.stripSectionSigns("x < y"));
