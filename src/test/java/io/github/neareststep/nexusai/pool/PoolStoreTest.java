@@ -4,10 +4,14 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -18,6 +22,7 @@ import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -187,6 +192,96 @@ class PoolStoreTest {
             AiPool loaded = new AiPool();
             store.load(loaded, Map.of(prompt, 2));
             assertEquals(List.of("one"), loaded.copy(prompt));
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void cleaningOldAnswersWritesOneBackupAndKeepsPermissions() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-pool-bak");
+        File file = dir.resolve("pool.yml").toFile();
+        String original = """
+                config-version: 1
+                pools:
+                  - prompt: "greet"
+                    answers:
+                      - "<click:run_command:/say pwned>CLICK</click>"
+                      - "Normal pool answer"
+                      - "<key:key.jump>"
+                """;
+        Files.writeString(file.toPath(), original);
+        Set<PosixFilePermission> mode = EnumSet.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.GROUP_READ);
+        Files.setPosixFilePermissions(file.toPath(), mode);
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Logger logger = Logger.getLogger("pool-bak-" + dir.getFileName());
+        logger.setUseParentHandlers(false);
+        List<String> infos = new ArrayList<>();
+        logger.addHandler(new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel() == Level.INFO && record.getMessage() != null) {
+                    infos.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+        try {
+            PoolStore store = new PoolStore(file, scheduler, Duration.ofMillis(50), logger, true);
+            AiPool loaded = new AiPool();
+            store.load(loaded, Map.of("greet", 5));
+            assertEquals(List.of("CLICK", "Normal pool answer"), loaded.copy("greet"));
+            store.saveNow(loaded, Map.of("greet", 5));
+
+            Path backup = dir.resolve("pool.yml.bak");
+            assertTrue(Files.isRegularFile(backup));
+            assertEquals(original, Files.readString(backup));
+            assertEquals(mode, Files.getPosixFilePermissions(backup));
+            String saved = Files.readString(file.toPath());
+            assertTrue(saved.contains("CLICK"));
+            assertTrue(saved.contains("Normal pool answer"));
+            assertFalse(saved.contains("click:run_command"));
+            assertFalse(saved.contains("key.jump"));
+            assertEquals(mode, Files.getPosixFilePermissions(file.toPath()));
+            assertTrue(infos.stream().anyMatch(line -> line.contains("Backed up pool.yml") && line.contains(backup.toString())));
+            assertFalse(Files.exists(dir.resolve("pool.yml.tmp")));
+
+            infos.clear();
+            loaded.add("greet", "Another clean answer");
+            store.saveNow(loaded, Map.of("greet", 5));
+            String[] extras = dir.toFile().list((folder, name) -> name.startsWith("pool.yml.bak."));
+            assertNotNull(extras);
+            assertEquals(0, extras.length);
+            assertTrue(infos.stream().noneMatch(line -> line.contains("Backed up")));
+            assertEquals(original, Files.readString(backup));
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void aCleanSaveDoesNotCreateABackup() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-pool-clean");
+        File file = dir.resolve("pool.yml").toFile();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        try {
+            PoolStore store = new PoolStore(file, scheduler, Duration.ofMillis(50), Logger.getLogger("pool-clean"), true);
+            AiPool pool = new AiPool();
+            pool.add("tip", "ready");
+            store.saveNow(pool, Map.of("tip", 1));
+            store.saveNow(pool, Map.of("tip", 1));
+            assertFalse(Files.exists(dir.resolve("pool.yml.bak")));
+            assertTrue(Files.readString(file.toPath()).contains("ready"));
         } finally {
             scheduler.shutdownNow();
         }

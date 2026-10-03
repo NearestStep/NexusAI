@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.2 (2026-10-03)
+
+One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys.
+
+### Security
+
+- With `sanitize.allow-markup: false` (the default), a JSON chat component that carries `clickEvent`, `hoverEvent`, `click_event`, `hover_event`, or `insertion` is reduced to its visible `text` / `extra` / `with`. The array form is included. `{"text":"Hi"}` with no event is left as written, and so is brace text that is not that component (`{^_^}`, `if (x) { return 1; }`, `<3`). The same pass still strips hex and MiniMessage. A `>` inside a single- or double-quoted tag argument no longer ends the tag early, so `<hover:show_text:'hello>world'>tip</hover>` becomes `tip`. `<3`, `x < y`, `1<2`, and `<- back` stay text.
+- **Warning:** `sanitize.allow-markup: true` lets MiniMessage click and hover tags, hex colours, and JSON click/hover components through to plugins that parse NexusAI placeholders. A consumer can turn that into a `run_command` click. Legacy `§` and `&` codes are still removed. `/nai talk` and `/nai test` still insert `{reply}` and `{answer}` as plain text.
+- Values substituted into a chat template are stripped with that same filter before the template is turned into a component. That includes `{error}`, `{character}`, `{id}` (`talk.started`, `talk.unknown-character`, and `/nai prompts`), `{player}`, moderation `{message}` / `{category}` / `{reason}`, import `{file}` / `{added}` / `{skipped}` / `{conflicting}`, and the status fields (`{provider}`, `{model}`, `{base_url}`, `{locale}`, `{entry}`, `{last_error}`, `{prompts}`, and the rest). A section sign or a click tag in those values does not colour the line or survive as markup. `{prefix}` stays the locale colour template. `{reply}` and `{answer}` are unchanged: they are still plain text after the template is coloured.
+- Pool rows, cache entries, placeholders, and dialogue replies are cleaned on read, including rows written by an older jar. The cache key stays `player-input-guard-v8`.
+
+### Replies, pool, and logs
+
+- A reply that is empty only after hex, MiniMessage, or an interactive JSON component is removed is not a provider failure. It is not cached and it is not stored in the pool. That prompt then waits 30 seconds before another placeholder or pool request. The wait does not climb and it is not the 5 / 15 / 30 / 60 minute empty-reply pause. During the wait, placeholders and the pool serve the pool or the prompt fallback, and no warning is written. `/nai test` reports `The model reply was empty after removing markup.`, is not held, and does not start the wait. A reply that is empty after legacy colour codes (`&c`, `§l`) is still the empty-reply pause. Local rate limits still apply.
+- A click, hover, or insertion nested inside JSON that is not itself a chat component is removed with the whole JSON value. The visible `text` stays (`{"note":{"text":"x","clickEvent":...}}` becomes `x`). `{"text":"Hi"}`, `{^_^}`, and ordinary brace text stay as written.
+- A length-trim INFO line names the prompt only when the id is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. A literal placeholder is not printed, including a short one such as `short_LT:long`.
+- `/nai talk` still matches a character id without regard to case. The chat line shows the id as it was typed, so a JSON id keeps its capitals. The console unknown-character line does the same.
+- The first save that removes markup from answers already in `pool.yml` copies the file to `pool.yml.bak` (or `pool.yml.bak.<timestamp>` when that backup already exists), keeps the file mode, and replaces the file with an atomic write. The backup path is logged. A later save of clean answers does not write another backup.
+- A length-trim INFO line is `reply for prompt <id> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt` only when the id, after `&` and `§` codes are removed, is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. For any other id, such as a literal placeholder, the text is not printed and the line is `reply for prompt (length <n>) ...`. `<n>` is the length of the id, not of the reply. A blank id prints `(blank)`. A literal that has the same form as a `prompts.yml` id is printed like one. The notice key is still that id (named prompt, pool entry, or talk character; `nai talk` when the character id is blank). The map is an access-order LRU of 256 ids. `/nai reload` clears it.
+- A `locale:` that is not bundled and has no file logs two warnings: the path, that English is the fallback, and the bundled locale codes. It does not say the file is missing from the jar. A locale file that is not valid YAML logs one warning with the path, the parser reason (line and column when the parser reports them), and the fallback (the bundled locale, or English). The stack trace is logged only at FINE.
+
+### Documentation
+
+- README and the `sanitize.allow-markup` comment state the warning above. README and the config comments document the trim-notice key, the LRU of 256, and the Roman-numeral and markdown-heading cut. A trailing heading that is only hashes, or hashes plus a bare marker, is dropped. A heading that already has title words, such as `### II. The Great Bridge Project`, stays.
+
 ## 1.0.1 (2026-10-01)
 
 One jar, `NexusAI-1.0.1.jar`; replace `NexusAI-1.0.0.jar` with it. `config.yml` stays on schema version 2. A missing `sanitize.allow-markup` is appended as `false`, with the usual `<file>.bak` (or `<file>.bak.<timestamp>` when that backup already exists). The comment above the new section says to enable it only when no plugin that reads NexusAI placeholders parses MiniMessage or hex colours.

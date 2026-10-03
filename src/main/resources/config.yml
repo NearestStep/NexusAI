@@ -123,6 +123,12 @@ knowledge:
   max-file-chars: 4000
 
 # format: presets. Prompts inherit formats.default when they omit format.
+# A reply cut off by max_tokens keeps a sentence ending only past the halfway point.
+# A period after a Roman numeral at the start of a line (I. through at most eight letters,
+# optional indent, optional hashes such as "### II.") is a list or heading marker, not the
+# end of the sentence. The same is true of any terminator on a markdown heading line.
+# After the cut, a trailing heading that is only hashes, or hashes plus a bare marker
+# ("###", "### I.", "### 3."), is dropped. A heading that already has title words stays.
 formats:
   default: simple
   simple:
@@ -193,6 +199,10 @@ cache:
   # Seconds
   ttl: 300
   max-size: 1000
+  # Length-trim notices are not this cache. Each prompt id is logged twice, then suppressed.
+  # The notice key is that id (named prompt, pool entry, or talk character), not the template.
+  # The line names a prompts.yml id or "nai talk", plus its length. A literal is not printed.
+  # The notice map is an access-order LRU of 256 ids. /nai reload clears it.
 
 limits:
   # Server-wide caps. Console commands, the pool, and prewarm spend only these.
@@ -218,6 +228,10 @@ pool:
   enabled: true
   max-total-prompts: 10
   # Save answers to pool.yml so a restart does not buy the pool again.
+  # The first save that strips markup from answers already on disk copies the file to
+  # pool.yml.bak (or pool.yml.bak.<timestamp> when that backup exists), keeps the file mode,
+  # and replaces the file with an atomic write. A later save of clean answers does not
+  # write another backup.
   persist: true
   save-delay-seconds: 2
   entries: []
@@ -320,6 +334,6 @@ actions:
   # How many actions from one model reply may run. The rest are refused and the character is told.
   max-per-reply: 1
 
-# Enable only if you are sure that no plugin consuming NexusAI placeholders parses MiniMessage or hex colours. Legacy § and & codes are always removed.
+# WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:
   allow-markup: false
