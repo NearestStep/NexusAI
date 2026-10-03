@@ -9,6 +9,7 @@ import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
@@ -102,10 +103,8 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
         PluginConfig.secretsBase = getDataFolder().toPath();
-        saveDefaultConfig();
-        if (!new File(getDataFolder(), "prompts.yml").isFile()) {
-            saveResource("prompts.yml", false);
-        }
+        installBundled("config.yml");
+        installBundled("prompts.yml");
         prepareDataFolders();
         this.unpooledGenerateLog = new UnpooledGenerateLog(getLogger());
         if (!prepareConfigFile()) {
@@ -346,6 +345,7 @@ public final class NexusAI extends JavaPlugin {
      * @return {@code false} when {@code config.yml} is not valid YAML and was left untouched
      */
     private boolean prepareConfigFile() {
+        installBundled("config.yml");
         saveDefaultConfig();
         File file = new File(getDataFolder(), "config.yml");
         try (InputStream in = getResource("config.yml")) {
@@ -402,9 +402,10 @@ public final class NexusAI extends JavaPlugin {
     }
 
     private void logHttpLimitWarning() {
-        String warning = pluginConfig.httpLimitWarning();
-        if (warning != null && !warning.isBlank()) {
-            getLogger().warning(warning);
+        for (String warning : pluginConfig.httpLimitWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
         }
     }
 
@@ -695,6 +696,36 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    /**
+     * Copies a bundled YAML into the data folder the first time it is needed.
+     * A new {@code config.yml} or {@code prompts.yml} is mode {@code 0600} on POSIX,
+     * because {@code config.yml} may later hold an API key. An existing file keeps its mode.
+     */
+    private void installBundled(String name) {
+        File target = new File(getDataFolder(), name);
+        if (target.isFile()) {
+            return;
+        }
+        try (InputStream in = getResource(name)) {
+            if (in != null) {
+                AtomicFiles.installPrivate(target.toPath(), in);
+            }
+        } catch (IOException e) {
+            getLogger().log(Level.WARNING, "Could not create " + name, e);
+        }
+        if (target.isFile()) {
+            return;
+        }
+        if ("config.yml".equals(name)) {
+            saveDefaultConfig();
+        } else {
+            saveResource(name, false);
+        }
+        if (target.isFile()) {
+            AtomicFiles.restrictOwnerReadWrite(target.toPath());
+        }
+    }
+
     private void prepareDataFolders() {
         File knowledge = new File(getDataFolder(), "knowledge");
         File imports = new File(getDataFolder(), "import");
@@ -732,7 +763,7 @@ public final class NexusAI extends JavaPlugin {
     private PromptCatalog.Parsed readPrompts() {
         File file = new File(getDataFolder(), "prompts.yml");
         if (!file.exists()) {
-            saveResource("prompts.yml", false);
+            installBundled("prompts.yml");
         }
         if (!file.isFile()) {
             return PromptCatalog.Parsed.invalid("prompts.yml is missing");

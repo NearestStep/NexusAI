@@ -118,7 +118,9 @@ public final class DialogueService {
                 new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
                         () -> plugin.getPluginConfig().dialogueSettings().actionLog()),
                 ZoneId.systemDefault(),
-                summaries
+                summaries,
+                plugin.getLogger(),
+                () -> plugin.getPluginConfig().configuredSecrets()
         );
     }
 

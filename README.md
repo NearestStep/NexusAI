@@ -37,7 +37,7 @@ $env:NEXUSAI_API_KEY = "sk-..."
 export NEXUSAI_API_KEY=sk-...
 ```
 
-Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets).
+Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets). On a POSIX system, `config.yml` and `prompts.yml` created by the plugin on first start are mode `0600`. A file that is already there keeps its mode. `/nai prompts import` creates a missing `prompts.yml` the same way.
 
 Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`, including the bracketed form `[::1]`, a host ending in `.local`, or any base URL on port `11434`) are called without an `Authorization` header.
 
@@ -165,9 +165,11 @@ Daily counters for each provider and each queue entry are stored in `plugins/Nex
 
 ### HTTP pool
 
-`http.max-in-flight` (default 64) is how many HTTP calls may be in progress. `http.queue-size` (default 64) is how many more may wait for a slot. The four `nexusai-http-*` threads are unchanged. A call past both caps fails at once with `HTTP queue is full` and a placeholder keeps its fallback. One warning is written per 30 seconds. Both values must be greater than 0. `0` or a negative value is logged once on startup and on `/nai reload` and replaced with 64. `/nai reload` applies a new cap without replacing the worker threads.
+`http.max-in-flight` (default 64) is how many HTTP calls may be in progress. `http.queue-size` (default 64) is how many more may wait for a slot. The four `nexusai-http-*` threads are unchanged. A call past both caps fails at once with `HTTP queue is full` and a placeholder keeps its fallback. One warning is written per 30 seconds. Both values must be greater than 0. `0` or a negative value is replaced with 64 before the limit is applied, on startup and on `/nai reload`. Each bad key logs its own warning, naming the key, the rejected value, and 64. A call that does not fit fails at once with `HTTP queue is full` and is not dropped quietly. `/nai reload` applies a new cap without replacing the worker threads.
 
 One connection error pauses that provider for `limits.provider-pause-seconds` (default 60). A weak endpoint — a local proxy, Ollama, or a free-tier host — should use a lower `http.max-in-flight`, because 64 parallel calls are enough to make that endpoint fail and pause every request to it.
+
+While that pause is in effect, `/nai talk` player replies are paused together with the provider. The turn is not sent, and `fallback-model` is not called for it. The player sees the `talk.busy` line (`The character is busy. Try again later.`). The provider error, including an HTTP 429 body, is written to the server log with secrets masked. It is not shown in chat.
 
 ### Formats
 
@@ -263,7 +265,7 @@ blacksmith:
     max-replies: 8
 ```
 
-Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cache it for `cache.ttl` (`dialogue.cache-greeting`). Later replies are not cached and are not taken from the answer pool.
+Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cache it for `cache.ttl` (`dialogue.cache-greeting`). Later replies are not cached and are not taken from the answer pool. During a provider pause, player replies are paused together with the provider: the line is not sent, `fallback-model` is not used, and the player sees `talk.busy` instead of the provider's error body. See [HTTP pool](#http-pool).
 
 A session ends when `dialogue.session-timeout-seconds` passes with no line, the player moves farther than `dialogue.leave-radius` blocks from where the session started, they run `/nai talk end`, or they quit. While it is open, their chat is cancelled at the highest priority so it is not broadcast. Listeners that run earlier still see the line.
 
@@ -506,13 +508,51 @@ The cache stays on. `cached_` reads a snapshot for `(player, prompt)` that is at
 | `context.suspend-seconds` | 60 | 1..3600 |
 
 ```java
+package io.github.neareststep.nexusai.context;
+
+import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.api.NexusContextProvider;
+
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.plugin.RegisteredServiceProvider;
+import org.bukkit.plugin.ServicePriority;
+
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Example context provider. A sync timer on the main thread reads online balances into a map.
+ * {@link #provide} only returns that map and does not touch Bukkit.
+ * Vault is optional: {@code Economy#getBalance} is called by reflection when the plugin is installed.
+ * Compile this class against the NexusAI jar ({@code compileOnly}). Register with {@code softdepend: [NexusAI]}.
+ */
 public final class ExampleBalanceProvider implements NexusContextProvider, Listener {
+
     private final ConcurrentHashMap<UUID, String> balances = new ConcurrentHashMap<>();
 
-    public String id() { return "economy"; }
-    public int priority() { return 10; }
-    public Duration timeout() { return Duration.ofMillis(100); }
+    @Override
+    public String id() {
+        return "economy";
+    }
 
+    @Override
+    public int priority() {
+        return 10;
+    }
+
+    @Override
+    public Duration timeout() {
+        return Duration.ofMillis(100);
+    }
+
+    @Override
     public CompletableFuture<String> provide(ContextRequest request) {
         if (request == null || request.playerId() == null) {
             return CompletableFuture.completedFuture(null);
@@ -526,14 +566,53 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
         Bukkit.getScheduler().runTaskTimer(plugin, this::refresh, 100L, 100L);
     }
 
+    public void shutdown(Plugin plugin) {
+        Bukkit.getServicesManager().unregister(NexusContextProvider.class, this);
+        Bukkit.getScheduler().cancelTasks(plugin);
+    }
+
+    @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        balances.remove(event.getPlayer().getUniqueId());
+        if (event.getPlayer() != null) {
+            balances.remove(event.getPlayer().getUniqueId());
+        }
+    }
+
+    /** Test seam. The timer calls this for each online player. */
+    public void remember(UUID playerId, double balance) {
+        if (playerId == null) {
+            return;
+        }
+        balances.put(playerId, format(balance));
     }
 
     private void refresh() {
-        Object economy = economy(); // Vault Economy via ServicesManager, or null
+        Object economy = economy();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            balances.put(player.getUniqueId(), format(balance(economy, player)));
+            remember(player.getUniqueId(), balance(economy, player));
+        }
+    }
+
+    private static Object economy() {
+        try {
+            Class<?> type = Class.forName("net.milkbowl.vault.economy.Economy");
+            RegisteredServiceProvider<?> registration = Bukkit.getServicesManager().getRegistration(type);
+            return registration == null ? null : registration.getProvider();
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+            return null;
+        }
+    }
+
+    private static double balance(Object economy, Player player) {
+        if (economy == null || player == null) {
+            return 0;
+        }
+        try {
+            Object value = economy.getClass().getMethod("getBalance", org.bukkit.OfflinePlayer.class)
+                    .invoke(economy, player);
+            return value instanceof Number number ? number.doubleValue() : 0;
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+            return 0;
         }
     }
 
@@ -547,7 +626,7 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
 }
 ```
 
-The same class is `src/test/java/.../context/ExampleBalanceProvider.java`. It calls Vault `Economy#getBalance` by reflection so this jar does not depend on Vault. Round `12347.18` to `~12k`.
+The class above is the complete file `src/test/java/io/github/neareststep/nexusai/context/ExampleBalanceProvider.java`. It includes `economy()`, `balance()`, and `@EventHandler` on `onQuit`. It calls Vault `Economy#getBalance` by reflection so this jar does not depend on Vault. Round `12347.18` to `~12k`.
 
 ## Security
 

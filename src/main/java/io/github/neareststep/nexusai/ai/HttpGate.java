@@ -24,13 +24,17 @@ public final class HttpGate {
     private final Object lock = new Object();
     private final ArrayDeque<Runnable> waiters = new ArrayDeque<>();
     private final AtomicLong rejected = new AtomicLong();
-    private final AtomicLong lastWarningAt = new AtomicLong();
     private int inFlight;
     private int waiting;
 
+    /**
+     * A non-positive {@code maxInFlight} is {@link HttpPool#MAX_IN_FLIGHT}.
+     * A negative {@code waitCapacity} is {@link HttpPool#WAIT_QUEUE_CAPACITY}.
+     * Zero wait capacity is explicit: calls that do not fit fail at once and are not queued.
+     */
     public HttpGate(int maxInFlight, int waitCapacity, Logger logger) {
-        this.maxInFlight = Math.max(1, maxInFlight);
-        this.waitCapacity = Math.max(0, waitCapacity);
+        this.maxInFlight = maxInFlight > 0 ? maxInFlight : HttpPool.MAX_IN_FLIGHT;
+        this.waitCapacity = waitCapacity >= 0 ? waitCapacity : HttpPool.WAIT_QUEUE_CAPACITY;
         this.logger = logger;
     }
 
@@ -117,16 +121,7 @@ public final class HttpGate {
 
     private void noteRejection() {
         rejected.incrementAndGet();
-        if (logger == null) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        long previous = lastWarningAt.get();
-        if (now - previous < 30_000L || !lastWarningAt.compareAndSet(previous, now)) {
-            return;
-        }
-        logger.warning(HttpPool.QUEUE_FULL
-                + ". Further requests are rejected until a slot frees; placeholders use fallback.");
+        HttpPool.warnQueueFull(logger);
     }
 
     public record Snapshot(int maxInFlight, int inFlight, int waitCapacity, int waiting, long rejected) {

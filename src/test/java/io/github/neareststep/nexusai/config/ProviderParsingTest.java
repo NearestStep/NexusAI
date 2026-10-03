@@ -129,7 +129,7 @@ class ProviderParsingTest {
         PluginConfig defaults = new PluginConfig(missing);
         assertEquals(64, defaults.httpMaxInFlight());
         assertEquals(64, defaults.httpQueueSize());
-        assertEquals(null, defaults.httpLimitWarning());
+        assertTrue(defaults.httpLimitWarnings().isEmpty());
 
         YamlConfiguration yaml = base();
         yaml.set("http.max-in-flight", 16);
@@ -137,7 +137,7 @@ class ProviderParsingTest {
         PluginConfig configured = new PluginConfig(yaml);
         assertEquals(16, configured.httpMaxInFlight());
         assertEquals(8, configured.httpQueueSize());
-        assertEquals(null, configured.httpLimitWarning());
+        assertTrue(configured.httpLimitWarnings().isEmpty());
 
         YamlConfiguration bad = base();
         bad.set("http.max-in-flight", 0);
@@ -145,8 +145,17 @@ class ProviderParsingTest {
         PluginConfig rejected = new PluginConfig(bad);
         assertEquals(64, rejected.httpMaxInFlight());
         assertEquals(64, rejected.httpQueueSize());
-        assertTrue(rejected.httpLimitWarning().contains("http.max-in-flight"));
-        assertTrue(rejected.httpLimitWarning().contains("http.queue-size"));
+        assertEquals(2, rejected.httpLimitWarnings().size());
+        String inFlight = rejected.httpLimitWarnings().get(0);
+        String queue = rejected.httpLimitWarnings().get(1);
+        assertTrue(inFlight.contains("http.max-in-flight"), inFlight);
+        assertTrue(inFlight.contains("is 0"), inFlight);
+        assertTrue(inFlight.contains("Using 64"), inFlight);
+        assertFalse(inFlight.contains("http.queue-size"), inFlight);
+        assertTrue(queue.contains("http.queue-size"), queue);
+        assertTrue(queue.contains("is -1"), queue);
+        assertTrue(queue.contains("Using 64"), queue);
+        assertFalse(queue.contains("http.max-in-flight"), queue);
     }
 
     private static YamlConfiguration base() {

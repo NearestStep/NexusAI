@@ -106,7 +106,7 @@ public final class PluginConfig {
             io.github.neareststep.nexusai.context.ContextSettings.defaults();
     private int httpMaxInFlight = io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT;
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
-    private String httpLimitWarning;
+    private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
@@ -118,7 +118,7 @@ public final class PluginConfig {
         missingEnvVars.clear();
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
-        httpLimitWarning = null;
+        httpLimitWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -227,8 +227,7 @@ public final class PluginConfig {
         if (value > 0) {
             return value;
         }
-        String note = key + " must be greater than 0. Using " + fallback + ".";
-        httpLimitWarning = httpLimitWarning == null ? note : httpLimitWarning + " " + note;
+        httpLimitWarnings.add(key + " is " + value + ". It must be greater than 0. Using " + fallback + ".");
         return fallback;
     }
 
@@ -1109,11 +1108,11 @@ public final class PluginConfig {
     }
 
     /**
-     * One warning when {@code http.max-in-flight} or {@code http.queue-size} is not positive.
-     * Null when both values were accepted.
+     * One warning per key when {@code http.max-in-flight} or {@code http.queue-size} is not positive.
+     * Each line names the key, the rejected value, and the value that is used. Empty when both were accepted.
      */
-    public String httpLimitWarning() {
-        return httpLimitWarning;
+    public List<String> httpLimitWarnings() {
+        return List.copyOf(httpLimitWarnings);
     }
 
     /**

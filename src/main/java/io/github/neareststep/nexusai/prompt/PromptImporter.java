@@ -118,7 +118,7 @@ public final class PromptImporter {
             if (Files.isRegularFile(promptsFile)) {
                 backup = FileBackup.backup(promptsFile);
             } else {
-                Files.createDirectories(dataFolder);
+                AtomicFiles.createPrivate(promptsFile);
             }
             AtomicFiles.preserving(promptsFile, () -> Files.writeString(promptsFile, updated, StandardCharsets.UTF_8));
         } catch (IOException e) {
