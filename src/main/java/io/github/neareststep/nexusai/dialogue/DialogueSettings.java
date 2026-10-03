@@ -24,6 +24,12 @@ public final class DialogueSettings {
     private final boolean actionsEnabled;
     private final boolean actionLog;
     private final int maxActionsPerReply;
+    private final boolean summaryEnabled;
+    private final int summaryThresholdTurns;
+    private final int summaryMaxChars;
+    private final int summaryMaxTokens;
+    private final String summaryProvider;
+    private final String summaryModel;
 
     public DialogueSettings(
             boolean dialogueEnabled,
@@ -43,6 +49,56 @@ public final class DialogueSettings {
             boolean actionLog,
             int maxActionsPerReply
     ) {
+        this(
+                dialogueEnabled,
+                memoryTurns,
+                persistMemory,
+                memoryMaxChars,
+                memoryExpiryHours,
+                sessionTimeoutSeconds,
+                leaveRadius,
+                maxRepliesPerSession,
+                messageCooldownMillis,
+                conversationsPerPlayerPerDay,
+                maxMessageLength,
+                cacheGreeting,
+                greetingCacheSeconds,
+                actionsEnabled,
+                actionLog,
+                maxActionsPerReply,
+                false,
+                2,
+                400,
+                200,
+                "",
+                ""
+        );
+    }
+
+    public DialogueSettings(
+            boolean dialogueEnabled,
+            int memoryTurns,
+            boolean persistMemory,
+            int memoryMaxChars,
+            int memoryExpiryHours,
+            int sessionTimeoutSeconds,
+            int leaveRadius,
+            int maxRepliesPerSession,
+            int messageCooldownMillis,
+            int conversationsPerPlayerPerDay,
+            int maxMessageLength,
+            boolean cacheGreeting,
+            int greetingCacheSeconds,
+            boolean actionsEnabled,
+            boolean actionLog,
+            int maxActionsPerReply,
+            boolean summaryEnabled,
+            int summaryThresholdTurns,
+            int summaryMaxChars,
+            int summaryMaxTokens,
+            String summaryProvider,
+            String summaryModel
+    ) {
         this.dialogueEnabled = dialogueEnabled;
         this.memoryTurns = memoryTurns;
         this.persistMemory = persistMemory;
@@ -59,6 +115,12 @@ public final class DialogueSettings {
         this.actionsEnabled = actionsEnabled;
         this.actionLog = actionLog;
         this.maxActionsPerReply = maxActionsPerReply;
+        this.summaryEnabled = summaryEnabled;
+        this.summaryThresholdTurns = summaryThresholdTurns;
+        this.summaryMaxChars = summaryMaxChars;
+        this.summaryMaxTokens = summaryMaxTokens;
+        this.summaryProvider = summaryProvider == null ? "" : summaryProvider;
+        this.summaryModel = summaryModel == null ? "" : summaryModel;
     }
 
     public static DialogueSettings defaults() {
@@ -72,6 +134,8 @@ public final class DialogueSettings {
             return base;
         }
         int greetingTtl = Math.max(1, config.getInt("cache.ttl", base.greetingCacheSeconds));
+        String summaryProvider = config.getString("dialogue.summary.provider", "");
+        String summaryModel = config.getString("dialogue.summary.model", "");
         return new DialogueSettings(
                 config.getBoolean("dialogue.enabled", base.dialogueEnabled),
                 clamp(config.getInt("dialogue.memory-turns", base.memoryTurns), 1, 16),
@@ -88,7 +152,13 @@ public final class DialogueSettings {
                 greetingTtl,
                 config.getBoolean("actions.enabled", base.actionsEnabled),
                 config.getBoolean("actions.log", base.actionLog),
-                clamp(config.getInt("actions.max-per-reply", base.maxActionsPerReply), 1, 5)
+                clamp(config.getInt("actions.max-per-reply", base.maxActionsPerReply), 1, 5),
+                config.getBoolean("dialogue.summary.enabled", false),
+                clamp(config.getInt("dialogue.summary.threshold-turns", 2), 1, 16),
+                clamp(config.getInt("dialogue.summary.max-chars", 400), 100, 2_000),
+                config.getInt("dialogue.summary.max-tokens", 200),
+                summaryProvider == null ? "" : summaryProvider.trim().toLowerCase(java.util.Locale.ROOT),
+                summaryModel == null ? "" : summaryModel.trim()
         );
     }
 
@@ -161,6 +231,41 @@ public final class DialogueSettings {
 
     public int maxActionsPerReply() {
         return maxActionsPerReply;
+    }
+
+    public boolean summaryEnabled() {
+        return summaryEnabled;
+    }
+
+    public int summaryThresholdTurns() {
+        return summaryThresholdTurns;
+    }
+
+    public int summaryMaxChars() {
+        return summaryMaxChars;
+    }
+
+    /**
+     * Token cap sent only on the summary call. {@code <= 0} omits {@code max_tokens}.
+     */
+    public int summaryMaxTokens() {
+        return summaryMaxTokens;
+    }
+
+    public String summaryProvider() {
+        return summaryProvider;
+    }
+
+    public String summaryModel() {
+        return summaryModel;
+    }
+
+    /**
+     * Both provider and model are required to pin the summary call.
+     * Either one alone still uses the model queue, the same rule as moderation.
+     */
+    public boolean summaryPinned() {
+        return !summaryProvider.isBlank() && !summaryModel.isBlank();
     }
 
     private static int clamp(int value, int min, int max) {

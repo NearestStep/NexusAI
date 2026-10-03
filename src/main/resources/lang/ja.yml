@@ -37,6 +37,7 @@ command:
   status-provider-pause: "&7プロバイダー一時停止: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7モデレーション: &f{state} &8(本日の検査 {checks}、フラグ {flags})"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fimport フォルダからプロンプトを取り込む"
   prompts-import-ok: "{prefix}&a取り込み &f{file}&a. 追加: &f{added}&a. スキップ: &f{skipped}&a. 競合: &f{conflicting}&a."

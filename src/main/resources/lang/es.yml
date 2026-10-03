@@ -37,6 +37,7 @@ command:
   status-provider-pause: "&7Pausa del proveedor: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderación: &f{state} &8({checks} comprobaciones, {flags} avisos hoy)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportar prompts desde la carpeta import"
   prompts-import-ok: "{prefix}&aImportado &f{file}&a. Añadidos: &f{added}&a. Omitidos: &f{skipped}&a. Conflictos: &f{conflicting}&a."

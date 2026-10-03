@@ -25,6 +25,7 @@ public final class DialogueEngine {
     private final ActionSink sink;
     private final ActionLog actionLog;
     private final ZoneId zone;
+    private final DialogueSummary summary;
 
     public DialogueEngine(
             MemoryStore memory,
@@ -37,6 +38,21 @@ public final class DialogueEngine {
             ActionLog actionLog,
             ZoneId zone
     ) {
+        this(memory, sessions, actionGate, budget, greetings, model, sink, actionLog, zone, null);
+    }
+
+    public DialogueEngine(
+            MemoryStore memory,
+            SessionBook sessions,
+            ActionGate actionGate,
+            DialogueBudget budget,
+            GreetingCache greetings,
+            DialogueModel model,
+            ActionSink sink,
+            ActionLog actionLog,
+            ZoneId zone,
+            DialogueSummary summary
+    ) {
         this.memory = memory;
         this.sessions = sessions;
         this.actionGate = actionGate;
@@ -46,6 +62,7 @@ public final class DialogueEngine {
         this.sink = sink;
         this.actionLog = actionLog == null ? ActionLog.noop() : actionLog;
         this.zone = zone == null ? ZoneId.systemDefault() : zone;
+        this.summary = summary;
     }
 
     public SessionBook sessions() {
@@ -104,6 +121,7 @@ public final class DialogueEngine {
         );
         String greeting = greeting(request);
         remember(request, "assistant", greeting);
+        foldIfNeeded(request);
         return TalkResult.text(TalkCode.STARTED, request.characterId(), greeting);
     }
 
@@ -154,10 +172,11 @@ public final class DialogueEngine {
         messages.add(new DialogueProtocol.MemoryLine("user", wrapped));
         trimWindow(messages, request.profile().memoryTurns(request.settings().memoryTurns()), request.settings().memoryMaxChars());
         List<CharacterAction> tools = offeredTools(request);
+        String system = systemFor(request);
         ModelReply first;
         try {
             first = model.complete(new ModelCall(
-                    request.system(),
+                    system,
                     messages,
                     tools,
                     noticed(request),
@@ -177,7 +196,7 @@ public final class DialogueEngine {
             }
             try {
                 ModelReply second = model.complete(new ModelCall(
-                        request.system() + "\n\n" + note,
+                        system + "\n\n" + note,
                         follow,
                         List.of(),
                         noticed(request),
@@ -195,6 +214,7 @@ public final class DialogueEngine {
         }
         remember(request, "user", sanitized);
         remember(request, "assistant", spoken);
+        foldIfNeeded(request);
         if (request.sessionChat()) {
             sessions.addReply(request.playerId());
             SessionBook.Session updated = sessions.get(request.playerId()).orElse(null);
@@ -235,7 +255,7 @@ public final class DialogueEngine {
         if (request.profile().greeting() != null) {
             return request.profile().greeting();
         }
-        String cacheKey = GreetingCache.key(request.characterId(), request.system());
+        String cacheKey = GreetingCache.key(request.characterId(), systemFor(request));
         if (request.settings().cacheGreeting()) {
             String cached = greetings.get(cacheKey, request.nowMillis());
             if (cached != null) {
@@ -245,7 +265,7 @@ public final class DialogueEngine {
         ModelReply reply;
         try {
             reply = model.complete(new ModelCall(
-                    request.system(),
+                    systemFor(request),
                     List.of(new DialogueProtocol.MemoryLine("user", "Greet the player briefly in character.")),
                     List.of(),
                     noticed(request),
@@ -366,7 +386,8 @@ public final class DialogueEngine {
                 request.nowMillis(),
                 request.profile().memoryTurns(settings.memoryTurns()),
                 settings.memoryMaxChars(),
-                settings.memoryExpiryMillis()
+                settings.memoryExpiryMillis(),
+                settings.summaryEnabled()
         );
         List<DialogueProtocol.MemoryLine> messages = new ArrayList<>();
         for (TurnMemory.Line line : stored) {
@@ -389,8 +410,58 @@ public final class DialogueEngine {
                 request.nowMillis(),
                 request.profile().memoryTurns(settings.memoryTurns()),
                 settings.memoryMaxChars(),
+                settings.memoryExpiryMillis(),
+                settings.summaryEnabled()
+        );
+    }
+
+    /**
+     * When summaries are off, the system string is returned unchanged.
+     * A summary already placed by {@code characterSystem} is not added twice.
+     */
+    private String systemFor(TalkRequest request) {
+        String system = request.system();
+        if (!request.settings().summaryEnabled()) {
+            return system;
+        }
+        DialogueSettings settings = request.settings();
+        String summary = memory.summary(
+                request.playerId(),
+                request.characterId(),
+                request.nowMillis(),
                 settings.memoryExpiryMillis()
         );
+        String block = DialogueSummary.block(summary);
+        if (block.isEmpty() || (system != null && system.contains(DialogueSummary.HEADER))) {
+            return system;
+        }
+        if (system == null || system.isBlank()) {
+            return block;
+        }
+        return system + "\n\n" + block;
+    }
+
+    private void foldIfNeeded(TalkRequest request) {
+        if (summary == null || !request.settings().summaryEnabled()) {
+            return;
+        }
+        TurnMemory.Fold fold = memory.claimSummary(
+                request.playerId(),
+                request.characterId(),
+                request.settings().summaryThresholdTurns()
+        );
+        if (fold == null) {
+            return;
+        }
+        summary.schedule(new DialogueSummary.SummaryJob(
+                request.playerId(),
+                request.characterId(),
+                fold.previousSummary(),
+                fold.lines(),
+                fold.epoch(),
+                request.settings(),
+                request.nowMillis()
+        ));
     }
 
     public interface DialogueModel {
@@ -401,6 +472,11 @@ public final class DialogueEngine {
         String run(UUID playerId, CharacterAction action, String command);
     }
 
+    public enum CallKind {
+        DIALOGUE,
+        SUMMARY
+    }
+
     public record ModelCall(
             String system,
             List<DialogueProtocol.MemoryLine> messages,
@@ -408,8 +484,32 @@ public final class DialogueEngine {
             GenerationOverrides overrides,
             String formatId,
             UUID playerId,
-            String wrappedUser
+            String wrappedUser,
+            CallKind kind,
+            String pinProvider,
+            String pinModel
     ) {
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "");
+        }
+
+        public ModelCall {
+            kind = kind == null ? CallKind.DIALOGUE : kind;
+            pinProvider = pinProvider == null ? "" : pinProvider;
+            pinModel = pinModel == null ? "" : pinModel;
+        }
+
+        public boolean summaryPinned() {
+            return kind == CallKind.SUMMARY && !pinProvider.isBlank() && !pinModel.isBlank();
+        }
     }
 
     public record ModelReply(String text, List<String> toolNames, boolean toolsUnsupported) {

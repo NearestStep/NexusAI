@@ -47,6 +47,7 @@ command:
   status-queue-header: "&7Model queue:"
   status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderation: &f{state} &8({checks} checks, {flags} flags today)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
 common:
   "yes": "yes"

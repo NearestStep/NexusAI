@@ -49,6 +49,7 @@ public final class DialogueService {
     private final ScheduledExecutorService scheduler;
     private final MemoryStore memory;
     private final DialogueEngine engine;
+    private final SummaryStats summaryStats;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
     /** Spelling of the character id that opened the current session. Later lines reuse it. */
     private final ConcurrentHashMap<UUID, String> talkLabels = new ConcurrentHashMap<>();
@@ -98,6 +99,14 @@ public final class DialogueService {
                 plugin.getLogger(),
                 System::currentTimeMillis
         );
+        this.summaryStats = new SummaryStats(ZoneId.systemDefault());
+        DialogueSummary summaries = new DialogueSummary(
+                memory,
+                router::route,
+                summaryStats,
+                plugin.getLogger(),
+                httpExecutor
+        );
         this.engine = new DialogueEngine(
                 memory,
                 new SessionBook(),
@@ -108,8 +117,17 @@ public final class DialogueService {
                 this::runAction,
                 new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
                         () -> plugin.getPluginConfig().dialogueSettings().actionLog()),
-                ZoneId.systemDefault()
+                ZoneId.systemDefault(),
+                summaries
         );
+    }
+
+    public String summaryStatus(long nowMillis) {
+        return summaryStats.text(plugin.getPluginConfig().dialogueSettings().summaryEnabled(), nowMillis);
+    }
+
+    public void resetSummaryStats() {
+        summaryStats.reset();
     }
 
     public void start() {
@@ -408,6 +426,15 @@ public final class DialogueService {
         Predicate<String> permissions = node -> Boolean.TRUE.equals(grants.get(node));
         String fallback = prompt.fallback() != null ? prompt.fallback() : config.getFallback();
         String instruction = formatInstruction(prompt, config);
+        String summaryBlock = "";
+        if (config.dialogueSettings().summaryEnabled()) {
+            summaryBlock = DialogueSummary.block(memory.summary(
+                    player.getUniqueId(),
+                    characterId,
+                    System.currentTimeMillis(),
+                    config.dialogueSettings().memoryExpiryMillis()
+            ));
+        }
         DialogueEngine.TalkRequest request = new DialogueEngine.TalkRequest(
                 player.getUniqueId(),
                 player.getName(),
@@ -416,7 +443,7 @@ public final class DialogueService {
                 sessionChat,
                 false,
                 false,
-                characterSystem(prompt, config, player),
+                characterSystem(prompt, config, player, summaryBlock),
                 fallback,
                 prompt.dialogue(),
                 prompt.actions(),
@@ -445,6 +472,15 @@ public final class DialogueService {
     }
 
     static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player) {
+        return characterSystem(prompt, config, player, "");
+    }
+
+    /**
+     * {@code summaryBlock} is empty unless dialogue summaries are on and this pair has a summary.
+     * It sits after the character sheet and before the format instruction. A context block belongs
+     * in that same gap, after the summary.
+     */
+    static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player, String summaryBlock) {
         String sheet = prompt.render(
                 template -> VarSubstitutor.resolve(player, template),
                 ContextVariables.capture(player)
@@ -456,6 +492,9 @@ public final class DialogueService {
             system.append(admin).append("\n\n");
         }
         system.append(sheet);
+        if (summaryBlock != null && !summaryBlock.isEmpty()) {
+            system.append("\n\n").append(summaryBlock);
+        }
         if (instruction != null && !instruction.isBlank()) {
             system.append("\n\n").append(instruction);
         }
@@ -534,10 +573,11 @@ public final class DialogueService {
 
     private void saveMemory() {
         try {
-            if (!plugin.getPluginConfig().dialogueSettings().persistMemory()) {
+            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
+            if (!settings.persistMemory()) {
                 return;
             }
-            memory.save(memoryFile(), plugin.getLogger());
+            memory.save(memoryFile(), plugin.getLogger(), settings.summaryEnabled());
         } catch (Throwable thrown) {
             plugin.getLogger().fine("Skipped dialogue memory save: " + thrown.getMessage());
         }

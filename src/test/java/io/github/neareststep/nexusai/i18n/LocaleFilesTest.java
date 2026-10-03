@@ -36,6 +36,7 @@ class LocaleFilesTest {
             "command.status-provider-pause",
             "command.status-queue-strategy",
             "command.status-moderation",
+            "command.status-dialogue-summary",
             "moderation.notify",
             "common.none",
             "common.yes",

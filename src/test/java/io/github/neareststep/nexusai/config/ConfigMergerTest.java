@@ -68,6 +68,56 @@ class ConfigMergerTest {
     }
 
     @Test
+    void insertsNestedDialogueSummaryInsideTheExistingSection() {
+        String existing = """
+                # user header
+                dialogue:
+                  # keep this note
+                  enabled: true
+                  memory-turns: 6
+                actions:
+                  enabled: false
+                """;
+        String defaults = """
+                dialogue:
+                  enabled: true
+                  memory-turns: 8
+                  summary:
+                    enabled: false
+                    threshold-turns: 2
+                    max-chars: 400
+                    max-tokens: 200
+                    provider: ""
+                    model: ""
+                actions:
+                  enabled: true
+                """;
+
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+        assertTrue(result.addedKeys().contains("dialogue.summary.enabled"));
+        assertTrue(result.addedKeys().contains("dialogue.summary.model"));
+        assertFalse(result.addedKeys().contains("dialogue.memory-turns"));
+        assertTrue(result.yaml().contains("# user header"));
+        assertTrue(result.yaml().contains("# keep this note"));
+
+        int dialogue = result.yaml().indexOf("dialogue:");
+        int summary = result.yaml().indexOf("summary:");
+        int actions = result.yaml().indexOf("\nactions:");
+        assertTrue(dialogue >= 0 && summary > dialogue && actions > summary);
+
+        YamlConfiguration parsed = YamlConfiguration.loadConfiguration(new StringReader(result.yaml()));
+        assertEquals(true, parsed.getBoolean("dialogue.enabled"));
+        assertEquals(6, parsed.getInt("dialogue.memory-turns"));
+        assertEquals(false, parsed.getBoolean("dialogue.summary.enabled"));
+        assertEquals(2, parsed.getInt("dialogue.summary.threshold-turns"));
+        assertEquals(400, parsed.getInt("dialogue.summary.max-chars"));
+        assertEquals(200, parsed.getInt("dialogue.summary.max-tokens"));
+        assertEquals("", parsed.getString("dialogue.summary.provider"));
+        assertEquals("", parsed.getString("dialogue.summary.model"));
+        assertEquals(false, parsed.getBoolean("actions.enabled"));
+    }
+
+    @Test
     void brokenYamlIsReturnedUnchanged() {
         String broken = "api: [\n  this is not valid yaml\n";
         String defaults = """

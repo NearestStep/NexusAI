@@ -48,6 +48,15 @@ public final class DialogueTransport {
         return config.get();
     }
 
+    /**
+     * True when both the in-flight cap and the wait queue are full, so the next call would fail
+     * with {@link HttpPool#QUEUE_FULL} without being sent.
+     */
+    public boolean saturated() {
+        HttpGate.Snapshot snapshot = gate.snapshot();
+        return snapshot.inFlight() >= snapshot.maxInFlight() && snapshot.waiting() >= snapshot.waitCapacity();
+    }
+
     public Result send(Request request) {
         Objects.requireNonNull(request, "request");
         String root = request.baseUrl() == null || request.baseUrl().isBlank() ? config().getBaseUrl() : request.baseUrl();

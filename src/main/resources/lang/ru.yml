@@ -45,6 +45,7 @@ command:
   status-provider-pause: "&7Пауза провайдера: &f{provider_pause}"
   status-queue-strategy: "&7Стратегия очереди моделей: &f{strategy}"
   status-moderation: "&7Модерация: &f{state} &8(проверок сегодня: {checks}, срабатываний: {flags})"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
 common:
   "yes": "да"

@@ -5,7 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue
 
 class TurnMemoryTest {
 
@@ -38,6 +39,40 @@ class TurnMemoryTest {
         memory.add("user", "still", 9_000L);
         memory.expire(99_000L, 0L);
         assertEquals(1, memory.view().size());
+    }
+
+    @Test
+    void droppedLinesWaitInTheFoldBuffer() {
+        TurnMemory memory = new TurnMemory();
+        for (int i = 1; i <= 4; i++) {
+            memory.add("user", "q" + i, i);
+            memory.add("assistant", "a" + i, i);
+        }
+        memory.trim(2, 10_000, true);
+        assertEquals(2, memory.userTurns());
+        assertEquals("q3", memory.view().get(0).text());
+        assertEquals(2, memory.pendingUserTurns());
+        assertEquals("q1", memory.pendingView().get(0).text());
+        assertEquals("a2", memory.pendingView().get(memory.pendingView().size() - 1).text());
+
+        memory.trim(2, 10_000, false);
+        assertEquals(2, memory.pendingUserTurns());
+        assertEquals("q3", memory.view().get(0).text());
+    }
+
+    @Test
+    void expireClearsTheSummary() {
+        TurnMemory memory = new TurnMemory();
+        memory.load(java.util.List.of(new TurnMemory.Line("user", "hello")), 1_000L, "Earlier facts.", 1_000L);
+        memory.trim(2, 100, true);
+        memory.expire(1_000L + 3_600_000L - 1, 3_600_000L);
+        assertEquals("Earlier facts.", memory.summary());
+        memory.expire(1_000L + 3_600_000L, 3_600_000L);
+        assertEquals("", memory.summary());
+        assertEquals(0L, memory.summaryUpdatedAt());
+        assertTrue(memory.view().isEmpty());
+        assertTrue(memory.pendingView().isEmpty());
+        assertFalse(memory.summaryInFlight());
     }
 
     @Test
