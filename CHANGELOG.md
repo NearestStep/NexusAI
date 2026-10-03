@@ -2,7 +2,7 @@
 
 ## 1.1.0
 
-`config.yml` stays on schema version 2. `api-key-file` is not inserted into an existing file.
+`config.yml` stays on schema version 2. Existing values keep their meaning. `api-key-file` is not inserted into an existing file. On startup, missing `context.*` keys are appended from the jar default (`context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`). That write uses the usual single `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists). `prompts.yml` stays on version 1. `context:` on a prompt is optional. A prompt that omits it keeps the 1.0.x text and cache key.
 
 ### Keys
 
@@ -17,6 +17,13 @@
 - `/nai talk` keeps one spelling of the character id for the whole session. The command that opened the session supplies it. Later replies do not switch it to lowercase.
 - A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed. The line then shows only the length.
 - A knowledge file that is not valid UTF-8 logs one warning naming the file and asking for a UTF-8 re-save. The stack trace is logged only at FINE. The file is skipped.
+
+### Context providers
+
+- Other plugins can register a `NexusContextProvider` through Bukkit's services manager (or `NexusAIApi.registerContextProvider`, which is that same registry). `NexusAIApi.API_VERSION` is 2. `ServicePriority` does not set the order.
+- Prompts that list `context:` (a list of ids, or `all`) append a sanitized player-context block to `%ainexus_cached_%` and to `/nai talk` / `NexusAIApi.talk`. `/nai test <id>` from a player uses that player's context. `generate_`, the pool, prewarm, console `/nai test`, and literal placeholders do not call providers. Pool or prewarm entries that name such a prompt log that context is ignored there.
+- Providers run on `nexusai-context-N` (2 threads, queue 256), never on the main thread. A slow provider is skipped. Five timeouts or exceptions in a row suspend it. `/nai status` lists providers and does not print their values.
+- The context block is part of the `cached_` cache key. Snapshots last `context.refresh-seconds`. Greeting cache keys are SHA-256 of the system text.
 
 ## 1.0.2 (2026-10-03)
 

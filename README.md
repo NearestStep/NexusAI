@@ -202,7 +202,7 @@ Alias: `/nexusai`. The `/nai` command in `plugin.yml` has no permission of its o
 | `/nai help` | `nexusai.command` lists every line that sender may run. `nexusai.talk` without `nexusai.command` lists only `/nai talk` and `/nai talk end` | Show command help |
 | `/nai version` | `nexusai.command` | Plugin version and the authors from `plugin.yml` (`PluginMeta.getAuthors()`) |
 | `/nai reload` | `nexusai.command` and `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache, pool, and prewarm |
-| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, fallback model, moderation on/off, and today's checks and flags |
+| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, fallback model, moderation on/off, today's checks and flags, and context providers (id, plugin, priority, timeout, ok or suspended, timeout count). Context values are not printed |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
 | `/nai prompts import <file> [--overwrite]` | `nexusai.command` and `nexusai.import` | Import prompt definitions from `plugins/NexusAI/import/<file>` into `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.command` and `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
@@ -446,6 +446,83 @@ Behavior:
 
 `prewarm` warms the TTL cache on startup and periodically refreshes prompts that are no longer `isFresh` (age ≥ 80% of TTL). Templates with `{player}` or another built-in token are skipped on startup; use `PrewarmService.warmForPlayer(playerName)` for those. The log line `because its vars use PlaceholderAPI` is written only when a var in the template contains a `%placeholder%`.
 
+## Context providers
+
+Other plugins can add a short line about the player (balance, rank, quest) to prompts that opt in. A prompt without `context:` is unchanged: same text, same cache key.
+
+```yaml
+shop_tip:
+  prompt: "Give the player one short shopping tip."
+  context: [economy, rank]   # or context: all
+```
+
+`%ainexus_cached_<id>%`, `/nai talk`, `NexusAIApi.talk`, and `/nai test <id>` run by a player use that list. `%ainexus_generate_%`, the answer pool, prewarm, a console `/nai test`, and a literal placeholder do not. A prompt that lists `context:` and is also named in `pool.entries` or `prewarm.prompts` logs one warning: context is ignored for pool/prewarm. `context.enabled: false` skips every provider and the prompt behaves as if `context:` were omitted.
+
+Register with Bukkit's services manager (`softdepend: [NexusAI]`, compile against the NexusAI jar). `NexusAIApi.registerContextProvider` is the same registry. `ServicePriority` does not set the order. Order is `priority()` (lower first), then `id()`. The id matches `[a-z0-9_]{1,32}`. A duplicate id keeps the first plugin and logs one warning. An invalid id is ignored. Disabling the owner plugin removes its provider from `/nai status` without `/nai reload`. The registry itself survives reload.
+
+`provide()` runs on `nexusai-context-N` (2 daemon threads, queue of 256). It is never called on the main thread. Return a future immediately. A provider that blocks is not interrupted; that call times out and the value is skipped. A full queue skips the provider. Each provider is limited to `min(provider.timeout(), context.max-provider-timeout-millis)` (default ceiling 200 ms, provider default 100 ms). The whole collect is limited to `context.total-timeout-millis` (300 ms). A timeout or an exception skips that provider. The collect does not fail the request. After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is suspended for `context.suspend-seconds` (60) and `/nai status` shows `suspended until`. `ContextRequest` has no `Player`. Read Bukkit state on the main thread (event or sync timer) into your own map, and return that map from `provide()`.
+
+Each value is untrusted. NexusAI always removes `§`, legacy `&` codes, hex, MiniMessage, and JSON click/hover components, even when `sanitize.allow-markup` is true. Newlines become spaces. The line is cut to `context.max-chars-per-provider` on a code point, then `…`. Lines are `id: value`, highest priority first. Lines that do not fit in `context.max-chars` are dropped whole, from the end. The block is wrapped in `§§§ PLAYER INPUT §§§` … `§§§ END §§§`, so the player-input guard is sent. For `cached_`, the block is appended to the user prompt (`Player context:` plus the wrapped block) and is part of the cache key. For `/nai talk`, it is inserted in the character system after the sheet and before the format instruction. Values are not logged.
+
+The cache stays on. `cached_` reads a snapshot for `(player, prompt)` that is at most `context.refresh-seconds` old (30). A missing snapshot returns the pool or the fallback and does not call the model until the snapshot is ready; then one request is sent with that exact text. A stale snapshot is used for the current read and refreshed in the background. Two players with different context do not share a cache entry. The same context does. Each distinct context is its own cache row and its own request per TTL, and those rows count toward `cache.max-size` (default 1000): 200 players times 5 contextual prompts can fill the cache. Round values (`~12k`) instead of an exact balance. Greeting cache keys are SHA-256 of the system text, so a greeting built for one context is not reused for another.
+
+`config-version` stays 2. Missing `context.*` keys are appended on startup, with the usual single `config.yml.bak`.
+
+| Key | Default | Range |
+|-----|---------|-------|
+| `context.enabled` | true | |
+| `context.max-provider-timeout-millis` | 200 | 10..1000 |
+| `context.total-timeout-millis` | 300 | 10..2000 |
+| `context.max-chars-per-provider` | 200 | 20..1000 |
+| `context.max-chars` | 600 | 50..4000 |
+| `context.refresh-seconds` | 30 | 1..3600 |
+| `context.suspend-after-timeouts` | 5 | 1..100 |
+| `context.suspend-seconds` | 60 | 1..3600 |
+
+```java
+public final class ExampleBalanceProvider implements NexusContextProvider, Listener {
+    private final ConcurrentHashMap<UUID, String> balances = new ConcurrentHashMap<>();
+
+    public String id() { return "economy"; }
+    public int priority() { return 10; }
+    public Duration timeout() { return Duration.ofMillis(100); }
+
+    public CompletableFuture<String> provide(ContextRequest request) {
+        if (request == null || request.playerId() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return CompletableFuture.completedFuture(balances.get(request.playerId()));
+    }
+
+    public void register(Plugin plugin) {
+        Bukkit.getServicesManager().register(NexusContextProvider.class, this, plugin, ServicePriority.Normal);
+        Bukkit.getPluginManager().registerEvents(this, plugin);
+        Bukkit.getScheduler().runTaskTimer(plugin, this::refresh, 100L, 100L);
+    }
+
+    public void onQuit(PlayerQuitEvent event) {
+        balances.remove(event.getPlayer().getUniqueId());
+    }
+
+    private void refresh() {
+        Object economy = economy(); // Vault Economy via ServicesManager, or null
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            balances.put(player.getUniqueId(), format(balance(economy, player)));
+        }
+    }
+
+    static String format(double balance) {
+        long coins = Math.round(balance);
+        if (Math.abs(coins) >= 1000) {
+            return "~" + Math.round(coins / 1000.0) + "k";
+        }
+        return "~" + coins;
+    }
+}
+```
+
+The same class is `src/test/java/.../context/ExampleBalanceProvider.java`. It calls Vault `Economy#getBalance` by reflection so this jar does not depend on Vault. Round `12347.18` to `~12k`.
+
 ## Security
 
 PlaceholderAPI inserts a NexusAI answer into another plugin's text, and that plugin may parse markup after the substitution. TAB, DeluxeMenus, and chat plugins that understand MiniMessage or `&#RRGGBB` will turn a model reply into coloured text, a hover, or a click such as `<click:run_command:/op ...>`, `<click:open_url:...>`, or `<hover:show_text:...>`. That is a second-order markup injection: NexusAI's own chat does not have to parse the tag for the tag to run. 1.0.0 removed every `§` and the legacy `&` codes (`&0-9a-fk-or` and `&x&R&R&G&G&B&B`) before the reply reached a placeholder, a dialogue line, the pool, or the cache, and it left `&#RRGGBB` and MiniMessage tags in place.
@@ -513,6 +590,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`
 - `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
 - `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
+- `ContextRegistry` / `ContextService` / `ContextSnapshots` — context providers, timeouts, and the `cached_` snapshot used in the cache key
 - `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. Those calls use the Paper region scheduler on Paper and Purpur.
 - `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
 - `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.

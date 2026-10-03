@@ -455,5 +455,12 @@ public final class DialogueEngine {
             fallback = fallback == null ? "..." : fallback;
             system = system == null ? "" : system;
         }
+
+        public TalkRequest withSystem(String system) {
+            return new TalkRequest(
+                    playerId, playerName, characterId, message, sessionChat, end, characterMissing,
+                    system, fallback, profile, actions, settings, overrides, formatId,
+                    world, x, y, z, permissions, nowMillis);
+        }
     }
 }

@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&cİçe aktarma başarısız: &f{error}"
   status-fallback-model: "&7Yedek model: &f{entry}"
   status-knowledge: "&7Bilgi dosyaları: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ istendi ama havuzda yok: &f{prompts}"
 
 common:

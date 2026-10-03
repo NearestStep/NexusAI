@@ -88,4 +88,21 @@ class PromptImporterTest {
                 .catalog().find("safe").orElseThrow().template());
         assertFalse(Files.exists(dir.resolve("prompts.yml.bak")));
     }
+
+    @Test
+    void importedContextKeyIsKept(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("prompts.yml"), "config-version: 1\n", StandardCharsets.UTF_8);
+        Path imports = Files.createDirectories(dir.resolve("import"));
+        Files.writeString(imports.resolve("pack.yml"), """
+                shop_tip:
+                  prompt: "Give the player one short shopping tip."
+                  context: [economy, rank]
+                """);
+        PromptImporter.Report report = PromptImporter.importFile(dir, "pack.yml", false);
+        assertTrue(report.success(), report.error());
+        PromptCatalog.Parsed parsed = PromptCatalog.parse(Files.readString(dir.resolve("prompts.yml")));
+        assertTrue(parsed.warnings().isEmpty(), parsed.warnings().toString());
+        assertEquals(java.util.List.of("economy", "rank"),
+                parsed.catalog().find("shop_tip").orElseThrow().context().ids());
+    }
 }

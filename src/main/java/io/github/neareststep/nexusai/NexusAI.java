@@ -29,6 +29,10 @@ import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.context.CachedContextCoordinator;
+import io.github.neareststep.nexusai.context.ContextRegistry;
+import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.context.ContextSnapshots;
 import io.github.neareststep.nexusai.dialogue.DialogueListener;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
@@ -86,6 +90,11 @@ public final class NexusAI extends JavaPlugin {
     private UnpooledGenerateLog unpooledGenerateLog;
     private String loggedCredentialWarning = "";
     private boolean loggedMissingPapi;
+    private ExecutorService contextExecutor;
+    private ContextRegistry contextRegistry;
+    private ContextSnapshots contextSnapshots;
+    private ContextService contextService;
+    private CachedContextCoordinator contextCoordinator;
 
     @Override
     public void onEnable() {
@@ -109,6 +118,10 @@ public final class NexusAI extends JavaPlugin {
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
         loadKnowledge();
+        this.contextRegistry = new ContextRegistry(getLogger());
+        NexusAIApi.bindContextRegistry(contextRegistry);
+        getServer().getPluginManager().registerEvents(contextRegistry, this);
+        contextRegistry.load(getServer().getServicesManager());
         loadPrompts();
         logCredentialState();
         logGroqMaxTokensWarning();
@@ -125,6 +138,20 @@ public final class NexusAI extends JavaPlugin {
 
         this.httpExecutor = createHttpExecutor();
         this.scheduler = createScheduler();
+        this.contextExecutor = ContextService.newWorkerPool(ContextService.THREADS, ContextService.QUEUE_CAPACITY);
+        this.contextSnapshots = new ContextSnapshots();
+        this.contextService = new ContextService(
+                contextRegistry,
+                pluginConfig.contextSettings(),
+                contextExecutor,
+                scheduler,
+                getLogger(),
+                System::currentTimeMillis,
+                pluginConfig.getErrorLogCooldownSeconds());
+        this.contextCoordinator = new CachedContextCoordinator(
+                contextSnapshots,
+                System::currentTimeMillis,
+                () -> pluginConfig.contextSettings().refresh());
         startRuntimeServices();
         registerPlaceholderExpansion();
         registerCommands();
@@ -143,8 +170,10 @@ public final class NexusAI extends JavaPlugin {
         }
         stopRuntimeServices(true);
         closeSharedHttpClient();
+        shutdownExecutor(contextExecutor);
         shutdownExecutor(scheduler);
         shutdownExecutor(httpExecutor);
+        NexusAIApi.bindContextRegistry(null);
         getLogger().info("NexusAI disabled.");
     }
 
@@ -230,6 +259,13 @@ public final class NexusAI extends JavaPlugin {
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        // Context providers stay registered across /nai reload. Only snapshots and health reset.
+        if (contextSnapshots != null) {
+            contextSnapshots.clear();
+        }
+        if (contextService != null && pluginConfig != null) {
+            contextService.apply(pluginConfig.contextSettings(), pluginConfig.getErrorLogCooldownSeconds());
+        }
         this.moderationService = null;
         if (modelQueue != null) {
             modelQueue.save();
@@ -522,6 +558,22 @@ public final class NexusAI extends JavaPlugin {
         return modelQueue;
     }
 
+    public ContextRegistry getContextRegistry() {
+        return contextRegistry;
+    }
+
+    public ContextSnapshots getContextSnapshots() {
+        return contextSnapshots;
+    }
+
+    public ContextService getContextService() {
+        return contextService;
+    }
+
+    public CachedContextCoordinator getContextCoordinator() {
+        return contextCoordinator;
+    }
+
     public DialogueService getDialogueService() {
         return dialogueService;
     }
@@ -601,6 +653,17 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning(warning);
         }
         for (String warning : promptCatalog.unknownIdReferences("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
+            getLogger().warning(warning);
+        }
+        if (contextRegistry != null) {
+            for (String warning : promptCatalog.unknownContextProviders(contextRegistry.activeIds())) {
+                getLogger().warning(warning);
+            }
+        }
+        for (String warning : promptCatalog.sharedContextWarnings("pool.entries", poolPrompts)) {
+            getLogger().warning(warning);
+        }
+        for (String warning : promptCatalog.sharedContextWarnings("prewarm.prompts", pluginConfig.getPrewarmPrompts())) {
             getLogger().warning(warning);
         }
     }

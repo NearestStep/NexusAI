@@ -100,6 +100,8 @@ public final class PluginConfig {
     private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
             io.github.neareststep.nexusai.dialogue.DialogueSettings.defaults();
     private ModerationSettings moderation = ModerationSettings.defaults();
+    private io.github.neareststep.nexusai.context.ContextSettings contextSettings =
+            io.github.neareststep.nexusai.context.ContextSettings.defaults();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -190,6 +192,7 @@ public final class PluginConfig {
         this.formats = loadFormats(config);
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
+        this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -978,6 +981,12 @@ public final class PluginConfig {
 
     public io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings() {
         return dialogueSettings;
+    }
+
+    public io.github.neareststep.nexusai.context.ContextSettings contextSettings() {
+        return contextSettings == null
+                ? io.github.neareststep.nexusai.context.ContextSettings.defaults()
+                : contextSettings;
     }
 
     /**

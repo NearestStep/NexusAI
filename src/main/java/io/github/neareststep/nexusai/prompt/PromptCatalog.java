@@ -39,7 +39,8 @@ public final class PromptCatalog {
             "dialogue",
             "actions",
             "knowledge",
-            "fallback-model"
+            "fallback-model",
+            "context"
     );
 
     private static final Set<String> RESERVED = Set.of("config-version");
@@ -94,6 +95,7 @@ public final class PromptCatalog {
                             io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
             List<String> knowledge = List.of();
             FallbackModel fallbackModel = null;
+            PromptContext context = PromptContext.none();
             if (raw instanceof ConfigurationSection section) {
                 vars = readVars(key, section, warnings);
                 ttl = readTtl(key, section, warnings);
@@ -104,11 +106,12 @@ public final class PromptCatalog {
                 dialogue = io.github.neareststep.nexusai.dialogue.DialogueBinding.read(key, section, warnings);
                 knowledge = readKnowledge(key, section, warnings);
                 fallbackModel = readFallbackModel(key, section, warnings);
+                context = readContext(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
             loaded.put(key, new NamedPrompt(
                     key, template, vars, ttl, fallback, maxPromptLength, overrides, format,
-                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions()));
+                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions(), context));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));
@@ -181,6 +184,49 @@ public final class PromptCatalog {
             }
             warnings.add(source + " entry \"" + trimmed
                     + "\" looks like a prompt id but is not defined in prompts.yml. It will be used as a literal prompt.");
+        }
+        return List.copyOf(warnings);
+    }
+
+    /**
+     * One warning per listed id that is not registered yet. {@code context: all} is not checked here.
+     */
+    public List<String> unknownContextProviders(java.util.Collection<String> registered) {
+        java.util.Set<String> known = registered == null ? java.util.Set.of() : java.util.Set.copyOf(registered);
+        List<String> warnings = new ArrayList<>();
+        for (NamedPrompt prompt : prompts.values()) {
+            if (!prompt.context().active() || prompt.context().includesAll()) {
+                continue;
+            }
+            for (String id : prompt.context().ids()) {
+                if (!known.contains(id)) {
+                    warnings.add("Prompt '" + prompt.id() + "' lists unknown context provider '" + id + "'.");
+                }
+            }
+        }
+        return List.copyOf(warnings);
+    }
+
+    /**
+     * Pool and prewarm answers are shared. A prompt that asks for context is still loaded, but the
+     * context block is not collected for those paths.
+     */
+    public List<String> sharedContextWarnings(String source, List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> warnings = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        for (String value : values) {
+            if (value == null) {
+                continue;
+            }
+            String id = value.trim();
+            NamedPrompt prompt = prompts.get(id);
+            if (prompt == null || !prompt.context().active() || !seen.add(id)) {
+                continue;
+            }
+            warnings.add("Prompt '" + id + "' is listed in " + source + ". context is ignored for pool/prewarm.");
         }
         return List.copyOf(warnings);
     }
@@ -400,6 +446,13 @@ public final class PromptCatalog {
             }
         }
         return parsed;
+    }
+
+    private static PromptContext readContext(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("context")) {
+            return PromptContext.none();
+        }
+        return PromptContext.parse(section.get("context"), id, warnings);
     }
 
     private static String readFormat(String id, ConfigurationSection section, List<String> warnings) {

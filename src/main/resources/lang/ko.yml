@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&c가져오기 실패: &f{error}"
   status-fallback-model: "&7대체 모델: &f{entry}"
   status-knowledge: "&7지식 파일: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ 가 요청되었지만 풀에 없음: &f{prompts}"
 
 common:

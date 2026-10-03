@@ -2,10 +2,13 @@ package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.KeyRing;
+import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.command.SenderTasks;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.prompt.PromptContext;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
@@ -199,21 +202,24 @@ public final class DialogueService {
             String id = lookupId(typed);
             boolean opening = !sessionChat && (message == null || message.isBlank());
             String display = opening ? typed : sessionLabel(talkLabels.get(player.getUniqueId()), typed);
-            DialogueEngine.TalkRequest request = build(player, id, message, sessionChat);
-            httpExecutor.execute(() -> {
-                try {
-                    TalkResult result = withDisplayId(engine.talk(request), display);
-                    if (result.code() == TalkCode.STARTED) {
-                        talkLabels.put(player.getUniqueId(), typed);
-                    } else if (result.code() == TalkCode.ENDED || result.code() == TalkCode.NO_SESSION) {
-                        talkLabels.remove(player.getUniqueId());
-                    }
-                    future.complete(present(player, result, notifyReply, notifyStart));
-                } catch (Throwable thrown) {
-                    plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
-                    future.completeExceptionally(thrown);
+            Prepared prepared = build(player, id, message, sessionChat);
+            if (prepared.contextRequest == null || plugin.getContextService() == null) {
+                httpExecutor.execute(() -> talkPrepared(
+                        player, future, typed, display, prepared.request, notifyReply, notifyStart));
+                return;
+            }
+            plugin.getContextService().collect(prepared.contextRequest, prepared.selection).whenCompleteAsync((wrapped, error) -> {
+                if (error != null) {
+                    plugin.getLogger().warning("Dialogue failed: " + error.getMessage());
+                    future.completeExceptionally(error);
+                    return;
                 }
-            });
+                DialogueEngine.TalkRequest request = prepared.request;
+                if (wrapped != null && !wrapped.isBlank()) {
+                    request = request.withSystem(ContextBlock.spliceSystem(request.system(), prepared.instruction, wrapped));
+                }
+                talkPrepared(player, future, typed, display, request, notifyReply, notifyStart);
+            }, httpExecutor);
         };
         if (owns(player)) {
             run.run();
@@ -310,17 +316,41 @@ public final class DialogueService {
         };
     }
 
-    private DialogueEngine.TalkRequest build(Player player, String characterId, String message, boolean sessionChat) {
+    private void talkPrepared(
+            Player player,
+            CompletableFuture<String> future,
+            String typed,
+            String display,
+            DialogueEngine.TalkRequest request,
+            boolean notifyReply,
+            boolean notifyStart
+    ) {
+        try {
+            TalkResult result = withDisplayId(engine.talk(request), display);
+            if (result.code() == TalkCode.STARTED) {
+                talkLabels.put(player.getUniqueId(), typed);
+            } else if (result.code() == TalkCode.ENDED || result.code() == TalkCode.NO_SESSION) {
+                talkLabels.remove(player.getUniqueId());
+            }
+            future.complete(present(player, result, notifyReply, notifyStart));
+        } catch (Throwable thrown) {
+            plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
+            future.completeExceptionally(thrown);
+        }
+    }
+
+    private Prepared build(Player player, String characterId, String message, boolean sessionChat) {
         PluginConfig config = plugin.getPluginConfig();
         NamedPrompt prompt = plugin.getPromptCatalog().find(characterId).orElse(null);
         Location location = player.getLocation();
         String world = location.getWorld() == null ? "" : location.getWorld().getName();
         if (prompt == null) {
-            return new DialogueEngine.TalkRequest(
+            return new Prepared(new DialogueEngine.TalkRequest(
                     player.getUniqueId(), player.getName(), characterId, message, sessionChat, false, true,
                     "", config.getFallback(), DialogueProfile.absent(), List.of(), config.dialogueSettings(),
                     GenerationOverrides.none(), config.defaultFormatId(), world,
-                    location.getX(), location.getY(), location.getZ(), ignored -> false, System.currentTimeMillis());
+                    location.getX(), location.getY(), location.getZ(), ignored -> false, System.currentTimeMillis()),
+                    null, PromptContext.none(), "");
         }
         String format = prompt.format() == null ? config.defaultFormatId() : config.normalizeFormat(prompt.format());
         Map<String, Boolean> grants = new LinkedHashMap<>();
@@ -331,7 +361,8 @@ public final class DialogueService {
         }
         Predicate<String> permissions = node -> Boolean.TRUE.equals(grants.get(node));
         String fallback = prompt.fallback() != null ? prompt.fallback() : config.getFallback();
-        return new DialogueEngine.TalkRequest(
+        String instruction = formatInstruction(prompt, config);
+        DialogueEngine.TalkRequest request = new DialogueEngine.TalkRequest(
                 player.getUniqueId(),
                 player.getName(),
                 characterId,
@@ -353,6 +384,18 @@ public final class DialogueService {
                 permissions,
                 System.currentTimeMillis()
         );
+        ContextRequest contextRequest = null;
+        PromptContext selection = PromptContext.none();
+        if (prompt.context().active()
+                && config.contextSettings().enabled()
+                && plugin.getContextService() != null) {
+            ContextRequest.Purpose purpose = message == null || message.isBlank()
+                    ? ContextRequest.Purpose.TALK_GREETING
+                    : ContextRequest.Purpose.TALK;
+            contextRequest = new ContextRequest(player.getUniqueId(), player.getName(), world, characterId, purpose);
+            selection = prompt.context();
+        }
+        return new Prepared(request, contextRequest, selection, instruction);
     }
 
     static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player) {
@@ -361,8 +404,7 @@ public final class DialogueService {
                 ContextVariables.capture(player)
         );
         String admin = prompt.overrides().systemPrompt(config.getSystemPrompt());
-        String formatId = prompt.format() == null ? config.defaultFormatId() : prompt.format();
-        String instruction = config.presetFor(formatId).instruction();
+        String instruction = formatInstruction(prompt, config);
         StringBuilder system = new StringBuilder();
         if (admin != null && !admin.isBlank()) {
             system.append(admin).append("\n\n");
@@ -372,6 +414,12 @@ public final class DialogueService {
             system.append("\n\n").append(instruction);
         }
         return system.toString();
+    }
+
+    static String formatInstruction(NamedPrompt prompt, PluginConfig config) {
+        String formatId = prompt.format() == null ? config.defaultFormatId() : prompt.format();
+        String instruction = config.presetFor(formatId).instruction();
+        return instruction == null ? "" : instruction;
     }
 
     private DialogueEngine.TalkRequest endRequest(Player player) {
@@ -472,5 +520,13 @@ public final class DialogueService {
     }
 
     private record RecentChat(String text, long at) {
+    }
+
+    private record Prepared(
+            DialogueEngine.TalkRequest request,
+            ContextRequest contextRequest,
+            PromptContext selection,
+            String instruction
+    ) {
     }
 }

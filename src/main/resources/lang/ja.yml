@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&c取り込みに失敗しました: &f{error}"
   status-fallback-model: "&7フォールバックモデル: &f{entry}"
   status-knowledge: "&7ナレッジファイル: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ が要求されましたがプールにありません: &f{prompts}"
 
 common:

@@ -19,6 +19,8 @@ command:
   prompts-import-fail: "{prefix}&cImport failed: &f{error}"
   status-fallback-model: "&7Fallback model: &f{entry}"
   status-knowledge: "&7Knowledge files: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
   test-sending: "{prefix}&7Sending a test request..."
   test-ok: "{prefix}&aAnswer &8({latency_ms} ms)&a: &f{answer}"

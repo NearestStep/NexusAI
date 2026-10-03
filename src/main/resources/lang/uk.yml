@@ -42,6 +42,8 @@ command:
   prompts-import-fail: "{prefix}&cІмпорт не вдався: &f{error}"
   status-fallback-model: "&7Резервна модель: &f{entry}"
   status-knowledge: "&7Файли знань: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ запитано, але не в пулі: &f{prompts}"
 
 common:
