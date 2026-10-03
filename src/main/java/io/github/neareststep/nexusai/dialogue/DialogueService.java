@@ -1,6 +1,9 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.NexusAI;
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.command.SenderTasks;
@@ -28,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -61,7 +65,8 @@ public final class DialogueService {
             memory.load(memoryFile(), System.currentTimeMillis(), initial.memoryExpiryMillis(), plugin.getLogger());
         }
         HttpClient http = HttpClient.newBuilder().connectTimeout(plugin.getPluginConfig().getConnectTimeout()).build();
-        DialogueTransport transport = new DialogueTransport(plugin::getPluginConfig, http);
+        DialogueTransport transport = new DialogueTransport(
+                plugin::getPluginConfig, http, plugin.getHttpPool().gate());
         DialogueRouter router = new DialogueRouter(
                 ignored -> plugin.getPluginConfig(),
                 ignored -> plugin.getModelQueue(),
@@ -166,7 +171,11 @@ public final class DialogueService {
         if (player == null) {
             return;
         }
-        httpExecutor.execute(() -> present(player, engine.talk(endRequest(player)), true, false));
+        try {
+            httpExecutor.execute(() -> present(player, engine.talk(endRequest(player)), true, false));
+        } catch (RejectedExecutionException rejected) {
+            plugin.getLogger().fine(HttpPool.QUEUE_FULL);
+        }
     }
 
     public void quit(UUID player) {
@@ -203,23 +212,23 @@ public final class DialogueService {
             boolean opening = !sessionChat && (message == null || message.isBlank());
             String display = opening ? typed : sessionLabel(talkLabels.get(player.getUniqueId()), typed);
             Prepared prepared = build(player, id, message, sessionChat);
-            if (prepared.contextRequest == null || plugin.getContextService() == null) {
-                httpExecutor.execute(() -> talkPrepared(
-                        player, future, typed, display, prepared.request, notifyReply, notifyStart));
-                return;
-            }
-            plugin.getContextService().collect(prepared.contextRequest, prepared.selection).whenCompleteAsync((wrapped, error) -> {
-                if (error != null) {
-                    plugin.getLogger().warning("Dialogue failed: " + error.getMessage());
-                    future.completeExceptionally(error);
+            try {
+                if (prepared.contextRequest == null || plugin.getContextService() == null) {
+                    httpExecutor.execute(() -> talkPrepared(
+                            player, future, typed, display, prepared.request, notifyReply, notifyStart));
                     return;
                 }
-                DialogueEngine.TalkRequest request = prepared.request;
-                if (wrapped != null && !wrapped.isBlank()) {
-                    request = request.withSystem(ContextBlock.spliceSystem(request.system(), prepared.instruction, wrapped));
-                }
-                talkPrepared(player, future, typed, display, request, notifyReply, notifyStart);
-            }, httpExecutor);
+                plugin.getContextService().collect(prepared.contextRequest, prepared.selection).whenComplete((wrapped, error) -> {
+                    try {
+                        httpExecutor.execute(() -> deliverContext(
+                                player, future, typed, display, prepared, wrapped, error, notifyReply, notifyStart));
+                    } catch (RejectedExecutionException rejected) {
+                        rejectDialogue(player, future, notifyReply, rejected);
+                    }
+                });
+            } catch (RejectedExecutionException rejected) {
+                rejectDialogue(player, future, notifyReply, rejected);
+            }
         };
         if (owns(player)) {
             run.run();
@@ -314,6 +323,43 @@ public final class DialogueService {
             case FAILED -> messages.format("talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.format("talk.empty");
         };
+    }
+
+    private void deliverContext(
+            Player player,
+            CompletableFuture<String> future,
+            String typed,
+            String display,
+            Prepared prepared,
+            String wrapped,
+            Throwable error,
+            boolean notifyReply,
+            boolean notifyStart
+    ) {
+        if (error != null) {
+            plugin.getLogger().warning("Dialogue failed: " + error.getMessage());
+            future.completeExceptionally(error);
+            return;
+        }
+        DialogueEngine.TalkRequest request = prepared.request;
+        if (wrapped != null && !wrapped.isBlank()) {
+            request = request.withSystem(ContextBlock.spliceSystem(request.system(), prepared.instruction, wrapped));
+        }
+        talkPrepared(player, future, typed, display, request, notifyReply, notifyStart);
+    }
+
+    private void rejectDialogue(
+            Player player,
+            CompletableFuture<String> future,
+            boolean notifyReply,
+            RejectedExecutionException rejected
+    ) {
+        plugin.getLogger().fine(HttpPool.QUEUE_FULL);
+        future.completeExceptionally(new AiRequestException(
+                AiErrorKind.LOCAL_LIMIT, 0, HttpPool.QUEUE_FULL, rejected));
+        if (notifyReply) {
+            plugin.getMessageService().send(player, "talk.busy");
+        }
     }
 
     private void talkPrepared(

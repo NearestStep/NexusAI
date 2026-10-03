@@ -25,6 +25,20 @@
 - Providers run on `nexusai-context-N` (2 threads, queue 256), never on the main thread. A slow provider is skipped. Five timeouts or exceptions in a row suspend it. `/nai status` lists providers and does not print their values.
 - The context block is part of the `cached_` cache key. Snapshots last `context.refresh-seconds`. Greeting cache keys are SHA-256 of the system text.
 
+### HTTP pool
+
+- Placeholder and queue calls no longer block the four `nexusai-http-*` threads on `HttpClient.send`. The worker queue holds at most 64 tasks. At most 64 HTTP calls are in flight, with 64 more waiting for a slot. Anything beyond that fails immediately with `HTTP queue is full` (`LOCAL_LIMIT`) and is not queued. Placeholders already returned fallback. One warning is written per 30 seconds. `NexusAI.getHttpPool().snapshot()` reports queue depth, in-flight calls, waiters, and rejected submissions for a later load test.
+
+### Markup-only hold
+
+- A markup-only reply still holds that prompt for 30 seconds. A successful reply on the same admission key no longer clears the hold. The hold ends when the timer expires or when `/nai reload` builds a new request gate. The empty-reply ladder and a generic backoff still clear on success.
+- A pool refill for a prompt on that hold sends no request while the hold is active, and at most one request in the 30 second window. It does not fan out one call per pool slot.
+
+### Model queue strategy
+
+- `model-queue-strategy` is `failover` or `round-robin`. The default is `failover`, which is the 1.0.x order: every new request starts at the first available row. `round-robin` starts each new request at the next available row and then walks the circle. Cooldown, `daily-request-limit`, and remaining budget at or below `model-queue-remaining-threshold` are skipped in both modes. An unknown value is `failover`, with one warning on startup and on `/nai reload`.
+- `usage.yml` accounting is unchanged. `/nai status` prints the strategy and the next row. A missing key is appended to an existing `config.yml`. `config-version` stays 2. The append uses the usual single `<file>.bak`.
+
 ## 1.0.2 (2026-10-03)
 
 One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys.

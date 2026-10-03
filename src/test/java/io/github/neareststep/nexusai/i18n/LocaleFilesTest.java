@@ -34,6 +34,7 @@ class LocaleFilesTest {
             "command.test-fail",
             "command.status-last-error",
             "command.status-provider-pause",
+            "command.status-queue-strategy",
             "command.status-moderation",
             "moderation.notify",
             "common.none",

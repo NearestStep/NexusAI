@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.ai.AiDiagnostics;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
 import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
@@ -60,8 +61,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-
 public final class NexusAI extends JavaPlugin {
 
     private static final Set<String> KNOWN_PROVIDERS = Set.of(
@@ -76,6 +75,7 @@ public final class NexusAI extends JavaPlugin {
     private AiPool aiPool;
     private PoolService poolService;
     private PrewarmService prewarmService;
+    private HttpPool httpPool;
     private ExecutorService httpExecutor;
     private ScheduledExecutorService scheduler;
     private HttpClient sharedHttpClient;
@@ -127,6 +127,7 @@ public final class NexusAI extends JavaPlugin {
         logGroqMaxTokensWarning();
         logMissingEnvVars();
         logKeyFileWarnings();
+        logQueueStrategy();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -136,7 +137,8 @@ public final class NexusAI extends JavaPlugin {
             getLogger().info("API keys: " + maskedKeys);
         }
 
-        this.httpExecutor = createHttpExecutor();
+        this.httpPool = HttpPool.create(getLogger());
+        this.httpExecutor = httpPool.executor();
         this.scheduler = createScheduler();
         this.contextExecutor = ContextService.newWorkerPool(ContextService.THREADS, ContextService.QUEUE_CAPACITY);
         this.contextSnapshots = new ContextSnapshots();
@@ -207,6 +209,7 @@ public final class NexusAI extends JavaPlugin {
         logGroqMaxTokensWarning();
         logMissingEnvVars();
         logKeyFileWarnings();
+        logQueueStrategy();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -423,7 +426,8 @@ public final class NexusAI extends JavaPlugin {
         if (!KNOWN_PROVIDERS.contains(provider)) {
             getLogger().warning("Unknown api.provider '" + provider + "', using OpenAI-compatible client.");
         }
-        OpenAiProvider http = new OpenAiProvider(config, httpExecutor, getLogger(), sharedClient(config));
+        OpenAiProvider http = new OpenAiProvider(
+                config, httpExecutor, getLogger(), sharedClient(config), httpPool.gate());
         this.openAiProvider = http;
         this.modelQueue = new ModelQueue(
                 config.modelQueue(),
@@ -431,8 +435,16 @@ public final class NexusAI extends JavaPlugin {
                 config.getProviderPauseSeconds() * 1000L,
                 config.getAuthPauseSeconds() * 1000L,
                 new File(getDataFolder(), "usage.yml"),
-                getLogger());
-        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger());
+                getLogger(),
+                config.modelQueueStrategy());
+        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
+    }
+
+    private void logQueueStrategy() {
+        String warning = pluginConfig.modelQueueStrategyWarning();
+        if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
+        }
     }
 
     private void migrateOtherConfigs() {
@@ -466,16 +478,6 @@ public final class NexusAI extends JavaPlugin {
         } catch (RuntimeException ignored) {
             // A closed client must not fail reload or shutdown.
         }
-    }
-
-    private static ExecutorService createHttpExecutor() {
-        AtomicInteger sequence = new AtomicInteger();
-        ThreadFactory factory = runnable -> {
-            Thread thread = new Thread(runnable, "nexusai-http-" + sequence.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        };
-        return Executors.newFixedThreadPool(4, factory);
     }
 
     private static ScheduledExecutorService createScheduler() {
@@ -537,6 +539,13 @@ public final class NexusAI extends JavaPlugin {
 
     public ExecutorService getHttpExecutor() {
         return httpExecutor;
+    }
+
+    /**
+     * Bounded worker queue and in-flight HTTP cap. Load tests read {@link HttpPool#snapshot()}.
+     */
+    public HttpPool getHttpPool() {
+        return httpPool;
     }
 
     public PromptCatalog getPromptCatalog() {

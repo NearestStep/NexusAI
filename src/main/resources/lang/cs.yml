@@ -35,6 +35,7 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Poslední chyba: &f{last_error}"
   status-provider-pause: "&7Pauza poskytovatele: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderace: &f{state} &8(dnes {checks} kontrol, {flags} označení)"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportovat prompty ze složky import"

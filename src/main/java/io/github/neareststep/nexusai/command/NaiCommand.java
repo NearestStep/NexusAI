@@ -10,6 +10,7 @@ import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.config.QueueStrategy;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -261,6 +262,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 "provider_pause", pauseText(messages)
         ));
         ModelQueue queue = plugin.getModelQueue();
+        messages.send(sender, "command.status-queue-strategy", Map.of(
+                "strategy", modelQueueStrategyText(config.modelQueueStrategy(), nextQueueRow(queue))
+        ));
         if (queue != null && queue.size() > 0) {
             messages.send(sender, "command.status-queue-header");
             for (ModelQueue.Status row : queue.status(System.currentTimeMillis())) {
@@ -337,6 +341,25 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         ConsoleTalkError {
             placeholders = placeholders == null ? Map.of() : Map.copyOf(placeholders);
         }
+    }
+
+    /**
+     * Text placed in {@code {strategy}} for {@code /nai status}.
+     * Example: {@code round-robin (next: groq/llama)}.
+     */
+    public static String modelQueueStrategyText(QueueStrategy strategy, String nextRow) {
+        QueueStrategy effective = strategy == null ? QueueStrategy.FAILOVER : strategy;
+        String row = nextRow == null || nextRow.isBlank() ? "none" : nextRow;
+        return effective.wire() + " (next: " + row + ")";
+    }
+
+    private static String nextQueueRow(ModelQueue queue) {
+        if (queue == null) {
+            return "none";
+        }
+        return queue.nextStart(System.currentTimeMillis())
+                .map(choice -> choice.provider() + "/" + choice.model())
+                .orElse("none");
     }
 
     static String queueLine(ModelQueue.Status row) {

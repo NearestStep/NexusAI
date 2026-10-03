@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RateLimitHeaders;
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
+import io.github.neareststep.nexusai.config.QueueStrategy;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -43,6 +44,9 @@ public final class ModelQueue {
     private final Supplier<LocalDate> today;
     private final ZoneId zone;
     private final Logger logger;
+    private final QueueStrategy strategy;
+    /** Next starting row for {@link QueueStrategy#ROUND_ROBIN}. Not used for failover. */
+    private final AtomicInteger roundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
     private LocalDate day;
     private int moderationChecks;
@@ -65,7 +69,31 @@ public final class ModelQueue {
                 System::currentTimeMillis,
                 LocalDate::now,
                 ZoneId.systemDefault(),
-                logger
+                logger,
+                QueueStrategy.FAILOVER
+        );
+    }
+
+    public ModelQueue(
+            List<QueueEntryConfig> entries,
+            int remainingThreshold,
+            long errorCooldownMillis,
+            long authCooldownMillis,
+            File usageFile,
+            Logger logger,
+            QueueStrategy strategy
+    ) {
+        this(
+                entries,
+                remainingThreshold,
+                errorCooldownMillis,
+                authCooldownMillis,
+                usageFile,
+                System::currentTimeMillis,
+                LocalDate::now,
+                ZoneId.systemDefault(),
+                logger,
+                strategy
         );
     }
 
@@ -80,6 +108,32 @@ public final class ModelQueue {
             ZoneId zone,
             Logger logger
     ) {
+        this(
+                entries,
+                remainingThreshold,
+                errorCooldownMillis,
+                authCooldownMillis,
+                usageFile,
+                clock,
+                today,
+                zone,
+                logger,
+                QueueStrategy.FAILOVER
+        );
+    }
+
+    public ModelQueue(
+            List<QueueEntryConfig> entries,
+            int remainingThreshold,
+            long errorCooldownMillis,
+            long authCooldownMillis,
+            File usageFile,
+            LongSupplier clock,
+            Supplier<LocalDate> today,
+            ZoneId zone,
+            Logger logger,
+            QueueStrategy strategy
+    ) {
         this.remainingThreshold = Math.max(0, remainingThreshold);
         this.errorCooldownMillis = Math.max(0L, errorCooldownMillis);
         this.authCooldownMillis = Math.max(0L, authCooldownMillis);
@@ -88,6 +142,7 @@ public final class ModelQueue {
         this.today = today == null ? LocalDate::now : today;
         this.zone = zone == null ? ZoneId.systemDefault() : zone;
         this.logger = logger == null ? Logger.getLogger("nexusai.queue") : logger;
+        this.strategy = strategy == null ? QueueStrategy.FAILOVER : strategy;
         this.day = this.today.get();
         List<Slot> loaded = new ArrayList<>();
         List<QueueEntryConfig> source = entries == null ? List.of() : entries;
@@ -114,6 +169,73 @@ public final class ModelQueue {
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
         roll(nowMillis);
+        if (strategy != QueueStrategy.ROUND_ROBIN || slots.isEmpty()) {
+            return readyInOrder(nowMillis, ignoreCooldown);
+        }
+        int start = nextRoundRobinIndex(nowMillis, ignoreCooldown);
+        if (start < 0) {
+            return List.of();
+        }
+        // The next request starts at the following row, skipping rows that are not selectable then.
+        roundRobinCursor.set(Math.floorMod(start + 1, slots.size()));
+        List<Choice> ready = new ArrayList<>();
+        for (int i = 0; i < slots.size(); i++) {
+            Slot slot = slots.get(Math.floorMod(start + i, slots.size()));
+            if (isSelectable(slot, nowMillis, ignoreCooldown)) {
+                ready.add(slot.choice());
+            }
+        }
+        return ready;
+    }
+
+    public QueueStrategy strategy() {
+        return strategy;
+    }
+
+    /**
+     * The row the next request will start from. Does not advance the round-robin cursor.
+     * Failover and round-robin both report the next selectable row. A cooled, exhausted, or
+     * threshold-blocked row is skipped. Empty when nothing is selectable.
+     */
+    public synchronized Optional<Choice> nextStart(long nowMillis) {
+        roll(nowMillis);
+        if (slots.isEmpty()) {
+            return Optional.empty();
+        }
+        if (strategy != QueueStrategy.ROUND_ROBIN) {
+            for (Slot slot : slots) {
+                if (isSelectable(slot, nowMillis, false)) {
+                    return Optional.of(slot.choice());
+                }
+            }
+            return Optional.empty();
+        }
+        int index = nextRoundRobinIndex(nowMillis, false);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(slots.get(index).choice());
+    }
+
+    /**
+     * First selectable row at or after the round-robin cursor. Does not move the cursor.
+     */
+    private int nextRoundRobinIndex(long nowMillis, boolean ignoreCooldown) {
+        int size = slots.size();
+        if (size == 0) {
+            return -1;
+        }
+        int cursor = Math.floorMod(roundRobinCursor.get(), size);
+        for (int i = 0; i < size; i++) {
+            int index = Math.floorMod(cursor + i, size);
+            if (isSelectable(slots.get(index), nowMillis, ignoreCooldown)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private List<Choice> readyInOrder(long nowMillis, boolean ignoreCooldown) {
         List<Choice> ready = new ArrayList<>();
         for (Slot slot : slots) {
             if (isSelectable(slot, nowMillis, ignoreCooldown)) {
