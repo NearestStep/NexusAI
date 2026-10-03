@@ -10,6 +10,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,18 +44,20 @@ public final class KnowledgeBase {
             """;
 
     private final Map<String, String> files;
+    private final Set<String> invalidUtf8;
     private final int maxChars;
     private final Logger logger;
     private final Set<String> truncationWarned = ConcurrentHashMap.newKeySet();
 
-    private KnowledgeBase(Map<String, String> files, int maxChars, Logger logger) {
+    private KnowledgeBase(Map<String, String> files, Set<String> invalidUtf8, int maxChars, Logger logger) {
         this.files = files;
+        this.invalidUtf8 = invalidUtf8 == null ? Set.of() : Set.copyOf(invalidUtf8);
         this.maxChars = Math.max(1, maxChars);
         this.logger = logger == null ? Logger.getLogger("nexusai.knowledge") : logger;
     }
 
     public static KnowledgeBase empty() {
-        return new KnowledgeBase(Map.of(), 6000, null);
+        return new KnowledgeBase(Map.of(), Set.of(), 6000, null);
     }
 
     /**
@@ -76,6 +79,7 @@ public final class KnowledgeBase {
         List<String> notes = warnings == null ? new ArrayList<>() : warnings;
         int fileCap = Math.max(1, maxFileChars);
         Map<String, String> loaded = new LinkedHashMap<>();
+        Set<String> invalidUtf8 = new LinkedHashSet<>();
         if (folder != null && Files.isDirectory(folder)) {
             try (var stream = Files.list(folder)) {
                 List<Path> paths = stream
@@ -107,6 +111,7 @@ public final class KnowledgeBase {
                         text = Files.readString(path, StandardCharsets.UTF_8);
                     } catch (IOException e) {
                         if (isNotUtf8(e)) {
+                            invalidUtf8.add(name);
                             String note = "Knowledge file '" + fileName
                                     + "' is not valid UTF-8, re-save the file as UTF-8. The file was skipped.";
                             if (logger != null) {
@@ -139,11 +144,22 @@ public final class KnowledgeBase {
                 }
             }
         }
-        return new KnowledgeBase(Map.copyOf(loaded), maxChars, logger);
+        return new KnowledgeBase(Map.copyOf(loaded), invalidUtf8, maxChars, logger);
     }
 
     public boolean contains(String name) {
         return name != null && files.containsKey(name);
+    }
+
+    /**
+     * True when a prompt names a file that was not loaded and was not skipped as invalid UTF-8.
+     * A non-UTF-8 file already logged its own warning and must not also be reported as unknown.
+     */
+    public boolean unknown(String name) {
+        if (name == null || name.isBlank() || files.containsKey(name)) {
+            return false;
+        }
+        return !invalidUtf8.contains(name);
     }
 
     public int size() {

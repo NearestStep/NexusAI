@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -282,6 +284,25 @@ class PoolStoreTest {
             store.saveNow(pool, Map.of("tip", 1));
             assertFalse(Files.exists(dir.resolve("pool.yml.bak")));
             assertTrue(Files.readString(file.toPath()).contains("ready"));
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void aNewPoolFileIsOwnerReadWrite() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-pool-mode");
+        assumeTrue(Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null,
+                "POSIX permissions are not available");
+        File file = dir.resolve("pool.yml").toFile();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        try {
+            PoolStore store = new PoolStore(file, scheduler, Duration.ofMillis(50), Logger.getLogger("pool-mode"), true);
+            AiPool pool = new AiPool();
+            pool.add("tip", "ready");
+            store.saveNow(pool, Map.of("tip", 1));
+            assertEquals(EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(file.toPath()));
         } finally {
             scheduler.shutdownNow();
         }

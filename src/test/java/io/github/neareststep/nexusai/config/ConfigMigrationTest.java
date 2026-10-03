@@ -551,6 +551,52 @@ class ConfigMigrationTest {
         assertFalse(copied.contains(PosixFilePermission.OTHERS_READ));
     }
 
+    @Test
+    void replaceKeepsOwnerOnlyPosixPermissions() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-replace-mode");
+        Path source = dir.resolve("config.yml");
+        Files.writeString(source, "api:\n  key: \"literal\"\n", StandardCharsets.UTF_8);
+        PosixFileAttributeView view = Files.getFileAttributeView(source, PosixFileAttributeView.class);
+        org.junit.jupiter.api.Assumptions.assumeTrue(view != null, "POSIX permissions are not available");
+        Set<PosixFilePermission> mode = Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+        Files.setPosixFilePermissions(source, mode);
+        FileBackup.replace(source, "api:\n  key: \"\"\n");
+        assertEquals(mode, Files.getPosixFilePermissions(source));
+        assertTrue(Files.readString(source).contains("key: \"\""));
+    }
+
+    @Test
+    void httpLimitsAreAppendedOnceAndCommentsStay() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-http-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                  max-tokens: 256
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("http-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("http.max-in-flight"));
+        assertTrue(outcome.addedKeys().contains("http.queue-size"));
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("max-in-flight:", -1).length - 1, written);
+        assertEquals(1, written.split("queue-size:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(64, yaml.getInt("http.max-in-flight"));
+        assertEquals(64, yaml.getInt("http.queue-size"));
+
+        ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(second.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

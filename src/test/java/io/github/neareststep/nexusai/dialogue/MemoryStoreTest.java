@@ -7,12 +7,17 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.UserPrincipal;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class MemoryStoreTest {
 
@@ -105,5 +110,46 @@ class MemoryStoreTest {
         assertEquals("safe", yaml.getMapList("entries." + player + ".blacksmith.lines").get(0).get("text"));
         assertFalse(yaml.contains("format"));
         assertEquals(0, Files.list(dir).filter(path -> path.getFileName().toString().endsWith(".tmp")).count());
+    }
+
+    @Test
+    void newMemoryFileIsOwnerReadWriteAndAnExistingModeIsKept() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-mode");
+        assumePosix(dir);
+        Set<PosixFilePermission> ownerOnly = Set.of(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+
+        MemoryStore created = new MemoryStore();
+        UUID player = UUID.randomUUID();
+        created.append(player, "blacksmith", "user", "hello", 50L, 8, 100, 0L);
+        Path fresh = dir.resolve("dialogue-memory.yml");
+        created.save(fresh.toFile(), null, false);
+        assertEquals(ownerOnly, Files.getPosixFilePermissions(fresh));
+
+        Path existing = dir.resolve("kept.yml");
+        Files.writeString(existing, "entries: {}\n", StandardCharsets.UTF_8);
+        Set<PosixFilePermission> mode = Set.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.GROUP_READ);
+        Files.setPosixFilePermissions(existing, mode);
+        UserPrincipal owner = Files.getOwner(existing);
+        MemoryStore again = new MemoryStore();
+        again.append(player, "blacksmith", "user", "again", 60L, 8, 100, 0L);
+        again.save(existing.toFile(), null, false);
+        assertEquals(mode, Files.getPosixFilePermissions(existing));
+        assertEquals(owner, Files.getOwner(existing));
+        assertTrue(Files.readString(existing).contains("again"));
+
+        Path locked = dir.resolve("locked.yml");
+        Files.writeString(locked, "entries: {}\n", StandardCharsets.UTF_8);
+        Files.setPosixFilePermissions(locked, ownerOnly);
+        again.save(locked.toFile(), null, false);
+        assertEquals(ownerOnly, Files.getPosixFilePermissions(locked));
+    }
+
+    private static void assumePosix(Path dir) {
+        assumeTrue(Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null,
+                "POSIX permissions are not available");
     }
 }

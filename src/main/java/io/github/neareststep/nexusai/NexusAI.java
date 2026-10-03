@@ -128,6 +128,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logHttpLimitWarning();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -137,7 +138,8 @@ public final class NexusAI extends JavaPlugin {
             getLogger().info("API keys: " + maskedKeys);
         }
 
-        this.httpPool = HttpPool.create(getLogger());
+        this.httpPool = HttpPool.create(
+                getLogger(), pluginConfig.httpMaxInFlight(), pluginConfig.httpQueueSize());
         this.httpExecutor = httpPool.executor();
         this.scheduler = createScheduler();
         this.contextExecutor = ContextService.newWorkerPool(ContextService.THREADS, ContextService.QUEUE_CAPACITY);
@@ -203,6 +205,9 @@ public final class NexusAI extends JavaPlugin {
         LengthTrimNotices.reset();
 
         stopRuntimeServices(true);
+        if (httpPool != null) {
+            httpPool.applyLimits(pluginConfig.httpMaxInFlight(), pluginConfig.httpQueueSize());
+        }
         startRuntimeServices();
         refreshPlaceholder();
         logCredentialState();
@@ -210,6 +215,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logHttpLimitWarning();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -388,6 +394,16 @@ public final class NexusAI extends JavaPlugin {
 
     private void logKeyFileWarnings() {
         for (String warning : pluginConfig.keyFileWarnings()) {
+            getLogger().warning(warning);
+        }
+        for (String warning : pluginConfig.shortKeyWarnings()) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void logHttpLimitWarning() {
+        String warning = pluginConfig.httpLimitWarning();
+        if (warning != null && !warning.isBlank()) {
             getLogger().warning(warning);
         }
     }
@@ -651,7 +667,7 @@ public final class NexusAI extends JavaPlugin {
                 continue;
             }
             for (String name : prompt.knowledge()) {
-                if (!knowledgeBase.contains(name)) {
+                if (knowledgeBase.unknown(name)) {
                     getLogger().warning("Prompt '" + id + "' lists unknown knowledge file '" + name + "'.");
                 }
             }

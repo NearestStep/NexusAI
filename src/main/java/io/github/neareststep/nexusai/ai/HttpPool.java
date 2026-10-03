@@ -32,16 +32,22 @@ public final class HttpPool {
     public static final String QUEUE_FULL = "HTTP queue is full";
 
     private final ThreadPoolExecutor workers;
-    private final HttpGate gate;
+    private final Logger logger;
     private final AtomicLong workerRejected;
+    private volatile HttpGate gate;
 
-    private HttpPool(ThreadPoolExecutor workers, HttpGate gate, AtomicLong workerRejected) {
+    private HttpPool(ThreadPoolExecutor workers, HttpGate gate, AtomicLong workerRejected, Logger logger) {
         this.workers = workers;
         this.gate = gate;
         this.workerRejected = workerRejected;
+        this.logger = logger;
     }
 
     public static HttpPool create(Logger logger) {
+        return create(logger, MAX_IN_FLIGHT, WAIT_QUEUE_CAPACITY);
+    }
+
+    public static HttpPool create(Logger logger, int maxInFlight, int waitCapacity) {
         AtomicInteger sequence = new AtomicInteger();
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, "nexusai-http-" + sequence.incrementAndGet());
@@ -64,7 +70,24 @@ public final class HttpPool {
                     throw new RejectedExecutionException(QUEUE_FULL);
                 });
         executor.prestartAllCoreThreads();
-        return new HttpPool(executor, HttpGate.standard(logger), rejected);
+        int inFlight = Math.max(1, maxInFlight);
+        int waiting = Math.max(1, waitCapacity);
+        return new HttpPool(executor, new HttpGate(inFlight, waiting, logger), rejected, logger);
+    }
+
+    /**
+     * Points later calls at a new gate. Calls already holding the previous gate finish on it.
+     * The four worker threads stay. Values below 1 are raised to 1.
+     */
+    public void applyLimits(int maxInFlight, int waitCapacity) {
+        int inFlight = Math.max(1, maxInFlight);
+        int waiting = Math.max(1, waitCapacity);
+        HttpGate current = gate;
+        HttpGate.Snapshot snapshot = current.snapshot();
+        if (snapshot.maxInFlight() == inFlight && snapshot.waitCapacity() == waiting) {
+            return;
+        }
+        gate = new HttpGate(inFlight, waiting, logger);
     }
 
     public ExecutorService executor() {

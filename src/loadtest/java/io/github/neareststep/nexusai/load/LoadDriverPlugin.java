@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.load;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.HttpPool;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.context.ContextService;
 import me.clip.placeholderapi.PlaceholderAPI;
@@ -21,10 +22,8 @@ import org.bukkit.scheduler.BukkitTask;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -471,12 +470,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         String json = JsonMaps.object(root);
         Path path = new File(getDataFolder(), "report.json").toPath();
         Path tmp = path.resolveSibling("report.json.tmp");
+        AtomicFiles.createPrivate(tmp);
         Files.writeString(tmp, json, StandardCharsets.UTF_8);
-        try {
-            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException ex) {
-            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicFiles.moveReplacing(tmp, path);
     }
 
     private List<Map<String, Object>> contextRows() {

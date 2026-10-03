@@ -233,6 +233,16 @@ limits:
   # How often the same error kind is written to the server log.
   error-log-cooldown-seconds: 30
 
+# Outstanding HTTP calls. The four nexusai-http threads stay.
+# max-in-flight is how many calls may be in progress. queue-size is how many more may wait
+# for a slot. Anything beyond that fails at once with "HTTP queue is full".
+# One connection error pauses that provider for limits.provider-pause-seconds (60).
+# A weak endpoint (a local proxy, Ollama, a free-tier host) should use a lower max-in-flight.
+# Both values must be greater than 0. 0 or a negative value is logged and replaced with 64.
+http:
+  max-in-flight: 64
+  queue-size: 64
+
 # Unique-answer pools for %ainexus_generate_<prompt>%
 pool:
   enabled: true
@@ -359,7 +369,8 @@ actions:
   max-per-reply: 1
 
 # Context from other plugins (balance, rank, quest) for prompts that list context:.
-# Providers never run on the main thread. A slow provider is skipped, not waited for.
+# Providers never run on the main thread. A call that is still running at its timeout is
+# interrupted, and the value is skipped. Providers should stop when the thread is interrupted.
 context:
   enabled: true
   max-provider-timeout-millis: 200   # 10..1000; provider.timeout() is clamped to this

@@ -31,6 +31,8 @@ Keys appended when they are absent:
 | `dialogue.summary.max-tokens` | `200` |
 | `dialogue.summary.provider` | empty |
 | `dialogue.summary.model` | empty |
+| `http.max-in-flight` | `64` |
+| `http.queue-size` | `64` |
 
 `dialogue.summary` is inserted inside an existing `dialogue:` section. Comments you already wrote stay. A value you already set is not replaced. If you had set `model-queue-strategy: round-robin` yourself, it stays `round-robin`.
 
@@ -51,7 +53,7 @@ Keys appended when they are absent:
 
 1. Stop the server.
 2. Remove the 1.1.0 jar and put `NexusAI-1.0.2.jar` back in `plugins/`.
-3. Leave `config.yml` in place. 1.0.x reads the keys it knows. It ignores `model-queue-strategy`, `context.*`, and `dialogue.summary.*`. `config-version` is already 2, which 1.0.x also uses, so the file is not migrated again. To drop the appended keys from the file, restore the `config.yml.bak` written by the 1.1.0 start (the log line `Backed up config.yml to …` names it).
+3. Leave `config.yml` in place. 1.0.x reads the keys it knows. It ignores `model-queue-strategy`, `context.*`, `dialogue.summary.*`, `http.max-in-flight`, and `http.queue-size`. `config-version` is already 2, which 1.0.x also uses, so the file is not migrated again. To drop the appended keys from the file, restore the `config.yml.bak` written by the 1.1.0 start (the log line `Backed up config.yml to …` names it).
 4. Leave `prompts.yml` in place. A `context:` key is an unknown prompt setting on 1.0.x: it is ignored, one warning is logged, and the prompt still loads.
 5. Leave `dialogue-memory.yml` in place. 1.0.x reads `updated` and `lines`. It ignores `summary`, `summary-updated`, and `format`. The transcript remains. The summary text is not shown. If you need the pre-1.1.0 file, restore `dialogue-memory.yml.bak` from the first format-2 save.
 6. `usage.yml` and `pool.yml` need no rollback for this upgrade.

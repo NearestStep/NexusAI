@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
@@ -7,9 +8,6 @@ import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -202,6 +200,7 @@ public final class MemoryStore {
             File temporary = new File(parent == null ? new File(".") : parent,
                     file.getName() + "." + UUID.randomUUID() + ".tmp");
             try {
+                AtomicFiles.createPrivate(temporary.toPath());
                 yaml.save(temporary);
                 publish.publish(temporary, file);
             } finally {
@@ -263,11 +262,7 @@ public final class MemoryStore {
     }
 
     private static void moveIntoPlace(File temporary, File target) throws IOException {
-        try {
-            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicFiles.moveReplacing(temporary.toPath(), target.toPath());
     }
 
     @FunctionalInterface

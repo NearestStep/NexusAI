@@ -60,7 +60,7 @@ public final class DialogueTransport {
     public Result send(Request request) {
         Objects.requireNonNull(request, "request");
         String root = request.baseUrl() == null || request.baseUrl().isBlank() ? config().getBaseUrl() : request.baseUrl();
-        URI uri = URI.create(trimSlash(root) + "/chat/completions");
+        URI uri = io.github.neareststep.nexusai.ai.ChatEndpoints.chatCompletions(root);
         try {
             byte[] json = DialogueProtocol.requestJson(
                     request.model(),
@@ -215,14 +215,6 @@ public final class DialogueTransport {
 
     private static String host(URI uri) {
         return uri.getHost() == null ? uri.toString() : uri.getHost();
-    }
-
-    private static String trimSlash(String url) {
-        String trimmed = url.trim();
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return trimmed;
     }
 
     public record Request(

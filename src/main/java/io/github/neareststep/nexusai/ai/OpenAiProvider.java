@@ -188,7 +188,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             effective = effective.withModel(model);
         }
         String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
-        URI parsedUri = URI.create(trimSlash(root) + "/chat/completions");
+        URI parsedUri = ChatEndpoints.chatCompletions(root);
         logger.log(Level.FINE, "POST {0}", parsedUri);
         final GenerationOverrides callOverrides = effective;
         final HttpRequest request;
@@ -370,14 +370,6 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             }
         }
         return secrets;
-    }
-
-    private static String trimSlash(String url) {
-        String trimmed = url.trim();
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        return trimmed;
     }
 
     static long retryAfterSeconds(String header) {

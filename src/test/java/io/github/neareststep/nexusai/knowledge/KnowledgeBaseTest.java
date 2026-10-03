@@ -162,6 +162,9 @@ class KnowledgeBaseTest {
             assertTrue(warnings.isEmpty(), warnings.toString());
             assertTrue(knowledge.contains("lore"));
             assertFalse(knowledge.contains("notes"));
+            assertFalse(knowledge.unknown("notes"));
+            assertFalse(knowledge.unknown("lore"));
+            assertTrue(knowledge.unknown("missing"));
             List<LogRecord> warningRecords = records.stream()
                     .filter(record -> record.getLevel() == Level.WARNING)
                     .toList();
