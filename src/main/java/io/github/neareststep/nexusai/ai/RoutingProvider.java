@@ -187,7 +187,7 @@ public final class RoutingProvider implements AiProvider {
             } catch (AiRequestException error) {
                 last.error = error;
                 now = clock.getAsLong();
-                if (error.kind() == AiErrorKind.EMPTY_REPLY) {
+                if (error.kind() == AiErrorKind.EMPTY_REPLY || error.kind() == AiErrorKind.MARKUP_ONLY) {
                     throw error;
                 }
                 if (error.kind() == AiErrorKind.REJECTED) {

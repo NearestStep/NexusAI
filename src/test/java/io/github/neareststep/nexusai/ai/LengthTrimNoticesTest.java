@@ -56,9 +56,16 @@ class LengthTrimNoticesTest {
             assertTrue(LengthTrimNotices.message("harbor").contains("increase max-tokens"));
 
             String longPrompt = "x".repeat(200);
-            String label = LengthTrimNotices.label(longPrompt);
-            assertTrue(label.endsWith("..."));
-            assertTrue(label.length() <= 120);
+            assertEquals("(length 200)", LengthTrimNotices.label(longPrompt));
+            assertFalse(LengthTrimNotices.message(longPrompt).contains("xxx"));
+            assertTrue(LengthTrimNotices.message(longPrompt).contains("(length 200)"));
+            String template = "LIT101 <red>tale</red> &#FF0000for {player} " + "word ".repeat(30);
+            String templateLine = LengthTrimNotices.message(template);
+            assertFalse(templateLine.contains("tale"));
+            assertFalse(templateLine.contains("<red>"));
+            assertFalse(templateLine.contains("{player}"));
+            assertFalse(templateLine.contains("LIT101"));
+            assertTrue(templateLine.contains("length"));
             assertEquals("(blank)", LengthTrimNotices.label(" \n\t "));
         } finally {
             logger.removeHandler(handler);

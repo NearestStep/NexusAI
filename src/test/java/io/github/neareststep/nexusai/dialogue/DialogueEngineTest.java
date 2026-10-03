@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import org.junit.jupiter.api.Test;
@@ -44,6 +46,17 @@ class DialogueEngineTest {
                 "You are Bram. The player is Steve.", "...", DialogueProfile.absent(), List.of(),
                 settings(), GenerationOverrides.none(), "chat", "world", 0, 64, 0, node -> true, 2_000L));
         assertEquals(List.of("nai talk"), ids);
+    }
+
+    @Test
+    void markupOnlyReplyFallsBackWithoutLookingLikeAFailure() {
+        DialogueEngine engine = engine(reply -> {
+            throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
+        });
+        TalkResult result = engine.talk(request("hi", false, List.of(), settings(), 1_000L, node -> true));
+        assertEquals(TalkCode.REPLY, result.code());
+        assertEquals("...", result.text());
+        assertEquals(1, calls.get());
     }
 
     @Test

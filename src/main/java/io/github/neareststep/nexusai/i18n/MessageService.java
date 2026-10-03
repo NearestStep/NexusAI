@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.i18n;
 
+import io.github.neareststep.nexusai.ai.PlayerInput;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -24,6 +25,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Loads {@code lang/{locale}.yml} with English fallback and optional data-folder overrides.
@@ -36,6 +40,13 @@ public final class MessageService {
      * so {@code &}, {@code §}, hex, and MiniMessage in the reply are not parsed.
      */
     private static final Set<String> PLAIN_PLACEHOLDERS = Set.of("reply", "answer");
+    /**
+     * Values that are inserted into the legacy template before it is deserialized.
+     * A {@code §} or MiniMessage tag in these would colour chat or, for a consumer of the
+     * formatted string, survive as markup. They are stripped the same way as a model reply.
+     */
+    private static final Set<String> SANITIZED_PLACEHOLDERS = Set.of("error", "character");
+    private static final Pattern YAML_LOCATION = Pattern.compile("line \\d+, column \\d+");
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
     private final JavaPlugin plugin;
@@ -99,7 +110,7 @@ public final class MessageService {
         String message = colorize(raw(key));
         Map<String, String> values = placeholderValues(placeholders);
         for (Map.Entry<String, String> entry : values.entrySet()) {
-            message = message.replace('{' + entry.getKey() + '}', entry.getValue() == null ? "" : entry.getValue());
+            message = message.replace('{' + entry.getKey() + '}', inserted(entry.getKey(), entry.getValue()));
         }
         return message;
     }
@@ -120,7 +131,7 @@ public final class MessageService {
             if (!template.contains(needle)) {
                 continue;
             }
-            String value = entry.getValue() == null ? "" : entry.getValue();
+            String value = inserted(entry.getKey(), entry.getValue());
             if (PLAIN_PLACEHOLDERS.contains(entry.getKey())) {
                 plain.put(mark, value);
                 template = template.replace(needle, String.valueOf(mark));
@@ -143,6 +154,19 @@ public final class MessageService {
     public void send(CommandSender sender, String key, Map<String, String> placeholders) {
         Objects.requireNonNull(sender, "sender");
         sender.sendMessage(component(key, placeholders));
+    }
+
+    /**
+     * {@code {error}} and {@code {character}} are written into the legacy template, so a
+     * section sign in either one becomes a colour. Strip them before that insertion.
+     * {@code {reply}} and {@code {answer}} stay raw here; they are inserted as plain text later.
+     */
+    private static String inserted(String key, String value) {
+        String text = value == null ? "" : value;
+        if (SANITIZED_PLACEHOLDERS.contains(key)) {
+            return PlayerInput.stripSectionSigns(text);
+        }
+        return text;
     }
 
     private Map<String, String> placeholderValues(Map<String, String> placeholders) {
@@ -225,17 +249,23 @@ public final class MessageService {
         File userFile = plugin == null ? null : new File(plugin.getDataFolder(), "lang/" + localeCode + ".yml");
         boolean userPresent = userFile != null && userFile.isFile();
         YamlConfiguration user = new YamlConfiguration();
+        boolean brokenUserFile = false;
         if (userPresent) {
             try {
                 user.load(new InputStreamReader(java.nio.file.Files.newInputStream(userFile.toPath()), StandardCharsets.UTF_8));
             } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Failed to load locale file " + userFile.getPath(), e);
+                String fallback = bundledPresent
+                        ? "Using the bundled " + localeCode + " locale."
+                        : "Using English.";
+                warnBrokenLocale(plugin.getLogger(), userFile, e, fallback);
                 user = new YamlConfiguration();
                 userPresent = false;
+                brokenUserFile = true;
             }
         }
-        if (!bundledPresent && !userPresent && !DEFAULT_LOCALE.equals(localeCode) && plugin != null) {
-            plugin.getLogger().warning("Locale file missing in jar: lang/" + localeCode + ".yml — using English.");
+        if (!brokenUserFile && !bundledPresent && !userPresent && !DEFAULT_LOCALE.equals(localeCode) && plugin != null) {
+            File expected = userFile != null ? userFile : new File("lang/" + localeCode + ".yml");
+            warnMissingLocale(plugin.getLogger(), localeCode, expected);
         }
         YamlConfiguration merged = merge(user, bundledPresent ? bundled : new YamlConfiguration(), english);
         int filled = userPresent ? filledFromDefaults(user, merged) : 0;
@@ -278,7 +308,7 @@ public final class MessageService {
                 yaml.load(new InputStreamReader(in, StandardCharsets.UTF_8));
             }
         } catch (Exception e) {
-            plugin.getLogger().log(Level.WARNING, "Failed to load locale resource " + resourcePath, e);
+            warnBrokenLocale(plugin.getLogger(), new File(resourcePath), e, "Using English.");
         }
         return yaml;
     }
@@ -328,5 +358,59 @@ public final class MessageService {
     /** Package-visible factory for unit tests. */
     public static MessageService forTest(FileConfiguration primary, FileConfiguration fallback, String locale) {
         return new MessageService(primary, fallback, locale);
+    }
+
+    /**
+     * Two warning lines: the missing file and the fallback, then the bundled locale codes.
+     * There is no stack trace. The file is not described as missing from the jar alone.
+     */
+    static void warnMissingLocale(Logger logger, String localeCode, File expectedFile) {
+        if (logger == null) {
+            return;
+        }
+        String path = expectedFile == null ? "lang/" + localeCode + ".yml" : expectedFile.getPath();
+        logger.warning("Locale '" + localeCode + "' is not available: " + path
+                + " does not exist and lang/" + localeCode + ".yml is not bundled. Using English.");
+        logger.warning("Bundled locales: " + String.join(", ", LocaleFiles.BUNDLED) + ".");
+    }
+
+    /**
+     * One warning line naming the file, the parser reason (including line and column when
+     * the message has them), and the fallback. The stack trace is logged at {@link Level#FINE} only.
+     */
+    static void warnBrokenLocale(Logger logger, File file, Exception error, String fallback) {
+        if (logger == null) {
+            return;
+        }
+        String path = file == null ? "(unknown locale file)" : file.getPath();
+        String reason = yamlReason(error);
+        String where = fallback == null || fallback.isBlank() ? "Using English." : fallback;
+        logger.warning("Could not read " + path + " (" + reason + "). " + where);
+        logger.log(Level.FINE, "Could not read " + path, error);
+    }
+
+    static String yamlReason(Throwable error) {
+        if (error == null) {
+            return "unknown error";
+        }
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) {
+            Throwable cause = error.getCause();
+            if (cause != null && cause != error && cause.getMessage() != null && !cause.getMessage().isBlank()) {
+                message = cause.getMessage();
+            } else {
+                return error.getClass().getSimpleName();
+            }
+        }
+        String flat = message.replace('\r', ' ').replace('\n', ' ').replaceAll(" +", " ").strip();
+        Matcher location = YAML_LOCATION.matcher(flat);
+        String where = location.find() ? location.group() : "";
+        if (flat.length() > 220) {
+            flat = flat.substring(0, 217).strip() + "...";
+        }
+        if (!where.isEmpty() && !flat.contains(where)) {
+            flat = flat + " " + where;
+        }
+        return flat;
     }
 }
