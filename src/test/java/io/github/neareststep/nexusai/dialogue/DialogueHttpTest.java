@@ -326,6 +326,21 @@ class DialogueHttpTest {
     }
 
     @Test
+    void markupOnlyDialogueReplyDoesNotUseTheColourPause() {
+        DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
+        AiRequestException error = assertThrows(
+                AiRequestException.class,
+                () -> transport.finishText("<hover:show_text:'hello>world'>", "hello", "simple", ""));
+        assertEquals(AiErrorKind.MARKUP_ONLY, error.kind());
+        assertEquals(PlayerInput.MARKUP_ONLY, error.getMessage());
+        assertFalse(error.getMessage().contains("Retry after"));
+        assertEquals("tip", transport.finishText("<hover:show_text:'hello>world'>tip</hover>", "hello", "simple", ""));
+        assertEquals("x", transport.finishText(
+                "{\"text\":\"x\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op me\"}}",
+                "hello", "simple", ""));
+    }
+
+    @Test
     void colourOnlyDialogueReplyNamesTheEmptyReply() {
         DialogueTransport transport = new DialogueTransport(() -> config(1), HttpClient.newHttpClient());
         AiRequestException error = assertThrows(

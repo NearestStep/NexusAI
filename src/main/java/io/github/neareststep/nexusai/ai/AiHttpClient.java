@@ -296,7 +296,11 @@ public final class AiHttpClient {
             boolean clearPause
     ) {
         try {
-            if (error == null && (value == null || value.isBlank() || PlayerInput.stripSectionSigns(value, config.allowMarkup()).isBlank())) {
+            if (error == null && PlayerInput.emptiedByMarkup(value, config.allowMarkup())) {
+                error = new AiRequestException(AiErrorKind.MARKUP_ONLY, 0, PlayerInput.MARKUP_ONLY, null);
+                value = null;
+            } else if (error == null && (value == null || value.isBlank()
+                    || PlayerInput.stripSectionSigns(value, config.allowMarkup()).isBlank())) {
                 error = new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null);
                 value = null;
             }
@@ -319,11 +323,14 @@ public final class AiHttpClient {
                         ? error
                         : new AiRequestException(AiErrorKind.OTHER, 0, "OpenAI response missing choices/message/content", null);
                 AiErrorKind kind = AiErrors.classify(failure);
-                if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
+                if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED && kind != AiErrorKind.MARKUP_ONLY) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
                     diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
+                }
+                if (kind == AiErrorKind.MARKUP_ONLY) {
+                    logger.fine(PlayerInput.MARKUP_ONLY);
                 }
                 if (kind == AiErrorKind.REJECTED) {
                     logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
@@ -401,7 +408,7 @@ public final class AiHttpClient {
             return;
         }
         AiErrorKind kind = AiErrors.classify(error);
-        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED || kind == AiErrorKind.MARKUP_ONLY) {
             return;
         }
         AiRequestException typed = AiErrors.find(error);
