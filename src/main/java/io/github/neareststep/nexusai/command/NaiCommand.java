@@ -204,10 +204,9 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             plugin.reloadPlugin();
             plugin.getMessageService().send(sender, "command.reload-ok");
         } catch (Exception e) {
-            messages.send(sender, "command.reload-fail", Map.of(
-                    "error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()
-            ));
-            plugin.getLogger().warning("Reload failed: " + e.getMessage());
+            String error = reloadFailureText(e, plugin.getPluginConfig().configuredSecrets());
+            messages.send(sender, "command.reload-fail", Map.of("error", error));
+            plugin.getLogger().warning("Reload failed: " + error);
         }
     }
 
@@ -521,7 +520,24 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     private String redact(String text) {
-        return io.github.neareststep.nexusai.config.SecretMask.redact(text, plugin.getPluginConfig().configuredSecrets());
+        return redact(text, plugin.getPluginConfig().configuredSecrets());
+    }
+
+    public static String redact(String text, Iterable<String> secrets) {
+        return io.github.neareststep.nexusai.config.SecretMask.redact(text, secrets);
+    }
+
+    /**
+     * Text shown for a failed {@code /nai reload}. The raw exception message is masked first.
+     */
+    public static String reloadFailureText(Throwable error, Iterable<String> secrets) {
+        if (error == null) {
+            return "";
+        }
+        String text = error.getMessage() == null || error.getMessage().isBlank()
+                ? error.getClass().getSimpleName()
+                : error.getMessage();
+        return redact(text, secrets);
     }
 
     private static Map<String, String> testPlaceholders(long latencyMs, String text) {

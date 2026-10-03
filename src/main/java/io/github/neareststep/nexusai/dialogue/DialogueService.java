@@ -43,6 +43,8 @@ public final class DialogueService {
     private final MemoryStore memory;
     private final DialogueEngine engine;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
+    /** Spelling of the character id that opened the current session. Later lines reuse it. */
+    private final ConcurrentHashMap<UUID, String> talkLabels = new ConcurrentHashMap<>();
     private ScheduledFuture<?> sweep;
     private ScheduledFuture<?> save;
 
@@ -152,7 +154,9 @@ public final class DialogueService {
         if (session.isEmpty()) {
             return;
         }
-        submit(player, session.get().characterId(), text, true, true, false);
+        String stored = talkLabels.get(player.getUniqueId());
+        String id = sessionLabel(stored, session.get().characterId());
+        submit(player, id, text, true, true, false);
     }
 
     public void end(Player player) {
@@ -164,6 +168,9 @@ public final class DialogueService {
 
     public void quit(UUID player) {
         engine.sessions().close(player);
+        if (player != null) {
+            talkLabels.remove(player);
+        }
     }
 
     public void onMove(Player player, Location to) {
@@ -190,10 +197,17 @@ public final class DialogueService {
         Runnable run = () -> {
             String typed = characterId == null ? "" : characterId;
             String id = lookupId(typed);
+            boolean opening = !sessionChat && (message == null || message.isBlank());
+            String display = opening ? typed : sessionLabel(talkLabels.get(player.getUniqueId()), typed);
             DialogueEngine.TalkRequest request = build(player, id, message, sessionChat);
             httpExecutor.execute(() -> {
                 try {
-                    TalkResult result = withDisplayId(engine.talk(request), typed);
+                    TalkResult result = withDisplayId(engine.talk(request), display);
+                    if (result.code() == TalkCode.STARTED) {
+                        talkLabels.put(player.getUniqueId(), typed);
+                    } else if (result.code() == TalkCode.ENDED || result.code() == TalkCode.NO_SESSION) {
+                        talkLabels.remove(player.getUniqueId());
+                    }
                     future.complete(present(player, result, notifyReply, notifyStart));
                 } catch (Throwable thrown) {
                     plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
@@ -216,6 +230,18 @@ public final class DialogueService {
      */
     static String lookupId(String typed) {
         return typed == null ? "" : typed.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * One spelling for the rest of a session. The command that opened it wins.
+     * A later chat line passes the lowercased session id; this returns the opening spelling
+     * when it is the same character. A different id keeps what was just typed.
+     */
+    static String sessionLabel(String remembered, String typed) {
+        if (remembered != null && !remembered.isEmpty() && lookupId(remembered).equals(lookupId(typed))) {
+            return remembered;
+        }
+        return typed == null ? "" : typed;
     }
 
     /**

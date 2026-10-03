@@ -92,6 +92,7 @@ public final class NexusAI extends JavaPlugin {
         if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
+        PluginConfig.secretsBase = getDataFolder().toPath();
         saveDefaultConfig();
         if (!new File(getDataFolder(), "prompts.yml").isFile()) {
             saveResource("prompts.yml", false);
@@ -112,6 +113,7 @@ public final class NexusAI extends JavaPlugin {
         logCredentialState();
         logGroqMaxTokensWarning();
         logMissingEnvVars();
+        logKeyFileWarnings();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -150,6 +152,7 @@ public final class NexusAI extends JavaPlugin {
      * Reloads config.yml, prompts.yml, and the locale, then rebuilds cache/pool/prewarm while keeping HTTP executors.
      */
     public void reloadPlugin() {
+        PluginConfig.secretsBase = getDataFolder().toPath();
         PromptCatalog.Parsed parsed = readPrompts();
         if (!parsed.valid()) {
             throw new IllegalStateException(
@@ -174,6 +177,7 @@ public final class NexusAI extends JavaPlugin {
         logCredentialState();
         logGroqMaxTokensWarning();
         logMissingEnvVars();
+        logKeyFileWarnings();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -193,7 +197,9 @@ public final class NexusAI extends JavaPlugin {
         // including an empty-reply ladder, so a changed prompt is sent again.
         gate.resetBackoff();
         AiDiagnostics diagnostics = new AiDiagnostics(
-                getLogger(), Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()));
+                getLogger(),
+                Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()),
+                pluginConfig::configuredSecrets);
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
         this.aiPool = new AiPool(pluginConfig.allowMarkup());
         PoolStore poolStore = new PoolStore(
@@ -336,6 +342,12 @@ public final class NexusAI extends JavaPlugin {
         for (String name : pluginConfig.missingEnvVars()) {
             getLogger().warning("Environment variable " + name
                     + " is not set. Its placeholder was replaced with an empty value and is not used as an API key.");
+        }
+    }
+
+    private void logKeyFileWarnings() {
+        for (String warning : pluginConfig.keyFileWarnings()) {
+            getLogger().warning(warning);
         }
     }
 
@@ -558,6 +570,7 @@ public final class NexusAI extends JavaPlugin {
             getLogger().warning("prompts.yml has a syntax error (" + parsed.error()
                     + "). Named prompts are disabled until the file is fixed. Literal placeholders still work.");
             this.promptCatalog = PromptCatalog.empty();
+            LengthTrimNotices.usePromptIds(java.util.List.of());
             return;
         }
         applyPrompts(parsed);
@@ -565,6 +578,7 @@ public final class NexusAI extends JavaPlugin {
 
     private void applyPrompts(PromptCatalog.Parsed parsed) {
         this.promptCatalog = parsed.catalog();
+        LengthTrimNotices.usePromptIds(promptCatalog.ids());
         for (String warning : parsed.warnings()) {
             getLogger().warning(warning);
         }

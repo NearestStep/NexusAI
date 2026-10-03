@@ -173,10 +173,11 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             boolean htmlBody = looksLikeHtml(responseBody);
             Map<String, List<String>> headers = response.headers().map();
 
+            List<String> secrets = secrets(apiKey);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw httpError(
                         response.statusCode(),
-                        SecretMask.redact(responseBody, List.of(apiKey)),
+                        SecretMask.redact(responseBody, secrets),
                         htmlBody,
                         parsedUri,
                         retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null)),
@@ -203,7 +204,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }
             if (!filterAnswer) {
-                return new ChatExchange(text, headers);
+                return new ChatExchange(SecretMask.redact(text, secrets), headers);
             }
             boolean lengthLimited = LengthCutoff.isLength(choice.getFinishReason());
             boolean allowMarkup = config.allowMarkup();
@@ -216,7 +217,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                     allowMarkup
             );
             formatted = FormatEnforcer.enforce(formatted, config.presetFor(effective.formatOr(config.defaultFormatId())));
-            formatted = SecretMask.redact(formatted, List.of(apiKey));
+            formatted = SecretMask.redact(formatted, secrets);
             if (PlayerInput.stripSectionSigns(text, allowMarkup).isBlank()) {
                 if (PlayerInput.emptiedByMarkup(text, allowMarkup)) {
                     throw new AiRequestException(
@@ -251,7 +252,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         } catch (Exception e) {
             AiErrorKind kind = AiErrors.classify(e);
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            throw new AiRequestException(kind, 0, SecretMask.redact(message, List.of(apiKey)), e);
+            throw new AiRequestException(kind, 0, SecretMask.redact(message, secrets(apiKey)), null);
         }
     }
 
@@ -265,6 +266,19 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             return id;
         }
         return prompt;
+    }
+
+    private List<String> secrets(String apiKey) {
+        List<String> secrets = new ArrayList<>();
+        if (apiKey != null && !apiKey.isBlank()) {
+            secrets.add(apiKey.trim());
+        }
+        for (String configured : config.configuredSecrets()) {
+            if (configured != null && !secrets.contains(configured)) {
+                secrets.add(configured);
+            }
+        }
+        return secrets;
     }
 
     private String doComplete(String prompt, GenerationOverrides overrides) {

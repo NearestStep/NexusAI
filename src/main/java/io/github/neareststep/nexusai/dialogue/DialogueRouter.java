@@ -125,19 +125,19 @@ public final class DialogueRouter {
                     last = error;
                     now = clock.getAsLong();
                     if (error.kind() == AiErrorKind.MARKUP_ONLY) {
-                        logger.fine(error.getMessage());
+                        logger.fine(SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
                     if (error.kind() == AiErrorKind.EMPTY_REPLY) {
-                        logger.warning(error.getMessage());
+                        logger.warning(SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
                     if (error.kind() == AiErrorKind.REJECTED) {
                         currentQueue.recordRejection(choice.index());
                         logger.info("Rejected dialogue answer from " + choice.provider() + " / " + model
-                                + ". " + error.getMessage());
+                                + ". " + SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         break;
                     }
                     if (!key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {

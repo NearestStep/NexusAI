@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.knowledge;
 
 import java.io.IOException;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -105,9 +106,20 @@ public final class KnowledgeBase {
                     try {
                         text = Files.readString(path, StandardCharsets.UTF_8);
                     } catch (IOException e) {
-                        notes.add("Could not read knowledge file '" + fileName + "'.");
-                        if (logger != null) {
-                            logger.log(Level.WARNING, "Could not read knowledge file " + fileName, e);
+                        if (isNotUtf8(e)) {
+                            String note = "Knowledge file '" + fileName
+                                    + "' is not valid UTF-8, re-save the file as UTF-8. The file was skipped.";
+                            if (logger != null) {
+                                logger.warning(note);
+                                logger.log(Level.FINE, note, e);
+                            } else {
+                                notes.add(note);
+                            }
+                        } else {
+                            notes.add("Could not read knowledge file '" + fileName + "'.");
+                            if (logger != null) {
+                                logger.log(Level.WARNING, "Could not read knowledge file " + fileName, e);
+                            }
                         }
                         continue;
                     }
@@ -201,6 +213,21 @@ public final class KnowledgeBase {
 
     public static boolean validName(String name) {
         return name != null && NAME.matcher(name).matches();
+    }
+
+    private static boolean isNotUtf8(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof CharacterCodingException) {
+                return true;
+            }
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                return false;
+            }
+            current = cause;
+        }
+        return false;
     }
 
     private static String stripTrailingNewlines(String text) {

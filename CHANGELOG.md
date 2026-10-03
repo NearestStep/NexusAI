@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0
+
+`config.yml` stays on schema version 2. `api-key-file` is not inserted into an existing file.
+
+### Keys
+
+- `${ENV:VAR}` is the same placeholder as `${VAR}`. An unset variable is still logged by name and replaced with an empty string.
+- `providers.<id>.api-key-file` reads UTF-8 keys, one per line, at startup and on `/nai reload`. A relative path is under `plugins/NexusAI/`. A non-empty path wins over `api-key`. `NEXUSAI_API_KEY` does not replace keys that came from the file. An empty file still falls back to `NEXUSAI_API_KEY` on the active provider. A missing file, a file over 64KB, or a line that contains a space or `:`, logs one warning with the path and without the line text. A key file that is readable by the group or by others logs `chmod 600 <path>`.
+- `/nai status` and the startup `API keys:` line mark a file key as `****abcd (file)` and an environment key as `****abcd (env)`. A literal key stays `****abcd`.
+- Logs, `/nai status`, `/nai test`, and a failed `/nai reload` pass through the same mask. A resolved key from the environment or from a key file is not written into `config.yml` or any `.bak`. `FileBackup` copies POSIX attributes. A literal key that the admin wrote in `config.yml` is still present in `config.yml.bak`, because that file is a copy of the admin's config.
+- There is no encryption of keys in the config.
+
+### Talk and logs
+
+- `/nai talk` keeps one spelling of the character id for the whole session. The command that opened the session supplies it. Later replies do not switch it to lowercase.
+- A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed. The line then shows only the length.
+- A knowledge file that is not valid UTF-8 logs one warning naming the file and asking for a UTF-8 re-save. The stack trace is logged only at FINE. The file is skipped.
+
 ## 1.0.2 (2026-10-03)
 
 One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys.

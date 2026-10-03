@@ -53,8 +53,12 @@ api:
 
 # Endpoints and keys. type is openai-compatible or gemini.
 # api-key is one string or a list (round-robin). A key that returns 401 or 429 is skipped for a while.
-# ${ENV_VAR} is replaced in url and api-key. Empty string "" or empty list [].
-# Keys are masked to the last 4 characters in status and logs.
+# ${ENV_VAR} and ${ENV:VAR} are replaced in url and api-key. An unset variable becomes empty.
+# Its name is logged. The value is not. Empty string "" or empty list [].
+# Optional api-key-file reads one raw key per line (UTF-8). A relative path is under this folder.
+#   api-key-file: secrets/groq.key
+# A non-empty api-key-file replaces api-key for that provider. Do not put a key in url.
+# Keys are masked to the last 4 characters in status and logs. A file source is marked (file).
 providers:
   openai:
     type: openai-compatible

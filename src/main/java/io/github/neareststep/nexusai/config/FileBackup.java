@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -30,7 +31,7 @@ public final class FileBackup {
                 bak = source.resolveSibling(source.getFileName().toString() + ".bak." + STAMP.format(Instant.now()) + "-" + salt);
             }
         }
-        Files.copy(source, bak);
+        Files.copy(source, bak, StandardCopyOption.COPY_ATTRIBUTES);
         return bak;
     }
 

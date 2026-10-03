@@ -9,6 +9,7 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,6 +25,7 @@ import java.util.logging.Logger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KnowledgeBaseTest {
@@ -128,6 +130,55 @@ class KnowledgeBaseTest {
         String warnings = String.join("\n", parsed.warnings());
         assertTrue(warnings.contains("knowledge"), warnings);
         assertTrue(warnings.contains("fallback-model"), warnings);
+    }
+
+    @Test
+    void aNonUtf8FileIsSkippedWithOneWarningAndAFineStackTrace(@TempDir Path dir) throws Exception {
+        Files.write(dir.resolve("notes.txt"), "Привет".getBytes(Charset.forName("windows-1251")));
+        Files.writeString(dir.resolve("lore.md"), "The harbor is old.", StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("kb-utf8-" + dir.getFileName());
+        logger.setUseParentHandlers(false);
+        logger.setLevel(Level.FINE);
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(Level.FINE);
+        logger.addHandler(handler);
+        List<String> warnings = new ArrayList<>();
+        try {
+            KnowledgeBase knowledge = KnowledgeBase.load(dir, 6000, 4000, warnings, logger);
+            assertTrue(warnings.isEmpty(), warnings.toString());
+            assertTrue(knowledge.contains("lore"));
+            assertFalse(knowledge.contains("notes"));
+            List<LogRecord> warningRecords = records.stream()
+                    .filter(record -> record.getLevel() == Level.WARNING)
+                    .toList();
+            assertEquals(1, warningRecords.size(), records.toString());
+            String message = warningRecords.getFirst().getMessage();
+            assertTrue(message.contains("notes.txt"), message);
+            assertTrue(message.contains("not valid UTF-8"), message);
+            assertTrue(message.contains("re-save the file as UTF-8"), message);
+            assertNull(warningRecords.getFirst().getThrown());
+            assertTrue(records.stream().anyMatch(record ->
+                    record.getLevel() == Level.FINE && record.getThrown() != null));
+            assertTrue(records.stream()
+                    .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                    .allMatch(record -> record.getThrown() == null));
+        } finally {
+            logger.removeHandler(handler);
+        }
     }
 
     private static PluginConfig config() {
