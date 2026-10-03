@@ -1,0 +1,13 @@
+# DeluxeMenus menu. Copy to plugins/DeluxeMenus/gui_menus/aitip.yml
+# and register gui_menus.aitip.file: aitip.yml in DeluxeMenus config.yml.
+# Requires the survival_tips prompt from examples/placeholders.
+menu_title: '&8Tip'
+open_command: aitip
+size: 9
+items:
+  tip:
+    material: PAPER
+    slot: 4
+    display_name: '&eSurvival tip'
+    lore:
+      - '%ainexus_cached_survival_tips%'

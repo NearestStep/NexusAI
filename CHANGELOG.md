@@ -2,21 +2,22 @@
 
 ## 1.1.0
 
-`config.yml` stays on schema version 2. Existing values keep their meaning. `api-key-file` is not inserted into an existing file. On startup, missing `context.*` keys are appended from the jar default (`context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`), and missing `dialogue.summary.*` keys are inserted into an existing `dialogue:` section. That write uses the usual single `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists). `prompts.yml` stays on version 1. `context:` on a prompt is optional. A prompt that omits it keeps the 1.0.x text and cache key.
+The release jar is `NexusAI-1.1.0.jar`. Replace `NexusAI-1.0.2.jar` with it. `config.yml` stays on schema version 2. Existing values keep their meaning. `prompts.yml` stays on version 1. A prompt that omits `context:` keeps the 1.0.x text and cache key.
 
-### Keys
+On startup, missing keys are appended from the jar default. That write uses one `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists) and logs `Added missing config keys: …`. The keys are `model-queue-strategy` (`failover`), `context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`, and `dialogue.summary.enabled`, `dialogue.summary.threshold-turns`, `dialogue.summary.max-chars`, `dialogue.summary.max-tokens`, `dialogue.summary.provider`, `dialogue.summary.model` inside an existing `dialogue:` section. `api-key-file` is not inserted. Rollback is in `docs/migration-1.1.0.md`.
 
-- `${ENV:VAR}` is the same placeholder as `${VAR}`. An unset variable is still logged by name and replaced with an empty string.
-- `providers.<id>.api-key-file` reads UTF-8 keys, one per line, at startup and on `/nai reload`. A relative path is under `plugins/NexusAI/`. A non-empty path wins over `api-key`. `NEXUSAI_API_KEY` does not replace keys that came from the file. An empty file still falls back to `NEXUSAI_API_KEY` on the active provider. A missing file, a file over 64KB, or a line that contains a space or `:`, logs one warning with the path and without the line text. A key file that is readable by the group or by others logs `chmod 600 <path>`.
+### API keys
+
+- `${ENV:VAR}` is the same placeholder as `${VAR}`. An unset variable is logged by name and replaced with an empty string.
+- `providers.<id>.api-key-file` reads UTF-8 keys, one per line, at startup and on `/nai reload`. A relative path is under `plugins/NexusAI/`. An absolute path is allowed. A non-empty path wins over `api-key`. `NEXUSAI_API_KEY` does not replace keys that came from the file. An empty file still falls back to `NEXUSAI_API_KEY` on the active provider. A missing file, a file over 64KB, or a line that contains a space or `:`, logs one warning with the path and without the line text. A key file that is readable by the group or by others logs `chmod 600 <path>`.
 - `/nai status` and the startup `API keys:` line mark a file key as `****abcd (file)` and an environment key as `****abcd (env)`. A literal key stays `****abcd`.
 - Logs, `/nai status`, `/nai test`, and a failed `/nai reload` pass through the same mask. A resolved key from the environment or from a key file is not written into `config.yml` or any `.bak`. `FileBackup` copies POSIX attributes. A literal key that the admin wrote in `config.yml` is still present in `config.yml.bak`, because that file is a copy of the admin's config.
 - There is no encryption of keys in the config.
 
-### Talk and logs
+### Model queue
 
-- `/nai talk` keeps one spelling of the character id for the whole session. The command that opened the session supplies it. Later replies do not switch it to lowercase.
-- A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed. The line then shows only the length.
-- A knowledge file that is not valid UTF-8 logs one warning naming the file and asking for a UTF-8 re-save. The stack trace is logged only at FINE. The file is skipped.
+- `model-queue-strategy` is `failover` or `round-robin`. The default is `failover`: every new request starts at the first available row. `round-robin` starts each new request at the next available row and then walks the circle. Cooldown, `daily-request-limit`, and remaining budget at or below `model-queue-remaining-threshold` are skipped in both modes. An unknown value is `failover`, with one warning on startup and on `/nai reload`.
+- `usage.yml` accounting is unchanged. `/nai status` prints the strategy and the next row (`failover (next: groq/llama)`, or `none`).
 
 ### Context providers
 
@@ -24,30 +25,33 @@
 - Prompts that list `context:` (a list of ids, or `all`) append a sanitized player-context block to `%ainexus_cached_%` and to `/nai talk` / `NexusAIApi.talk`. `/nai test <id>` from a player uses that player's context. `generate_`, the pool, prewarm, console `/nai test`, and literal placeholders do not call providers. Pool or prewarm entries that name such a prompt log that context is ignored there.
 - Providers run on `nexusai-context-N` (2 threads, queue 256), never on the main thread. A slow provider is skipped. Five timeouts or exceptions in a row suspend it. `/nai status` lists providers and does not print their values.
 - The context block is part of the `cached_` cache key. Snapshots last `context.refresh-seconds`. Greeting cache keys are SHA-256 of the system text.
-- In `/nai talk`, the context block is placed after a stored dialogue summary and before the format instruction.
+- In `/nai talk`, the block is placed after a stored dialogue summary and before the format instruction.
 
-### Dialogues
+### Dialogue summaries
 
 - `dialogue.summary.enabled` defaults to false. While it is false, `/nai talk` and `dialogue-memory.yml` behave as in 1.0.2.
 - While it is true, lines that fall out of `memory-turns` / `memory-max-chars` are folded by one model call after `dialogue.summary.threshold-turns` player lines have dropped. The summary is wrapped as player input and placed in the character system prompt, after the sheet and before a context block. The recent window is unchanged. Each summary is its own request.
-- A refused summary drops the waiting lines and keeps the previous summary. Waiting lines are not written to disk. A restart before the call trims them.
+- A refused summary (including `HTTP queue is full`) drops the waiting lines and keeps the previous summary. The model-queue row is not cooled down for that refusal. Waiting lines are not written to disk. A restart before the call trims them.
+- An unpinned summary follows `model-queue-strategy`. Setting both `dialogue.summary.provider` and `dialogue.summary.model` pins that call and does not move the round-robin cursor.
 - With summaries on, `dialogue-memory.yml` stores `summary`, `summary-updated`, and `format: 2`. The first rewrite of a file that is not format 2 copies it to `dialogue-memory.yml.bak` once. Saves write a temporary file and move it into place.
-- `/nai status` adds `Dialogue summaries: off` or `Dialogue summaries: on (N ok, M failed today)`. The counters reset at local midnight and on `/nai reload`.
-- An unpinned summary follows `model-queue-strategy`, including round-robin. A pin does not move that cursor. `HTTP queue is full` is a normal summary refusal: the waiting lines are dropped, the previous summary stays, and the model-queue row is not cooled down.
+- `/nai status` shows `Dialogue summaries: off` or `Dialogue summaries: on (N ok, M failed today)`. The counters reset at local midnight and on `/nai reload`.
 
-### HTTP pool
+### HTTP pool and markup-only replies
 
-- Placeholder and queue calls no longer block the four `nexusai-http-*` threads on `HttpClient.send`. The worker queue holds at most 64 tasks. At most 64 HTTP calls are in flight, with 64 more waiting for a slot. Anything beyond that fails immediately with `HTTP queue is full` (`LOCAL_LIMIT`) and is not queued. Placeholders already returned fallback. One warning is written per 30 seconds. `NexusAI.getHttpPool().snapshot()` reports queue depth, in-flight calls, waiters, and rejected submissions for a later load test.
-
-### Markup-only hold
-
+- Placeholder and queue calls no longer block the four `nexusai-http-*` threads on `HttpClient.send`. The worker queue holds at most 64 tasks. At most 64 HTTP calls are in flight, with 64 more waiting for a slot. Anything beyond that fails immediately with `HTTP queue is full` (`LOCAL_LIMIT`) and is not queued. Placeholders already returned fallback. One warning is written per 30 seconds. `NexusAI.getHttpPool().snapshot()` reports queue depth, in-flight calls, waiters, and rejected submissions.
 - A markup-only reply still holds that prompt for 30 seconds. A successful reply on the same admission key no longer clears the hold. The hold ends when the timer expires or when `/nai reload` builds a new request gate. The empty-reply ladder and a generic backoff still clear on success.
-- A pool refill for a prompt on that hold sends no request while the hold is active, and at most one request in the 30 second window. It does not fan out one call per pool slot.
+- A pool refill for a prompt on that hold sends no request while the hold is active, and at most one request in the 30 second window.
 
-### Model queue strategy
+### Talk, knowledge, and logs
 
-- `model-queue-strategy` is `failover` or `round-robin`. The default is `failover`, which is the 1.0.x order: every new request starts at the first available row. `round-robin` starts each new request at the next available row and then walks the circle. Cooldown, `daily-request-limit`, and remaining budget at or below `model-queue-remaining-threshold` are skipped in both modes. An unknown value is `failover`, with one warning on startup and on `/nai reload`.
-- `usage.yml` accounting is unchanged. `/nai status` prints the strategy and the next row. A missing key is appended to an existing `config.yml`. `config-version` stays 2. The append uses the usual single `<file>.bak`.
+- `/nai talk` keeps one spelling of the character id for the whole session. The command that opened the session supplies it. Later replies do not switch it to lowercase.
+- A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed. The line then shows only the length.
+- A knowledge file that is not valid UTF-8 logs one warning naming the file and asking for a UTF-8 re-save. The stack trace is logged only at FINE. The file is skipped.
+
+### Documentation
+
+- `docs/quickstart.md`, `docs/faq.md`, and `docs/migration-1.1.0.md`.
+- `examples/` holds configs and prompts the loader accepts, plus fragments for TAB, AnimatedScoreboard, and DeluxeMenus.
 
 ## 1.0.2 (2026-10-03)
 

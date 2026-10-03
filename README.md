@@ -4,6 +4,13 @@ Plugin for Paper and Purpur. It requests text from an OpenAI-compatible model an
 
 `%ainexus_cached_*%` returns a cached answer. On a miss it starts a background request when requests are allowed, and returns a stored pooled answer without removing it, or the fallback string. `%ainexus_generate_*%` removes one pooled answer, or returns the fallback string.
 
+## Start here
+
+- [Quick start](docs/quickstart.md) — install, a key, one prompt, `/nai test`, `/nai status`
+- [FAQ](docs/faq.md) — no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
+- [Migration from 1.0.x](docs/migration-1.1.0.md)
+- [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
+
 ## Requirements
 
 - Paper or Purpur **1.20.6 through 26.2**, Java **21** or newer
@@ -18,10 +25,9 @@ Supported servers are Paper and Purpur 1.20.6 through 26.2. Folia is not support
 
 ## Installation
 
-1. Build the shadow JAR: `./gradlew shadowJar`
-2. Copy `build/libs/NexusAI-1.0.2.jar` into `plugins/`
-3. Install PlaceholderAPI
-4. Set the API key (prefer environment):
+1. Put `NexusAI-1.1.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-<version>.jar`. `version` in `build.gradle.kts` stays `1.0.2` until the release build.
+2. Install PlaceholderAPI
+3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 
 ```bash
 # Windows (PowerShell)
@@ -166,7 +172,7 @@ Values from `vars:`, PlaceholderAPI, free `/nai test` text, and talk messages ar
 
 ### Migration
 
-On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usage.yml` migrate from older `config-version` values, including a missing key (0.6.0), up to the current version. `config.yml` current version is 2. `prompts.yml`, `pool.yml`, and `usage.yml` stay on version 1. The plugin copies the file to `<file>.bak` first, or `<file>.bak.<timestamp>` when that backup already exists, and logs the backup path. Missing default keys appended to `config.yml` in that same startup reuse that backup instead of writing a second one. `model-queue-strategy` is one of those keys. It is appended as `failover`, and `config-version` stays 2. A later startup that only appends keys writes one new backup. User values are kept, with one exception. When upgrading from 0.6.0 or 0.7.0, a `config.yml` older than version 2 whose `api.max-tokens` is exactly `0` is automatically changed to `256` during migration. That `0` is the default shipped in those versions, not a value you chose. The original file is copied to `<file>.bak` (or `<file>.bak.<timestamp>` when that backup already exists) before the write. The info line names the backup and says you can set `0` again. `512`, `-1`, and a missing key are not treated as that default. A missing key is still appended as `256`. After the file is version 2, a `0` you set is kept and the migration does not run again. `api.provider`, `api.base-url`, and `api.key` are copied into `providers:` and a one-entry `model-queue` is created from `api.provider` and `api.model`, so a 0.6.0 server keeps the same provider and model. `pool.yml` answers are rewritten as double-quoted strings. Older unquoted or wrapped pool files still load. The log lists what changed and does not include secrets.
+On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usage.yml` migrate from older `config-version` values, including a missing key (0.6.0), up to the current version. `config.yml` current version is 2. `prompts.yml`, `pool.yml`, and `usage.yml` stay on version 1. The plugin copies the file to `<file>.bak` first, or `<file>.bak.<timestamp>` when that backup already exists, and logs the backup path. Missing default keys appended to `config.yml` in that same startup reuse that backup instead of writing a second one. On the way to 1.1.0 those keys include `model-queue-strategy` (`failover`), `context.*`, and `dialogue.summary.*`. `config-version` stays 2. A later startup that only appends keys writes one new backup. What is appended, what stays as it was, and how to roll back are in [Migration from 1.0.x](docs/migration-1.1.0.md). User values are kept, with one exception. When upgrading from 0.6.0 or 0.7.0, a `config.yml` older than version 2 whose `api.max-tokens` is exactly `0` is automatically changed to `256` during migration. That `0` is the default shipped in those versions, not a value you chose. The original file is copied to `<file>.bak` (or `<file>.bak.<timestamp>` when that backup already exists) before the write. The info line names the backup and says you can set `0` again. `512`, `-1`, and a missing key are not treated as that default. A missing key is still appended as `256`. After the file is version 2, a `0` you set is kept and the migration does not run again. `api.provider`, `api.base-url`, and `api.key` are copied into `providers:` and a one-entry `model-queue` is created from `api.provider` and `api.model`, so a 0.6.0 server keeps the same provider and model. `pool.yml` answers are rewritten as double-quoted strings. Older unquoted or wrapped pool files still load. The log lists what changed and does not include secrets.
 
 ### Generation
 
@@ -554,26 +560,7 @@ The player-input boundary and the output filter reduce prompt-injection risk. Th
 
 ## FAQ
 
-### Why is there no top-level “pool capacity” setting?
-
-Capacity is per prompt: `pool.entries[].size` (with `min-threshold` for refill). There is no global `pool.size`.
-
-### Will an upgrade overwrite my config?
-
-On startup and `/nai reload`, NexusAI inserts keys that exist in the default `config.yml` and are missing from `plugins/NexusAI/config.yml`, when that file is valid YAML. `sanitize.allow-markup` is appended as `false` when it is missing. `config.yml` stays on schema version 2 for that append. The comment above the new section warns that `allow-markup: true` lets click and hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. Before that write, and before a migration rewrites `config.yml`, `prompts.yml`, `pool.yml`, or `usage.yml`, NexusAI copies the file to `<file>.bak`, or `<file>.bak.<timestamp>` when that backup already exists, and logs the backup path. One startup writes one backup of `config.yml` even when migration and missing keys both change the file. Values you already set are left as they are, and comments already in the file stay put. Added keys are listed in the server log (`Added missing config keys: …`). Keys that are new to you still use defaults until you edit them: a negative `temperature` is not sent. `api.max-tokens` is appended as `256` when the key is missing, and that value is sent. `0` or a negative `max-tokens` still means the field is not sent. When upgrading from 0.6.0 or 0.7.0, `api.max-tokens: 0` is automatically changed to `256` during migration, and the original `config.yml` is copied to `config.yml.bak` (or `config.yml.bak.<timestamp>` when that backup already exists) before the write. After the file is version 2, a `0` you set is kept and the field stays omitted.
-
-If `config.yml` is not valid YAML, startup and `/nai reload` leave the file byte for byte as it is. Reload reports the failure and keeps the configuration already in memory. It does not append default keys and it does not print `Configuration reloaded`. A broken file on startup does not enable requests, so an `NEXUSAI_API_KEY` in the environment is not sent to the default OpenAI URL. A reload onto a remote provider with no key logs the missing-key warning once; reloading that same state again does not repeat it. A local endpoint such as Ollama does not log that warning.
-
-`prompts.yml` is separate. It is created from the jar default only when the file is missing, and `/nai reload` never rewrites a valid file. A syntax error on startup turns named prompts off and leaves literal placeholders working. A syntax error on reload keeps the prompts already in memory.
-
-### What is prewarm?
-
-Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so holograms (and similar) can show a ready answer instead of the first-hit `fallback`. It is not the unique-answer pool (`generate_` / `pool`).
-
-### Why doesn’t `%player_name%` inside the AI answer get replaced?
-
-NexusAI returns the model text as-is. Asking the model to emit `%player_name%` usually leaves that literal string — PlaceholderAPI is not re-run on the whole AI answer.  
-Use pool `vars` instead: the model writes `{player_name}`, and NexusAI substitutes it from `%player_name%` (or another PAPI template) when delivering `%ainexus_generate_*%`. Nested placeholders *inside* the NexusAI placeholder identifier are also unreliable across host plugins.
+Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, and dialogue summaries. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md). Copy-paste configs are in [examples/](examples/README.md).
 
 ## Build
 
