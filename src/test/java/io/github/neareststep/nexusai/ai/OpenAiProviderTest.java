@@ -232,6 +232,24 @@ class OpenAiProviderTest {
         assertEquals(
                 "http://127.0.0.1/v1/chat/completions?key=X",
                 ChatEndpoints.chatCompletions("http://127.0.0.1/v1/?key=X").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions?key=X",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions?key=X").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions?key=X",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/?key=X").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions#frag",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions#frag").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions?key=X#frag",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/?key=X#frag").toString());
 
         AtomicReference<String> path = new AtomicReference<>();
         AtomicReference<String> query = new AtomicReference<>();

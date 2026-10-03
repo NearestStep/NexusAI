@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -27,6 +28,38 @@ public final class AtomicFiles {
             PosixFilePermission.OWNER_WRITE);
 
     private AtomicFiles() {
+    }
+
+    /**
+     * Writes {@code source} to {@code target} only when {@code target} is missing.
+     * The new file is owner-read/write ({@code 0600}) on a POSIX file system.
+     * An existing file, including its mode, is left untouched. A non-POSIX volume keeps the platform default.
+     */
+    public static void installPrivate(Path target, InputStream source) throws IOException {
+        if (target == null || Files.exists(target)) {
+            return;
+        }
+        Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        createPrivate(target);
+        if (source == null) {
+            return;
+        }
+        try {
+            preserving(target, () -> Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING));
+        } catch (IOException | RuntimeException e) {
+            try {
+                Files.deleteIfExists(target);
+            } catch (IOException ignored) {
+                // The caller still sees the original failure.
+            }
+            if (e instanceof IOException io) {
+                throw io;
+            }
+            throw (RuntimeException) e;
+        }
     }
 
     /**

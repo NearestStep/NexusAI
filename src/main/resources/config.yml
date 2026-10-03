@@ -238,7 +238,8 @@ limits:
 # for a slot. Anything beyond that fails at once with "HTTP queue is full".
 # One connection error pauses that provider for limits.provider-pause-seconds (60).
 # A weak endpoint (a local proxy, Ollama, a free-tier host) should use a lower max-in-flight.
-# Both values must be greater than 0. 0 or a negative value is logged and replaced with 64.
+# Both values must be greater than 0. 0 or a negative value is replaced with 64.
+# Each bad key logs its own warning (the key, the rejected value, and 64).
 http:
   max-in-flight: 64
   queue-size: 64

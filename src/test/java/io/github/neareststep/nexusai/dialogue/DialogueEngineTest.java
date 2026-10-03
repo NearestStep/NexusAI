@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,6 +53,63 @@ class DialogueEngineTest {
                 "You are Bram. The player is Steve.", "...", DialogueProfile.absent(), List.of(),
                 settings(), GenerationOverrides.none(), "chat", "world", 0, 64, 0, node -> true, 2_000L));
         assertEquals(List.of("nai talk"), ids);
+    }
+
+    @Test
+    void providerFailureIsBusyAndTheBodyIsOnlyLoggedMasked() {
+        String secret = "sk-live-canary-9999";
+        Logger logger = Logger.getLogger("talk-busy-" + player);
+        logger.setUseParentHandlers(false);
+        List<String> lines = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getMessage() != null) {
+                    lines.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            DialogueEngine engine = new DialogueEngine(
+                    new MemoryStore(),
+                    new SessionBook(),
+                    new ActionGate(),
+                    new DialogueBudget(),
+                    new GreetingCache(),
+                    call -> {
+                        throw new AiRequestException(
+                                AiErrorKind.RATE_LIMIT,
+                                429,
+                                "HTTP 429 rate limit from 127.0.0.2: {\"error\":\"" + secret + "\"} Retry after 21:00.",
+                                null);
+                    },
+                    (id, action, command) -> "ran",
+                    ActionLog.noop(),
+                    ZoneId.of("UTC"),
+                    null,
+                    logger,
+                    () -> List.of(secret));
+            TalkResult result = engine.talk(request("hi", false, List.of(), settings(), 1_000L, node -> true));
+            assertEquals(TalkCode.BUSY, result.code());
+            assertEquals("", result.error());
+            assertFalse(result.text().contains(secret));
+            assertFalse(result.text().contains("429"));
+            assertEquals(1, lines.size(), lines.toString());
+            assertFalse(lines.getFirst().contains(secret), lines.getFirst());
+            assertTrue(lines.getFirst().contains("****9999"), lines.getFirst());
+            assertTrue(lines.getFirst().contains("429"), lines.getFirst());
+        } finally {
+            logger.removeHandler(handler);
+        }
     }
 
     @Test

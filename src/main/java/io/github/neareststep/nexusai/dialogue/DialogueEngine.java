@@ -1,14 +1,20 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import java.util.logging.Logger;
 
 /**
  * Session, memory, limit, and action policy for {@code /nai talk}.
@@ -26,6 +32,9 @@ public final class DialogueEngine {
     private final ActionLog actionLog;
     private final ZoneId zone;
     private final DialogueSummary summary;
+    private final Logger failureLog;
+    private final Supplier<List<String>> secrets;
+    private final AtomicLong failureLoggedAt = new AtomicLong();
 
     public DialogueEngine(
             MemoryStore memory,
@@ -53,6 +62,27 @@ public final class DialogueEngine {
             ZoneId zone,
             DialogueSummary summary
     ) {
+        this(memory, sessions, actionGate, budget, greetings, model, sink, actionLog, zone, summary, null, null);
+    }
+
+    /**
+     * @param failureLog where a provider error is written; the player never sees that text
+     * @param secrets configured keys, masked in {@code failureLog}
+     */
+    public DialogueEngine(
+            MemoryStore memory,
+            SessionBook sessions,
+            ActionGate actionGate,
+            DialogueBudget budget,
+            GreetingCache greetings,
+            DialogueModel model,
+            ActionSink sink,
+            ActionLog actionLog,
+            ZoneId zone,
+            DialogueSummary summary,
+            Logger failureLog,
+            Supplier<List<String>> secrets
+    ) {
         this.memory = memory;
         this.sessions = sessions;
         this.actionGate = actionGate;
@@ -63,6 +93,8 @@ public final class DialogueEngine {
         this.actionLog = actionLog == null ? ActionLog.noop() : actionLog;
         this.zone = zone == null ? ZoneId.systemDefault() : zone;
         this.summary = summary;
+        this.failureLog = failureLog;
+        this.secrets = secrets;
     }
 
     public SessionBook sessions() {
@@ -227,17 +259,34 @@ public final class DialogueEngine {
     }
 
     private TalkResult failure(TalkRequest request, RuntimeException error) {
-        AiRequestException typed = io.github.neareststep.nexusai.ai.AiErrors.find(error);
-        if (typed != null && typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.LOCAL_LIMIT) {
-            return TalkResult.of(TalkCode.BUSY, request.characterId());
-        }
-        if (typed != null && (typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.REJECTED
-                || typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.EMPTY_REPLY
-                || typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.MARKUP_ONLY)) {
+        AiRequestException typed = AiErrors.find(error);
+        if (typed != null && (typed.kind() == AiErrorKind.REJECTED
+                || typed.kind() == AiErrorKind.EMPTY_REPLY
+                || typed.kind() == AiErrorKind.MARKUP_ONLY)) {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
-        return TalkResult.failed(request.characterId(), detail);
+        if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
+            logProviderFailure(detail);
+        }
+        return TalkResult.of(TalkCode.BUSY, request.characterId());
+    }
+
+    /**
+     * The player sees {@code talk.busy}. The provider body stays on the console, masked, at most once per 30 seconds.
+     * A global pause does not send the turn and does not call {@code fallback-model}.
+     */
+    private void logProviderFailure(String detail) {
+        if (failureLog == null || detail == null || detail.isBlank()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = failureLoggedAt.get();
+        if (now - previous < 30_000L || !failureLoggedAt.compareAndSet(previous, now)) {
+            return;
+        }
+        List<String> known = secrets == null || secrets.get() == null ? List.of() : secrets.get();
+        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redact(detail, known));
     }
 
     /**

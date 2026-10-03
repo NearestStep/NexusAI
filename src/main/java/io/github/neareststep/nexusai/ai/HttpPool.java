@@ -18,7 +18,8 @@ import java.util.logging.Logger;
  * <p>The worker queue holds at most {@link #WORK_QUEUE_CAPACITY} tasks. HTTP calls hold at most
  * {@link #MAX_IN_FLIGHT} slots, with {@link #WAIT_QUEUE_CAPACITY} more waiting for a slot.
  * Anything beyond that fails with {@link #QUEUE_FULL} and is not queued. Placeholders already
- * showed fallback; the background future fails the same way.
+ * showed fallback; the background future fails the same way. A rejected call is never dropped
+ * quietly: the future fails and one warning is written per 30 seconds.
  *
  * <p>{@link #snapshot()} is the load-test hook ({@code NexusAI.getHttpPool()}). It reports
  * worker queue depth, in-flight calls, waiters, and how many submissions were rejected.
@@ -30,6 +31,8 @@ public final class HttpPool {
     public static final int MAX_IN_FLIGHT = 64;
     public static final int WAIT_QUEUE_CAPACITY = 64;
     public static final String QUEUE_FULL = "HTTP queue is full";
+    private static final long QUEUE_FULL_WARN_MILLIS = 30_000L;
+    private static final AtomicLong queueFullWarnedAt = new AtomicLong();
 
     private final ThreadPoolExecutor workers;
     private final Logger logger;
@@ -67,21 +70,24 @@ public final class HttpPool {
                     if (pool.isShutdown()) {
                         throw new RejectedExecutionException("HTTP executor is shut down");
                     }
+                    warnQueueFull(logger);
                     throw new RejectedExecutionException(QUEUE_FULL);
                 });
         executor.prestartAllCoreThreads();
-        int inFlight = Math.max(1, maxInFlight);
-        int waiting = Math.max(1, waitCapacity);
+        int inFlight = positiveOrDefault(maxInFlight, MAX_IN_FLIGHT);
+        int waiting = positiveOrDefault(waitCapacity, WAIT_QUEUE_CAPACITY);
         return new HttpPool(executor, new HttpGate(inFlight, waiting, logger), rejected, logger);
     }
 
     /**
      * Points later calls at a new gate. Calls already holding the previous gate finish on it.
-     * The four worker threads stay. Values below 1 are raised to 1.
+     * The four worker threads stay. A value that is not positive is the matching default
+     * ({@link #MAX_IN_FLIGHT} or {@link #WAIT_QUEUE_CAPACITY}), the same replacement
+     * {@code PluginConfig} applies to {@code http.max-in-flight} and {@code http.queue-size}.
      */
     public void applyLimits(int maxInFlight, int waitCapacity) {
-        int inFlight = Math.max(1, maxInFlight);
-        int waiting = Math.max(1, waitCapacity);
+        int inFlight = positiveOrDefault(maxInFlight, MAX_IN_FLIGHT);
+        int waiting = positiveOrDefault(waitCapacity, WAIT_QUEUE_CAPACITY);
         HttpGate current = gate;
         HttpGate.Snapshot snapshot = current.snapshot();
         if (snapshot.maxInFlight() == inFlight && snapshot.waitCapacity() == waiting) {
@@ -111,6 +117,35 @@ public final class HttpPool {
                 http.waitCapacity(),
                 http.waiting(),
                 http.rejected());
+    }
+
+    /**
+     * {@code 0} and negative numbers are not a smaller cap. They are the documented default.
+     */
+    static int positiveOrDefault(int value, int fallback) {
+        return value > 0 ? value : fallback;
+    }
+
+    /**
+     * One warning per 30 seconds, shared by the worker queue and {@link HttpGate}.
+     * Placeholders have already returned fallback. The failed future is the rejection.
+     */
+    public static void warnQueueFull(Logger logger) {
+        if (logger == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = queueFullWarnedAt.get();
+        if (now - previous < QUEUE_FULL_WARN_MILLIS || !queueFullWarnedAt.compareAndSet(previous, now)) {
+            return;
+        }
+        logger.warning(QUEUE_FULL
+                + ". Further requests are rejected until a slot frees; placeholders use fallback.");
+    }
+
+    /** Test hook so a later case can observe a fresh warning. */
+    static void resetQueueFullWarning() {
+        queueFullWarnedAt.set(0L);
     }
 
     public static AiRequestException queueFull(Throwable cause) {
