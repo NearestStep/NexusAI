@@ -1,0 +1,19 @@
+name: NexusAI-LoadDriver
+version: '1.1.0'
+main: io.github.neareststep.nexusai.load.LoadDriverPlugin
+api-version: '1.20.6'
+folia-supported: false
+depend: [NexusAI, PlaceholderAPI]
+authors: [NearestStep]
+description: Load scenarios for NexusAI. Not part of the release jar.
+
+commands:
+  naiload:
+    description: Run one NexusAI load scenario
+    usage: /naiload <scenario> <rate> <seconds> <viewers>
+    permission: nexusai.load
+
+permissions:
+  nexusai.load:
+    description: Run NexusAI load scenarios
+    default: op

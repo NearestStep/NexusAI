@@ -15,6 +15,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -23,6 +24,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.logging.Logger;
 
@@ -77,7 +79,7 @@ public final class ContextService {
             thread.setDaemon(true);
             return thread;
         };
-        return new ThreadPoolExecutor(
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 size,
                 size,
                 0L,
@@ -86,6 +88,10 @@ public final class ContextService {
                 factory,
                 new ThreadPoolExecutor.AbortPolicy()
         );
+        // The load harness counts live nexusai-context-* threads. Idle workers still count:
+        // a scenario that never calls a provider must see the configured pool, not zero.
+        executor.prestartAllCoreThreads();
+        return executor;
     }
 
     /** Reloads limits and clears suspension, timeout counters, and trim notices. The registry stays. */
@@ -225,36 +231,52 @@ public final class ContextService {
         }
         int timeoutMs = effectiveTimeoutMillis(entry.provider());
         AtomicBoolean settled = new AtomicBoolean();
-        AtomicBoolean rejectedTask = new AtomicBoolean();
-        ScheduledFuture<?> timer = scheduler == null ? null : scheduler.schedule(() -> {
-            if (rejectedTask.get()) {
-                return;
-            }
-            if (settled.compareAndSet(false, true)) {
-                recordFailure(id, null, true, current);
-                result.complete(Contribution.empty(id, priority));
-            }
-        }, timeoutMs, TimeUnit.MILLISECONDS);
+        AtomicBoolean started = new AtomicBoolean();
+        AtomicReference<ScheduledFuture<?>> timerBox = new AtomicReference<>();
+        Future<?> task;
         try {
-            workers.execute(() -> {
+            task = workers.submit(() -> {
+                started.set(true);
                 try {
                     CompletableFuture<String> provided = entry.provider().provide(request);
                     if (provided == null) {
-                        finish(result, timer, settled, id, priority, null, null, current);
+                        finish(result, timerBox.get(), settled, id, priority, null, null, current);
                         return;
                     }
                     provided.whenComplete((value, error) ->
-                            finish(result, timer, settled, id, priority, value, error, current));
+                            finish(result, timerBox.get(), settled, id, priority, value, error, current));
                 } catch (Throwable thrown) {
-                    finish(result, timer, settled, id, priority, null, thrown, current);
+                    finish(result, timerBox.get(), settled, id, priority, null, thrown, current);
+                } finally {
+                    // A provider that restores the interrupt status must not poison the next task.
+                    Thread.interrupted();
                 }
             });
         } catch (RejectedExecutionException ex) {
             rejected.incrementAndGet();
-            rejectedTask.set(true);
-            cancel(timer);
             if (settled.compareAndSet(false, true)) {
                 result.complete(Contribution.empty(id, priority));
+            }
+            return result;
+        }
+        if (scheduler != null) {
+            Future<?> running = task;
+            ScheduledFuture<?> timer = scheduler.schedule(() -> {
+                boolean began = started.get();
+                if (!settled.compareAndSet(false, true)) {
+                    return;
+                }
+                running.cancel(true);
+                if (began) {
+                    // The call itself overran. A task still waiting for a worker is a full pool,
+                    // same as a rejected submission, and is not a strike against this provider.
+                    recordFailure(id, null, true, current);
+                }
+                result.complete(Contribution.empty(id, priority));
+            }, timeoutMs, TimeUnit.MILLISECONDS);
+            timerBox.set(timer);
+            if (settled.get()) {
+                timer.cancel(false);
             }
         }
         return result;

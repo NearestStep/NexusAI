@@ -51,6 +51,7 @@ On startup, missing keys are appended from the jar default. That write uses one 
 ### Documentation
 
 - `docs/quickstart.md`, `docs/faq.md`, and `docs/migration-1.1.0.md`.
+- `docs/LOADTEST.md` — load scenarios, pass thresholds, and how to run them.
 - `examples/` holds configs and prompts the loader accepts, plus fragments for TAB, AnimatedScoreboard, and DeluxeMenus.
 
 ## 1.0.2 (2026-10-03)
