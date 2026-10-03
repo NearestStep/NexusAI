@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.budget;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RateLimitHeaders;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import io.github.neareststep.nexusai.config.QueueStrategy;
@@ -47,6 +48,11 @@ public final class ModelQueue {
     private final QueueStrategy strategy;
     /** Next starting row for {@link QueueStrategy#ROUND_ROBIN}. Not used for failover. */
     private final AtomicInteger roundRobinCursor = new AtomicInteger();
+    /**
+     * Next starting row for an unpinned dialogue summary. Player replies and placeholders
+     * keep {@link #roundRobinCursor}.
+     */
+    private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
     private LocalDate day;
     private int moderationChecks;
@@ -168,16 +174,29 @@ public final class ModelQueue {
      *                        A daily cap is never ignored.
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
+        return selectFrom(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    /**
+     * Same walk as {@link #selectable(long, boolean)} for an unpinned dialogue summary.
+     * Round-robin advances {@link #summaryRoundRobinCursor} and leaves the player-reply cursor
+     * where it is. Failover does not use either cursor. A pinned summary must not call this.
+     */
+    public synchronized List<Choice> selectableSummary(long nowMillis) {
+        return selectFrom(nowMillis, false, summaryRoundRobinCursor);
+    }
+
+    private List<Choice> selectFrom(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
         roll(nowMillis);
         if (strategy != QueueStrategy.ROUND_ROBIN || slots.isEmpty()) {
             return readyInOrder(nowMillis, ignoreCooldown);
         }
-        int start = nextRoundRobinIndex(nowMillis, ignoreCooldown);
+        int start = nextIndex(nowMillis, ignoreCooldown, cursor);
         if (start < 0) {
             return List.of();
         }
-        // The next request starts at the following row, skipping rows that are not selectable then.
-        roundRobinCursor.set(Math.floorMod(start + 1, slots.size()));
+        // The next request of this cursor starts at the following row.
+        cursor.set(Math.floorMod(start + 1, slots.size()));
         List<Choice> ready = new ArrayList<>();
         for (int i = 0; i < slots.size(); i++) {
             Slot slot = slots.get(Math.floorMod(start + i, slots.size()));
@@ -221,13 +240,17 @@ public final class ModelQueue {
      * First selectable row at or after the round-robin cursor. Does not move the cursor.
      */
     private int nextRoundRobinIndex(long nowMillis, boolean ignoreCooldown) {
+        return nextIndex(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    private int nextIndex(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
         int size = slots.size();
         if (size == 0) {
             return -1;
         }
-        int cursor = Math.floorMod(roundRobinCursor.get(), size);
+        int at = Math.floorMod(cursor.get(), size);
         for (int i = 0; i < size; i++) {
-            int index = Math.floorMod(cursor + i, size);
+            int index = Math.floorMod(at + i, size);
             if (isSelectable(slots.get(index), nowMillis, ignoreCooldown)) {
                 return index;
             }
@@ -620,7 +643,10 @@ public final class ModelQueue {
                 if (parent != null) {
                     parent.mkdirs();
                 }
-                yaml.save(usageFile);
+                if (!usageFile.isFile()) {
+                    AtomicFiles.createPrivate(usageFile.toPath());
+                }
+                AtomicFiles.preserving(usageFile.toPath(), () -> yaml.save(usageFile));
             } catch (IOException e) {
                 logger.log(Level.WARNING, "Failed to save usage counters", e);
             }

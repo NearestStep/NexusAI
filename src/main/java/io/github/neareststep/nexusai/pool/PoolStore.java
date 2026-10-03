@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.config.YamlStrings;
@@ -9,12 +10,8 @@ import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.PosixFilePermission;
-import java.util.Set;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -218,10 +215,8 @@ public final class PoolStore {
                 return;
             }
             try {
-                Set<PosixFilePermission> permissions = readPermissions(file);
                 if (file.isFile() && containsUncleanAnswers(file)) {
                     Path backup = FileBackup.backup(file.toPath());
-                    applyPermissions(backup, permissions);
                     logger.info("Backed up pool.yml to " + backup.toAbsolutePath());
                 }
                 StringBuilder yaml = new StringBuilder();
@@ -258,8 +253,8 @@ public final class PoolStore {
                     parent.mkdirs();
                 }
                 File temporary = new File(parent == null ? new File(".") : parent, file.getName() + ".tmp");
+                AtomicFiles.createPrivate(temporary.toPath());
                 java.nio.file.Files.writeString(temporary.toPath(), yaml.toString(), java.nio.charset.StandardCharsets.UTF_8);
-                applyPermissions(temporary.toPath(), permissions);
                 moveIntoPlace(temporary);
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Failed to save answer pool to " + file.getName(), e);
@@ -294,34 +289,8 @@ public final class PoolStore {
         return false;
     }
 
-    private static Set<PosixFilePermission> readPermissions(File source) {
-        if (source == null || !source.isFile()) {
-            return null;
-        }
-        try {
-            return Files.getPosixFilePermissions(source.toPath());
-        } catch (UnsupportedOperationException | IOException e) {
-            return null;
-        }
-    }
-
-    private static void applyPermissions(Path target, Set<PosixFilePermission> permissions) {
-        if (target == null || permissions == null) {
-            return;
-        }
-        try {
-            Files.setPosixFilePermissions(target, permissions);
-        } catch (UnsupportedOperationException | IOException ignored) {
-            // The write still replaces the bytes. A non-POSIX volume has no mode to copy.
-        }
-    }
-
     private void moveIntoPlace(File temporary) throws IOException {
-        try {
-            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        }
+        AtomicFiles.moveReplacing(temporary.toPath(), file.toPath());
     }
 
     private static List<String> readAnswers(Object raw, boolean allowMarkup) {

@@ -68,9 +68,12 @@ public final class DialogueRouter {
             throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejected.get(), null);
         }
         long now = clock.getAsLong();
-        // selectable() advances the round-robin cursor. A pin must not take that turn.
+        // selectable() advances the player-reply round-robin cursor.
+        // A summary uses its own cursor. A pin must not take either turn.
         List<ModelQueue.Choice> choices = call.summaryPinned()
                 ? pin(currentQueue, call, now)
+                : call.kind() == DialogueEngine.CallKind.SUMMARY
+                ? currentQueue.selectableSummary(now)
                 : currentQueue.selectable(now, false);
         if (choices.isEmpty()) {
             throw currentQueue.explain(null, now);

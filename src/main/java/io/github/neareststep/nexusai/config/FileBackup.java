@@ -1,7 +1,6 @@
 package io.github.neareststep.nexusai.config;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -32,6 +31,7 @@ public final class FileBackup {
             }
         }
         Files.copy(source, bak, StandardCopyOption.COPY_ATTRIBUTES);
+        AtomicFiles.copyPosix(source, bak);
         return bak;
     }
 
@@ -42,7 +42,7 @@ public final class FileBackup {
      */
     public static Path replace(Path source, String yaml) throws IOException {
         Path backup = backup(source);
-        Files.writeString(source, yaml == null ? "" : yaml, StandardCharsets.UTF_8);
+        AtomicFiles.replaceContents(source, yaml == null ? "" : yaml);
         return backup;
     }
 }

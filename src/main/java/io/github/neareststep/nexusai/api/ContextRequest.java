@@ -10,8 +10,14 @@ import java.util.UUID;
 public record ContextRequest(UUID playerId, String playerName, String world, String promptId, Purpose purpose) {
 
     public enum Purpose {
+        /**
+         * A placeholder resolution. A player {@code /nai test} of a named prompt is also this
+         * purpose. There is no separate test value.
+         */
         PLACEHOLDER,
+        /** A player line in {@code /nai talk}. */
         TALK,
+        /** The opening line of a talk session. */
         TALK_GREETING
     }
 

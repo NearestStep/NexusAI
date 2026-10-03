@@ -209,21 +209,64 @@ class DialogueRouterSummaryTest {
         try {
             Fixture fixture = fixture(
                     server,
-                    List.of(row("gpt-a", 0), row("gpt-b", 0)),
+                    List.of(row("gpt-a", 0), row("gpt-b", 0), row("gpt-c", 0)),
                     admitting(),
                     null,
                     QueueStrategy.ROUND_ROBIN);
             fixture.router.route(summaryCall(""));
-            fixture.router.route(summaryCall(""));
             assertEquals("gpt-a", mapper.readTree(bodies.get(0)).get("model").asText());
-            assertEquals("gpt-b", mapper.readTree(bodies.get(1)).get("model").asText());
             assertEquals("gpt-a", fixture.queue.nextStart(1_000L).orElseThrow().model());
 
-            fixture.router.route(summaryCall("gpt-b"));
+            fixture.router.route(dialogueCall());
+            assertEquals("gpt-a", mapper.readTree(bodies.get(1)).get("model").asText());
+            assertEquals("gpt-b", fixture.queue.nextStart(1_000L).orElseThrow().model());
+
+            fixture.router.route(summaryCall(""));
             assertEquals("gpt-b", mapper.readTree(bodies.get(2)).get("model").asText());
-            assertEquals(1, fixture.queue.requestsToday(0));
-            assertEquals(2, fixture.queue.requestsToday(1));
-            assertEquals("gpt-a", fixture.queue.nextStart(1_000L).orElseThrow().model());
+            assertEquals("gpt-b", fixture.queue.nextStart(1_000L).orElseThrow().model());
+
+            fixture.router.route(summaryCall("gpt-c"));
+            assertEquals("gpt-c", mapper.readTree(bodies.get(3)).get("model").asText());
+            assertEquals("gpt-b", fixture.queue.nextStart(1_000L).orElseThrow().model());
+            assertEquals(2, fixture.queue.requestsToday(0));
+            assertEquals(1, fixture.queue.requestsToday(1));
+            assertEquals(1, fixture.queue.requestsToday(2));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void summariesDoNotStealPlayerRoundRobinTurns() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        HttpServer server = server(bodies, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}");
+        try {
+            Fixture fixture = fixture(
+                    server,
+                    List.of(row("rrA", 0), row("rrB", 0), row("rrC", 0)),
+                    admitting(),
+                    null,
+                    QueueStrategy.ROUND_ROBIN);
+            DialogueEngine engine = engine(fixture, Runnable::run);
+            DialogueSettings settings = summarySettings(2, 2);
+            for (int i = 0; i < 7; i++) {
+                TalkResult result = engine.talk(talk("m" + i, settings, 10_000L + i));
+                assertEquals(TalkCode.REPLY, result.code());
+            }
+            List<String> talks = new ArrayList<>();
+            List<String> summaries = new ArrayList<>();
+            for (String body : bodies) {
+                String model = mapper.readTree(body).get("model").asText();
+                if (summaryBody(body)) {
+                    summaries.add(model);
+                } else {
+                    talks.add(model);
+                }
+            }
+            assertEquals(List.of("rrA", "rrB", "rrC", "rrA", "rrB", "rrC", "rrA"), talks);
+            assertFalse(summaries.isEmpty(), bodies.toString());
+            assertFalse(summaries.stream().allMatch("rrC"::equals), summaries.toString());
+            assertEquals("rrB", fixture.queue.nextStart(1_000L).orElseThrow().model());
         } finally {
             server.stop(0);
         }
@@ -283,6 +326,17 @@ class DialogueRouterSummaryTest {
         memory.append(player, "blacksmith", "assistant", "a1", 2L, 2, 8000, 0L, true);
         memory.append(player, "blacksmith", "user", "old-2", 3L, 2, 8000, 0L, true);
         memory.append(player, "blacksmith", "assistant", "a2", 4L, 2, 8000, 0L, true);
+    }
+
+    private DialogueEngine.ModelCall dialogueCall() {
+        return new DialogueEngine.ModelCall(
+                "You are a test.",
+                List.of(new DialogueProtocol.MemoryLine("user", "hi")),
+                List.of(),
+                GenerationOverrides.none(),
+                "simple",
+                player,
+                "hi");
     }
 
     private DialogueEngine.ModelCall summaryCall(String model) {

@@ -48,7 +48,7 @@ public final class ConfigStartup {
         }
         Path backup = null;
         if (migrated) {
-            Files.writeString(file, result.yaml(), StandardCharsets.UTF_8);
+            AtomicFiles.replaceContents(file, result.yaml());
         } else {
             backup = FileBackup.replace(file, result.yaml());
         }

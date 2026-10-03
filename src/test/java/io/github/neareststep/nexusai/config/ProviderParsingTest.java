@@ -92,11 +92,61 @@ class ProviderParsingTest {
     }
 
     @Test
-    void redactReplacesSecretsLongerThanFourCharacters() {
+    void redactReplacesSecretsIncludingThoseTooShortForASuffix() {
         assertEquals("token ****9999", SecretMask.redact("token sk-secret-9999", List.of("sk-secret-9999")));
-        assertEquals("ab stays", SecretMask.redact("ab stays", List.of("ab")));
+        assertEquals("**** stays", SecretMask.redact("ab stays", List.of("ab")));
+        assertEquals("cabinet stays", SecretMask.redact("cabinet stays", List.of("ab")));
+        assertEquals("Bearer ****", SecretMask.redact("Bearer c4ry", List.of("c4ry")));
+        assertEquals("xc4ry stays", SecretMask.redact("xc4ry stays", List.of("c4ry")));
         assertEquals("****", SecretMask.mask("ab"));
         assertEquals("****", SecretMask.mask("key4"));
+        assertEquals("****bcde", SecretMask.mask("abcde"));
+    }
+
+    @Test
+    void aShortKeyIsMaskedWarnedAndRedactedFromA401Body() {
+        YamlConfiguration yaml = base();
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "c4ry");
+        PluginConfig config = new PluginConfig(yaml);
+        assertEquals(List.of("c4ry"), config.configuredSecrets());
+        assertEquals("****", config.maskedApiKeys());
+        assertFalse(config.maskedApiKeys().contains("c4ry"));
+        List<String> warnings = config.shortKeyWarnings();
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.getFirst().contains("providers.openai"));
+        assertTrue(warnings.getFirst().contains("4 characters"));
+        assertFalse(warnings.getFirst().contains("c4ry"));
+        String body = SecretMask.redact("HTTP 401 unauthorized. The API key was rejected: c4ry", config.configuredSecrets());
+        assertFalse(body.contains("c4ry"), body);
+        assertTrue(body.contains("****"), body);
+    }
+
+    @Test
+    void httpLimitsDefaultToSixtyFourAndRejectNonPositive() {
+        YamlConfiguration missing = base();
+        PluginConfig defaults = new PluginConfig(missing);
+        assertEquals(64, defaults.httpMaxInFlight());
+        assertEquals(64, defaults.httpQueueSize());
+        assertEquals(null, defaults.httpLimitWarning());
+
+        YamlConfiguration yaml = base();
+        yaml.set("http.max-in-flight", 16);
+        yaml.set("http.queue-size", 8);
+        PluginConfig configured = new PluginConfig(yaml);
+        assertEquals(16, configured.httpMaxInFlight());
+        assertEquals(8, configured.httpQueueSize());
+        assertEquals(null, configured.httpLimitWarning());
+
+        YamlConfiguration bad = base();
+        bad.set("http.max-in-flight", 0);
+        bad.set("http.queue-size", -1);
+        PluginConfig rejected = new PluginConfig(bad);
+        assertEquals(64, rejected.httpMaxInFlight());
+        assertEquals(64, rejected.httpQueueSize());
+        assertTrue(rejected.httpLimitWarning().contains("http.max-in-flight"));
+        assertTrue(rejected.httpLimitWarning().contains("http.queue-size"));
     }
 
     private static YamlConfiguration base() {

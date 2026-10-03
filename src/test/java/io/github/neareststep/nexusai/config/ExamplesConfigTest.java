@@ -30,7 +30,7 @@ class ExamplesConfigTest {
             "config-version", "locale", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "limits", "pool", "prewarm", "moderation", "fallback",
-            "dialogue", "actions", "context", "sanitize");
+            "dialogue", "actions", "context", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
             "provider", "model", "base-url", "key", "system-prompt", "temperature", "max-tokens",
@@ -77,6 +77,8 @@ class ExamplesConfigTest {
             "enabled", "threshold-turns", "max-chars", "max-tokens", "provider", "model");
 
     private static final Set<String> ACTIONS = Set.of("enabled", "log", "max-per-reply");
+
+    private static final Set<String> HTTP = Set.of("max-in-flight", "queue-size");
 
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
@@ -281,6 +283,9 @@ class ExamplesConfigTest {
         }
         if ("context".equals(parent)) {
             return CONTEXT.contains(key);
+        }
+        if ("http".equals(parent)) {
+            return HTTP.contains(key);
         }
         if ("sanitize".equals(parent)) {
             return "allow-markup".equals(key);

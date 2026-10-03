@@ -104,6 +104,10 @@ public final class PluginConfig {
     private ModerationSettings moderation = ModerationSettings.defaults();
     private io.github.neareststep.nexusai.context.ContextSettings contextSettings =
             io.github.neareststep.nexusai.context.ContextSettings.defaults();
+    private int httpMaxInFlight = io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT;
+    private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
+    private String httpLimitWarning;
+    private final List<String> shortKeyWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -113,6 +117,8 @@ public final class PluginConfig {
         Objects.requireNonNull(config, "config");
         missingEnvVars.clear();
         keyFileWarnings.clear();
+        shortKeyWarnings.clear();
+        httpLimitWarning = null;
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -205,6 +211,47 @@ public final class PluginConfig {
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
+        readHttpLimits(config);
+        noteShortKeys();
+    }
+
+    private void readHttpLimits(FileConfiguration config) {
+        this.httpMaxInFlight = positiveHttp(
+                config, "http.max-in-flight", io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT);
+        this.httpQueueSize = positiveHttp(
+                config, "http.queue-size", io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY);
+    }
+
+    private int positiveHttp(FileConfiguration config, String key, int fallback) {
+        int value = config.getInt(key, fallback);
+        if (value > 0) {
+            return value;
+        }
+        String note = key + " must be greater than 0. Using " + fallback + ".";
+        httpLimitWarning = httpLimitWarning == null ? note : httpLimitWarning + " " + note;
+        return fallback;
+    }
+
+    private void noteShortKeys() {
+        if (providers == null) {
+            return;
+        }
+        for (ProviderSettings settings : providers.values()) {
+            boolean noted = false;
+            for (String key : settings.apiKeys()) {
+                if (key == null) {
+                    continue;
+                }
+                String trimmed = key.trim();
+                if (trimmed.isEmpty() || trimmed.length() > SecretMask.SUFFIX_LENGTH || noted) {
+                    continue;
+                }
+                noted = true;
+                shortKeyWarnings.add("providers." + settings.id()
+                        + " has an API key of " + trimmed.length()
+                        + " characters. A key this short is masked as **** and cannot show a suffix.");
+            }
+        }
     }
 
     private Map<String, ProviderSettings> loadProviders(FileConfiguration config, String legacyKey, String envKey) {
@@ -1029,23 +1076,51 @@ public final class PluginConfig {
     }
 
     /**
-     * Resolved secrets longer than four characters. Used only to strip them from command text.
+     * Resolved secrets, including keys too short to show a suffix. Used only to strip them from
+     * command text and error bodies. The key text is not logged from here.
      */
     public List<String> configuredSecrets() {
         List<String> secrets = new ArrayList<>();
         if (providers != null) {
             for (ProviderSettings settings : providers.values()) {
                 for (String key : settings.apiKeys()) {
-                    if (key != null && key.trim().length() > 4) {
-                        secrets.add(key.trim());
+                    if (key == null) {
+                        continue;
+                    }
+                    String trimmed = key.trim();
+                    if (!trimmed.isEmpty() && !secrets.contains(trimmed)) {
+                        secrets.add(trimmed);
                     }
                 }
             }
         }
-        if (apiKey != null && apiKey.trim().length() > 4 && !secrets.contains(apiKey.trim())) {
+        if (apiKey != null && !apiKey.isBlank() && !secrets.contains(apiKey.trim())) {
             secrets.add(apiKey.trim());
         }
         return secrets;
+    }
+
+    public int httpMaxInFlight() {
+        return httpMaxInFlight;
+    }
+
+    public int httpQueueSize() {
+        return httpQueueSize;
+    }
+
+    /**
+     * One warning when {@code http.max-in-flight} or {@code http.queue-size} is not positive.
+     * Null when both values were accepted.
+     */
+    public String httpLimitWarning() {
+        return httpLimitWarning;
+    }
+
+    /**
+     * Load warnings for keys too short to show a suffix. The key text is not included.
+     */
+    public List<String> shortKeyWarnings() {
+        return List.copyOf(shortKeyWarnings);
     }
 
     private String substitute(String value) {

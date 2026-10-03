@@ -1,6 +1,6 @@
 # Examples
 
-Copy a folder's `config.yml` and `prompts.yml` onto `plugins/NexusAI/`, or merge the keys into the files you already have. On startup, missing default keys are appended and one `config.yml.bak` is written. The only edit the examples need is the API key (environment variable or the line in the key file).
+Copy a folder's `config.yml` and `prompts.yml` onto `plugins/NexusAI/`, or merge the keys into the files you already have. These files are fragments, not a full `config.yml`. The first start fills every missing default key (on the order of forty keys, including `http.*`, `context.*`, and `dialogue.summary.*`) and writes one `config.yml.bak`. A later start that finds nothing missing does not write another backup. The only edit the examples need is the API key (environment variable or the line in the key file).
 
 Host-plugin files (`tab-scoreboard.yml`, `aitip.yml`, `tips.yml`) are fragments for that plugin. They are not NexusAI configs.
 
