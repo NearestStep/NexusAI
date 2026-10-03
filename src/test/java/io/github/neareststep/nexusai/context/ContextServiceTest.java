@@ -13,13 +13,19 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -69,13 +75,19 @@ class ContextServiceTest {
         Thread caller = Thread.currentThread();
         AtomicInteger onCaller = new AtomicInteger();
         AtomicInteger inside = new AtomicInteger();
-        registry.add("Plug", counting("fast", 10, onCaller, caller, inside, "alpha"));
-        registry.add("Plug", counting("slow", 20, onCaller, caller, inside, "beta"));
+        AtomicInteger inProvide = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        CountDownLatch arrived = new CountDownLatch(2);
+        registry.add("Plug", counting("fast", 10, onCaller, caller, inside, arrived, inProvide, peak, "alpha"));
+        registry.add("Plug", counting("slow", 20, onCaller, caller, inside, arrived, inProvide, peak, "beta"));
 
-        String block = service.collect(request(), PromptContext.all()).get(2, TimeUnit.SECONDS);
+        // The default cap is 80ms. A timed spin inside provide() races that cap under load.
+        ContextService room = service(workers, settings(2_000, 2_000, 5, 60, 200, 600));
+        String block = room.collect(request(), PromptContext.all()).get(2, TimeUnit.SECONDS);
 
         assertEquals(0, onCaller.get());
         assertEquals(2, inside.get());
+        assertEquals(2, peak.get());
         assertTrue(block.contains("fast: alpha"));
         assertTrue(block.contains("slow: beta"));
         assertTrue(block.indexOf("fast: alpha") < block.indexOf("slow: beta"));
@@ -300,7 +312,10 @@ class ContextServiceTest {
     @Test
     void timeoutBeforeStartDoesNotSuspendTheWaitingProvider() throws Exception {
         ThreadPoolExecutor one = (ThreadPoolExecutor) ContextService.newWorkerPool(1, 8);
+        ManualScheduler manual = new ManualScheduler();
         AtomicInteger quickCalls = new AtomicInteger();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
         try {
             registry.add("Plug", new NexusContextProvider() {
                 @Override
@@ -320,10 +335,13 @@ class ContextServiceTest {
 
                 @Override
                 public CompletableFuture<String> provide(ContextRequest request) {
+                    entered.countDown();
                     try {
-                        Thread.sleep(5_000);
+                        new CountDownLatch(1).await();
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
+                    } finally {
+                        finished.countDown();
                     }
                     return CompletableFuture.completedFuture("blocked");
                 }
@@ -350,8 +368,26 @@ class ContextServiceTest {
                     return CompletableFuture.completedFuture("ready");
                 }
             });
-            ContextService tight = service(one, settings(40, 200, 5, 60, 200, 600));
-            String blocked = tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+            ContextService tight = new ContextService(
+                    registry,
+                    settings(40, 200, 5, 60, 200, 600),
+                    one,
+                    manual,
+                    logger,
+                    clock::get,
+                    30
+            );
+            CompletableFuture<String> pending = tight.collect(request(), PromptContext.all());
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            // 0 blocker timeout, 1 queued quick timeout, 2 collection budget.
+            // Quick's timer has to win while the blocker still owns the only worker.
+            // A live scheduler frees that worker from the blocker callback first, and quick
+            // can still be inside its own budget.
+            assertEquals(3, manual.size());
+            manual.run(1);
+            manual.run(0);
+            assertTrue(finished.await(1, TimeUnit.SECONDS));
+            String blocked = pending.get(1, TimeUnit.SECONDS);
             assertFalse(blocked.contains("quick"), blocked);
             assertEquals(0, quickCalls.get());
             ContextService.StatusRow quick = row(tight, "quick");
@@ -441,6 +477,9 @@ class ContextServiceTest {
             AtomicInteger onCaller,
             Thread caller,
             AtomicInteger inside,
+            CountDownLatch arrived,
+            AtomicInteger inProvide,
+            AtomicInteger peak,
             String value
     ) {
         return new NexusContextProvider() {
@@ -455,14 +494,25 @@ class ContextServiceTest {
             }
 
             @Override
+            public Duration timeout() {
+                return Duration.ofSeconds(2);
+            }
+
+            @Override
             public CompletableFuture<String> provide(ContextRequest request) {
                 if (Thread.currentThread() == caller) {
                     onCaller.incrementAndGet();
                 }
                 inside.incrementAndGet();
-                long deadline = System.nanoTime() + 1_000_000_000L;
-                while (inside.get() < 2 && System.nanoTime() < deadline) {
-                    Thread.onSpinWait();
+                int now = inProvide.incrementAndGet();
+                peak.updateAndGet(seen -> Math.max(seen, now));
+                arrived.countDown();
+                try {
+                    arrived.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    inProvide.decrementAndGet();
                 }
                 return CompletableFuture.completedFuture(value);
             }
@@ -491,5 +541,143 @@ class ContextServiceTest {
                 return CompletableFuture.completedFuture(value);
             }
         };
+    }
+
+    /**
+     * Records scheduler tasks and runs them only when the test says so.
+     * Provider timeouts stay ordered relative to the worker, instead of racing a live delay.
+     */
+    private static final class ManualScheduler extends AbstractExecutorService implements ScheduledExecutorService {
+        private final List<ManualTask> tasks = new ArrayList<>();
+        private boolean shutdown;
+
+        int size() {
+            synchronized (tasks) {
+                return tasks.size();
+            }
+        }
+
+        void run(int index) {
+            ManualTask task;
+            synchronized (tasks) {
+                task = tasks.get(index);
+            }
+            task.run();
+        }
+
+        @Override
+        public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            ManualTask task = new ManualTask(command);
+            synchronized (tasks) {
+                tasks.add(task);
+            }
+            return task;
+        }
+
+        @Override
+        public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period, TimeUnit unit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void shutdown() {
+            shutdown = true;
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            shutdown = true;
+            return List.of();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return shutdown;
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return shutdown;
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return shutdown;
+        }
+    }
+
+    private static final class ManualTask implements ScheduledFuture<Object>, Runnable {
+        private final Runnable command;
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private final AtomicBoolean ran = new AtomicBoolean();
+
+        private ManualTask(Runnable command) {
+            this.command = command;
+        }
+
+        @Override
+        public void run() {
+            if (cancelled.get() || !ran.compareAndSet(false, true)) {
+                return;
+            }
+            command.run();
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            if (ran.get()) {
+                return false;
+            }
+            if (!cancelled.compareAndSet(false, true)) {
+                return false;
+            }
+            ran.set(true);
+            return true;
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return cancelled.get();
+        }
+
+        @Override
+        public boolean isDone() {
+            return ran.get();
+        }
+
+        @Override
+        public Object get() throws InterruptedException, ExecutionException {
+            return null;
+        }
+
+        @Override
+        public Object get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException {
+            return null;
+        }
+
+        @Override
+        public long getDelay(TimeUnit unit) {
+            return 0L;
+        }
+
+        @Override
+        public int compareTo(Delayed other) {
+            return 0;
+        }
     }
 }
