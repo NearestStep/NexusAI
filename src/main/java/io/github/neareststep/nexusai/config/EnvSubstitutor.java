@@ -6,12 +6,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Replaces {@code ${ENV_VAR}} placeholders. A missing variable becomes an empty string.
- * The value is never logged by this class. Missing names are collected so the caller can log them.
+ * Replaces {@code ${ENV_VAR}} and {@code ${ENV:ENV_VAR}} placeholders. A missing variable becomes
+ * an empty string. The value is never logged by this class. Missing names are collected so the
+ * caller can log them. The optional {@code ENV:} prefix is not part of the variable name.
  */
 public final class EnvSubstitutor {
 
-    private static final Pattern TOKEN = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)}");
+    private static final Pattern TOKEN = Pattern.compile("\\$\\{(?:ENV:)?([A-Za-z_][A-Za-z0-9_]*)}");
 
     private EnvSubstitutor() {
     }

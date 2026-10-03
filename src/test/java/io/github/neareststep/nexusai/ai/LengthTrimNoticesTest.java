@@ -81,9 +81,32 @@ class LengthTrimNoticesTest {
         assertFalse(line.contains("short_LT"), line);
         assertTrue(line.contains("(length " + literal.length() + ")"), line);
         assertEquals("(length " + literal.length() + ")", LengthTrimNotices.label(literal));
-        assertTrue(LengthTrimNotices.message("harbor").contains("harbor"));
+        assertFalse(LengthTrimNotices.message("harbor").contains("harbor"));
+        assertTrue(LengthTrimNotices.message("harbor").contains("(length 6)"));
         assertTrue(LengthTrimNotices.message("nai talk").contains("nai talk"));
         assertFalse(LengthTrimNotices.message("other prompt").contains("other prompt"));
+    }
+
+    @Test
+    void anIdShapedLiteralIsPrintedOnlyWhenThatPromptIsLoaded() {
+        LengthTrimNotices.usePromptIds(java.util.Set.of());
+        try {
+            String shaped = "harbor";
+            assertFalse(LengthTrimNotices.message(shaped).contains(shaped));
+            assertTrue(LengthTrimNotices.message(shaped).contains("(length " + shaped.length() + ")"));
+            String pattern = "[a-z0-9_-]{1,64}";
+            String patternLine = LengthTrimNotices.message(pattern);
+            assertFalse(patternLine.contains(pattern), patternLine);
+            assertFalse(patternLine.contains("a-z0-9"), patternLine);
+            assertTrue(patternLine.contains("(length "), patternLine);
+            assertTrue(LengthTrimNotices.message("nai talk").contains("nai talk"));
+            LengthTrimNotices.usePromptIds(java.util.Set.of("harbor", "blacksmith"));
+            assertTrue(LengthTrimNotices.message("harbor").contains("harbor"));
+            assertTrue(LengthTrimNotices.message("harbor").contains("(length 6)"));
+            assertFalse(LengthTrimNotices.message("not_in_file").contains("not_in_file"));
+        } finally {
+            LengthTrimNotices.usePromptIds(java.util.Set.of());
+        }
     }
 
     @Test

@@ -135,10 +135,13 @@ public final class ModerationService {
         try {
             reply = call(wrapped, choice.get());
         } catch (AiRequestException e) {
-            logger.log(Level.FINE, "Chat moderation request failed: " + e.getMessage());
+            logger.log(Level.FINE, "Chat moderation request failed: "
+                    + SecretMask.redact(e.getMessage(), config.configuredSecrets()));
             return new Decision(Skip.CHECKED, false, "none", "");
         } catch (RuntimeException e) {
-            logger.log(Level.FINE, "Chat moderation request failed", e);
+            String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            logger.log(Level.FINE, "Chat moderation request failed: "
+                    + SecretMask.redact(detail, config.configuredSecrets()));
             return new Decision(Skip.CHECKED, false, "none", "");
         }
         Optional<ModerationVerdict> parsed = VerdictParser.parse(reply);

@@ -1,9 +1,13 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.config.SecretMask;
+
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -14,19 +18,29 @@ public final class AiDiagnostics {
     private final Logger logger;
     private final long cooldownMillis;
     private final LongSupplier clock;
+    private final Supplier<Iterable<String>> secrets;
     private final Object logGate = new Object();
     private final ConcurrentHashMap<AiErrorKind, Long> lastLoggedAt = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<AiErrorKind, String> lastLoggedText = new ConcurrentHashMap<>();
     private volatile String lastError;
 
     public AiDiagnostics(Logger logger, Duration cooldown) {
-        this(logger, cooldown, System::currentTimeMillis);
+        this(logger, cooldown, System::currentTimeMillis, List::of);
+    }
+
+    public AiDiagnostics(Logger logger, Duration cooldown, Supplier<Iterable<String>> secrets) {
+        this(logger, cooldown, System::currentTimeMillis, secrets);
     }
 
     AiDiagnostics(Logger logger, Duration cooldown, LongSupplier clock) {
+        this(logger, cooldown, clock, List::of);
+    }
+
+    AiDiagnostics(Logger logger, Duration cooldown, LongSupplier clock, Supplier<Iterable<String>> secrets) {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.cooldownMillis = Math.max(1L, cooldown == null ? 30_000L : cooldown.toMillis());
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.secrets = secrets == null ? List::of : secrets;
     }
 
     public void report(AiErrorKind kind, String detail) {
@@ -41,7 +55,8 @@ public final class AiDiagnostics {
                 || kind == AiErrorKind.MARKUP_ONLY) {
             return;
         }
-        String message = format(kind, detail, paused);
+        Iterable<String> known = secrets.get();
+        String message = SecretMask.redact(format(kind, detail, paused), known == null ? List.of() : known);
         // One pool refill finishes on several threads at once. The cooldown and the
         // logged text have to be decided together, or each thread writes the same line.
         synchronized (logGate) {

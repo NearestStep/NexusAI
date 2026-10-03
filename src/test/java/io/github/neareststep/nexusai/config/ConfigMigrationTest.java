@@ -6,6 +6,10 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -507,6 +511,44 @@ class ConfigMigrationTest {
         ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(second.addedKeys().isEmpty());
         assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void migrationCopiesTheRawApiKeyPlaceholder() {
+        Function<String, String> previous = PluginConfig.environment;
+        PluginConfig.environment = name -> "sk-canary-resolved";
+        try {
+            String yaml = """
+                    api:
+                      provider: groq
+                      model: llama-3.3-70b-versatile
+                      key: "${GROQ}"
+                    """;
+            ConfigMigrator.Outcome outcome = ConfigMigrator.migrateConfig(yaml);
+            assertTrue(outcome.yaml().contains("${GROQ}"), outcome.yaml());
+            assertFalse(outcome.yaml().contains("sk-canary-resolved"), outcome.yaml());
+            assertEquals("${GROQ}", load(outcome.yaml()).getString("providers.groq.api-key"));
+            String rendered = ConfigMigrator.renderProviders("groq", "https://example.test/v1", "${GROQ}");
+            assertTrue(rendered.contains("${GROQ}"), rendered);
+            assertFalse(rendered.contains("sk-canary-resolved"), rendered);
+        } finally {
+            PluginConfig.environment = previous;
+        }
+    }
+
+    @Test
+    void backupKeepsOwnerOnlyPosixPermissions() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-bak-mode");
+        Path source = dir.resolve("config.yml");
+        Files.writeString(source, "api:\n  key: \"literal\"\n", StandardCharsets.UTF_8);
+        PosixFileAttributeView view = Files.getFileAttributeView(source, PosixFileAttributeView.class);
+        org.junit.jupiter.api.Assumptions.assumeTrue(view != null, "POSIX permissions are not available");
+        Files.setPosixFilePermissions(source, Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+        Path bak = FileBackup.backup(source);
+        Set<PosixFilePermission> copied = Files.getPosixFilePermissions(bak);
+        assertTrue(copied.contains(PosixFilePermission.OWNER_READ));
+        assertFalse(copied.contains(PosixFilePermission.GROUP_READ));
+        assertFalse(copied.contains(PosixFilePermission.OTHERS_READ));
     }
 
     private static YamlConfiguration load(String yaml) {

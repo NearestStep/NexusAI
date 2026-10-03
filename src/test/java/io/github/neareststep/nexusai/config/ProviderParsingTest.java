@@ -37,7 +37,8 @@ class ProviderParsingTest {
             assertEquals(List.of("sk-live-aaaa", "sk-live-bbbb"), config.provider("openai").apiKeys());
             assertEquals("gemini", config.provider("gemini").type());
             assertEquals("https://generativelanguage.googleapis.com/v1beta/openai", config.provider("gemini").url());
-            assertEquals("****aaaa, ****bbbb", config.maskedApiKeys());
+            assertEquals("****aaaa, ****bbbb (env)", config.maskedApiKeys());
+            assertEquals(KeySource.ENV, config.provider("openai").keySource());
             assertFalse(config.maskedApiKeys().contains("sk-live"));
         } finally {
             PluginConfig.environment = previous;

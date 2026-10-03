@@ -44,7 +44,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
 | `config-version` | Schema version. Missing means 0.6.0. config.yml is version 2. The plugin migrates forward and writes `<file>.bak` first. Missing default keys are appended only after the same backup |
 | `api` | `provider`, `model`, `base-url` (empty = provider default), `key` (legacy), `system-prompt`, `temperature` (negative = omit), `max-tokens` (default **256**; `0` or a negative value omits the field), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
-| `providers` | Named endpoints. Each has `type` (`openai-compatible` or `gemini`), `url`, and `api-key` (string or list). `${ENV_VAR}` is replaced in `url` and `api-key` |
+| `providers` | Named endpoints. Each has `type` (`openai-compatible` or `gemini`), `url`, and `api-key` (string or list). `${ENV_VAR}` and `${ENV:VAR}` are replaced in `url` and `api-key`. Optional `api-key-file` is not written into an existing config |
 | `model-queue` | Ordered `{provider, model, daily-request-limit}`. First available entry is used. `model-queue-remaining-threshold` switches when remaining header budget is at or below that number (`0` = only at zero) |
 | `formats` | Presets `simple`, `chat`, `gui`, `name`, `hologram`, `actionbar`, `bossbar`, plus `formats.default` |
 | `cache` | `ttl` (seconds), `max-size` |
@@ -59,7 +59,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `sanitize` | `allow-markup` (default **false**). See [Security](#security) |
 | `fallback` | String on miss / rate limits / missing key |
 
-On the active provider, `NEXUSAI_API_KEY` replaces one literal key. A key list, or a value that contains `${ENV_VAR}`, is left as written. If that value resolves to nothing, `NEXUSAI_API_KEY` is used.
+On the active provider, `NEXUSAI_API_KEY` replaces one literal key. A key list, a value that contains `${ENV_VAR}` or `${ENV:VAR}`, and a non-empty `api-key-file` are left as written. If that value resolves to nothing, `NEXUSAI_API_KEY` is used. An empty key file uses the same fallback.
 
 Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`. Copies live in `plugins/NexusAI/lang/`. See [Language files](#language-files).
 
@@ -79,7 +79,42 @@ Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_B
 
 On Groq, use a Qwen model as the default. In a 15-attack prompt-injection check, `allam-2-7b` complied with 5 attacks and `qwen/qwen3.8-27b` complied with none. The same run sent 30 benign prompts (15 to each model) and recorded no false refusals. `allam-2-7b` is a weak default for this guard. Groq also caps output tokens per minute. On one account that cap was 1000, and a request with no `max_tokens` was counted as 1028 and rejected with HTTP 429. The default `api.max-tokens` of 256 keeps a short placeholder or talk reply under that cap. Set `0` or a negative value only when you want the field left off. If you do that while a groq provider is in `model-queue` or is the `fallback-model`, startup and `/nai reload` log one warning. Groq's free tier has a per-minute output-token quota per account. `max-tokens` 256 does not remove that quota. Frequent long `/nai talk` turns, or many long placeholders, can still return HTTP 429 and pause every request. Use a longer `cache.ttl` or per-prompt `ttl`, and shorter prompts, so those calls are not sent again on every refresh.
 
-An explicit `api.base-url` still fills the legacy path. When `providers:` is present, that block is the endpoint and key source. On startup the log prints: `Using provider: …, base-url: …, model: …` and, when keys are set, `API keys: ****abcd`. Full keys are never printed.
+An explicit `api.base-url` still fills the legacy path. When `providers:` is present, that block is the endpoint and key source. On startup the log prints: `Using provider: …, base-url: …, model: …` and, when keys are set, `API keys: ****abcd`. A key read from a file is `API keys: ****abcd (file)`. A key taken from the environment is `API keys: ****abcd (env)`. A literal key in `config.yml` stays `****abcd` with no suffix. Full keys are never printed. The `url` value is not masked, so do not put a key in the query string.
+
+A provider key can be set in three ways:
+
+| Way | Example | Notes |
+|-----|---------|--------|
+| Environment placeholder | `api-key: ${ENV:GROQ_API_KEY}` or `api-key: ${GROQ_API_KEY}` | Same variable. An unset name becomes empty and is logged by name |
+| Key file | `api-key-file: secrets/groq.key` | UTF-8, one raw key per non-empty line. `#` comments and blank lines are skipped. A relative path is under `plugins/NexusAI/`. An absolute path is allowed. Two lines are a round-robin list. The file is read at startup and on `/nai reload`. It is not copied to a `.bak` and it is not overwritten |
+| Literal | `api-key: "sk-..."` | Same as 1.0.x. On the active provider, one literal key is replaced by `NEXUSAI_API_KEY` |
+
+Priority for one provider:
+
+| Order | Source | What happens |
+|-------|--------|----------------|
+| 1 | Non-empty `api-key-file` | Keys come from the file. A neighbouring `api-key` is ignored, with one warning. `NEXUSAI_API_KEY` does not replace file keys. An empty or missing file leaves no file keys and then uses the `NEXUSAI_API_KEY` fallback on the active provider |
+| 2 | `api-key` with `${ENV:VAR}` or `${VAR}`, or a list of them | Used when `api-key-file` is not set. An explicit placeholder is not replaced by `NEXUSAI_API_KEY` unless it resolves to nothing |
+| 3 | Literal `api-key` | Used when `api-key-file` is not set. On the active provider, `NEXUSAI_API_KEY` replaces one literal key |
+| 4 | `NEXUSAI_API_KEY` | Fallback when the active provider's chosen source is empty |
+
+`api-key-file` is documented here and in a comment in the bundled `config.yml`. It is not a default key under each provider, so an update does not insert it into an existing file.
+
+**Real protection is spend limits and keys with limited rights on the provider side (a spend limit, a budget alert, and a separate key per server), plus rotation. Anyone who can read the server files can read the key. The storage method does not change that.**
+
+There is no encryption of the key in `config.yml`. A scheme that the plugin can undo needs the key material on the same server, next to the jar that contains the algorithm. It only hides the key from someone who sees one file and not the rest, and it breaks when the server is moved, restored, or given a new id. An environment variable or a secrets file outside the plugin folder does that job without pretending the file is encrypted.
+
+If the key is written as a literal in `config.yml`, the migration copy `config.yml.bak` contains that same literal. That backup is a copy of the admin's file. NexusAI does not write a resolved key (from the environment or from a key file) into `config.yml`, `config.yml.bak`, `usage.yml`, `pool.yml`, or `dialogue-memory.yml`. The backup is created with the source file's attributes, so a file that is readable only by its owner stays that way. A key file that is readable by the group or by others logs one warning, `chmod 600 <path>`.
+
+NexusAI compared with a typical AI plugin:
+
+| | Typical plugin | NexusAI |
+|--|----------------|---------|
+| Where the key lives | Plain text in `config.yml` | Plain text, or `${ENV:VAR}` / `${VAR}`, or `api-key-file` |
+| Masking in logs, errors, and `/nai status` | The full key often appears in an error or a status line | Masked to the last four characters (`****abcd`). File keys are marked `(file)`. Environment keys are marked `(env)` |
+| Leak check | Usually none | A unit test sends a canary key through HTTP 401, HTTP 429, a timeout, diagnostics, `/nai status` redaction, and `/nai reload`, and fails if the canary appears |
+| Permissions of `.bak` | A copy is often world-readable | The copy keeps the source mode (`COPY_ATTRIBUTES`) |
+| Encryption in the config | Sometimes described as protection | None. A key kept out of `config.yml` is the better option, because encryption the plugin can undo uses material stored on the same server |
 
 `ollama` does not need an API key. Any other provider pointed at localhost or port `11434` is treated the same way: if its `api-key` and `NEXUSAI_API_KEY` are empty, the `Authorization` header is omitted.
 
@@ -144,7 +179,7 @@ Answers whose `content` is an array of parts are joined into one string.
 
 A reply whose `finish_reason` is `length` is trimmed before it is shown or cached. A sentence ending is `.`, `!`, `?`, `…`, ASCII `...`, or `。` `！` `？` `؟`. Closing quotes after that mark stay. The ending is used when it sits at or past the halfway point of the text, so an early `Hi.` does not throw away the rest. Otherwise the last partial word is dropped and `…` is appended. A single unfinished word is kept with `…`. Colour-code removal still runs first, so `&` and `§` codes are not part of the cut. A period after a bare number at the start of a line is a list marker, not the end of a sentence. The same is true of a standalone Roman numeral at the start of a line, and of any terminator on a markdown heading line. The same is true of a common abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `Mr.`, `Mrs.`, `Dr.`, `St.`, `т.д.`, `т.п.`, `т.е.`, `др.`, `пр.`, `г.`, `гг.`, `им.`, `ул.`, `см.`, `напр.`), including when a closing bracket follows that period (`т.д.)`). The shared response cache stores the trimmed reply for the normal TTL: `cache.ttl`, or the prompt's `ttl` when that prompt sets one. A length trim is logged at INFO twice for each prompt id, then suppressed. The notice key is that id, not the rendered prompt. The keys are an LRU of 256 entries, and `/nai reload` clears them. `/nai talk` runs the same trim, and dialogue memory stores the line the player saw. The answer pool is not that cache. A reply that is empty after legacy colour codes are removed is still the empty-reply backoff and is not cached. A reply that is empty only after hex, MiniMessage tags, or an interactive JSON component is removed is not cached and does not start that pause. That prompt then waits 30 seconds before another placeholder or pool request. The wait does not climb. During it, placeholders and the pool serve the pool or the prompt fallback, and no warning is written. `/nai test` is not held and does not start the wait. Local rate limits still apply.
 
-The length-trim notice key is the prompt id: a named prompt uses its id, a pool entry uses the configured prompt, and `/nai talk` uses the character id, or `nai talk` when that id is blank. The rendered prompt is not the key, so `{player}` does not open a new entry per player. Each id is logged twice, then suppressed. The line names the id only when it is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`: `reply for prompt <name> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt`. A literal placeholder is never printed, including a short one such as `short_LT:long`. That line is `reply for prompt (length <n>) ...`. `&` and `§` are removed before that. The map is an access-order LRU of 256 ids: a new id drops the least recently used one. `/nai reload` clears the map.
+The length-trim notice key is the prompt id: a named prompt uses its id, a pool entry uses the configured prompt, and `/nai talk` uses the character id, or `nai talk` when that id is blank. The rendered prompt is not the key, so `{player}` does not open a new entry per player. Each id is logged twice, then suppressed. The line names the id only when that id is loaded from `prompts.yml`, or when it is `nai talk`: `reply for prompt <name> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt`. A string that only matches `[a-z0-9_-]{1,64}` is not a name. A literal placeholder is never printed, including a short one such as `short_LT:long` and an id-shaped literal that is not in `prompts.yml`. That line is `reply for prompt (length <n>) ...`. `&` and `§` are removed before that. The map is an access-order LRU of 256 ids: a new id drops the least recently used one. `/nai reload` clears the map and reloads the set of names from `prompts.yml`.
 
 A period after a standalone Roman numeral at the start of a line is not a sentence end. The token is standard Roman form, case-insensitive, at most eight letters, with optional indent and an optional markdown heading prefix. A numeral in the middle of a line, such as `chapter I.`, can still end the sentence. Any terminator on a markdown heading line (the first non-space character is `#`) is ignored. After the cut, a trailing heading that is only hashes, or hashes plus a bare list marker, is dropped. A heading that already has title words stays. If nothing remains, the trimmed reply is `…`.
 
@@ -197,7 +232,7 @@ An action's `permission` field is a node you write on that action. It is not reg
 
 ## Dialogues
 
-`/nai talk` uses a named prompt as a character. `dialogue.enabled` defaults to true. When it is false, `/nai talk` sends `Dialogues are disabled.` The prompt text is the system side of the conversation. The player's line is sanitized, wrapped as player input, and is not the prompt. The id match ignores case. The chat line shows the id as it was typed, including a JSON id.
+`/nai talk` uses a named prompt as a character. `dialogue.enabled` defaults to true. When it is false, `/nai talk` sends `Dialogues are disabled.` The prompt text is the system side of the conversation. The player's line is sanitized, wrapped as player input, and is not the prompt. The id match ignores case. The chat line uses one spelling for the whole session: the spelling of the command that opened it, including a JSON id. A later reply does not switch that id to lowercase.
 
 ```yaml
 blacksmith:
@@ -270,7 +305,7 @@ A `locale:` that is not bundled and has no file logs two warnings: the path that
 
 ## Knowledge
 
-`plugins/NexusAI/knowledge/` holds `.md` and `.txt` files. The first start creates `example.md`. That example is never overwritten. A prompt lists names without the extension:
+`plugins/NexusAI/knowledge/` holds `.md` and `.txt` files, saved as UTF-8. The first start creates `example.md`. That example is never overwritten. A file that is not valid UTF-8 (for example a Windows-1251 file saved from Notepad) is skipped. The log has one warning with the file name and the text `not valid UTF-8, re-save the file as UTF-8`. The stack trace is written only at FINE. A prompt lists names without the extension:
 
 ```yaml
 guide:

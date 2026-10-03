@@ -4,6 +4,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,7 +33,14 @@ public final class PluginConfig {
     /** Test seam. Production reads the process environment. */
     static Function<String, String> environment = System::getenv;
 
+    /**
+     * Directory relative {@code api-key-file} paths are resolved from.
+     * Production sets this to the plugin data folder before each load. Absolute paths ignore it.
+     */
+    public static volatile Path secretsBase;
+
     private final Set<String> missingEnvVars = new LinkedHashSet<>();
+    private final List<String> keyFileWarnings = new ArrayList<>();
 
     private static final Map<String, String> PROVIDER_BASE_URLS = Map.of(
             "openai", "https://api.openai.com/v1",
@@ -100,6 +108,7 @@ public final class PluginConfig {
     public void reload(FileConfiguration config) {
         Objects.requireNonNull(config, "config");
         missingEnvVars.clear();
+        keyFileWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -153,16 +162,22 @@ public final class PluginConfig {
             this.modelQueue = loadModelQueue(config);
             applyActiveProvider();
         } else {
+            KeySource source = KeySource.CONFIG;
             if (envKey != null && !envKey.isBlank()) {
                 this.apiKey = envKey.trim();
+                source = KeySource.ENV;
             } else {
                 this.apiKey = substitute(yamlKey).trim();
+                if (EnvSubstitutor.referencesEnv(yamlKey)) {
+                    source = KeySource.ENV;
+                }
             }
             this.providers = Map.of(provider, new ProviderSettings(
                     provider,
                     ProviderCatalog.typeFor(provider),
                     baseUrl,
-                    apiKey.isBlank() ? List.of() : List.of(apiKey)));
+                    apiKey.isBlank() ? List.of() : List.of(apiKey),
+                    source));
             this.modelQueue = loadModelQueue(config);
         }
         this.modelQueueRemainingThreshold = Math.max(0, config.getInt("model-queue-remaining-threshold", 0));
@@ -200,8 +215,9 @@ public final class PluginConfig {
                 url = trimTrailingSlash(url);
             }
             boolean active = normalizedId.equals(provider);
-            List<String> keys = resolveKeys(one.get("api-key"), active, legacyKey, envKey);
-            loaded.put(normalizedId, new ProviderSettings(normalizedId, type, url, keys));
+            ResolvedKeys resolved = resolveKeys(normalizedId, one, active, legacyKey, envKey);
+            loaded.put(normalizedId, new ProviderSettings(
+                    normalizedId, type, url, resolved.keys(), resolved.source()));
         }
         return Map.copyOf(loaded);
     }
@@ -284,29 +300,92 @@ public final class PluginConfig {
         return FormatPresets.known(id) ? id : FormatPresets.SIMPLE;
     }
 
-    private List<String> resolveKeys(Object raw, boolean active, String legacyKey, String envKey) {
+    private ResolvedKeys resolveKeys(
+            String providerId,
+            ConfigurationSection one,
+            boolean active,
+            String legacyKey,
+            String envKey
+    ) {
+        Object raw = one.get("api-key");
+        String filePath = one.getString("api-key-file", "");
+        filePath = filePath == null ? "" : filePath.trim();
+        if (!filePath.isEmpty()) {
+            if (rawKeyPresent(raw)) {
+                keyFileWarnings.add("providers." + providerId
+                        + ".api-key is ignored because api-key-file is set.");
+            }
+            KeyFiles.Loaded file = KeyFiles.read(resolveSecretPath(filePath));
+            keyFileWarnings.addAll(file.warnings());
+            if (!file.keys().isEmpty()) {
+                return new ResolvedKeys(file.keys(), KeySource.FILE);
+            }
+            if (!active) {
+                return new ResolvedKeys(List.of(), KeySource.FILE);
+            }
+            return activeFallback(legacyKey, envKey, KeySource.FILE);
+        }
         boolean multi = raw instanceof List<?> list && list.size() > 1;
         boolean explicit = referencesEnv(raw);
         List<String> configured = readKeyList(raw);
         if (active && !multi && !explicit && envKey != null && !envKey.isBlank()) {
-            return List.of(envKey.trim());
+            return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
         }
         if (!configured.isEmpty()) {
-            return configured;
+            return new ResolvedKeys(configured, explicit ? KeySource.ENV : KeySource.CONFIG);
         }
-        if (active && legacyKey != null && !legacyKey.isBlank()) {
+        if (!active) {
+            return new ResolvedKeys(List.of(), KeySource.CONFIG);
+        }
+        return activeFallback(legacyKey, envKey, KeySource.CONFIG);
+    }
+
+    /**
+     * Used when the chosen source produced no keys. {@code NEXUSAI_API_KEY} still fills the
+     * active provider. An explicit {@code api-key-file} does not revive a neighbouring {@code api-key}.
+     */
+    private ResolvedKeys activeFallback(String legacyKey, String envKey, KeySource emptySource) {
+        if (legacyKey != null && !legacyKey.isBlank()) {
             if (envKey != null && !envKey.isBlank() && !EnvSubstitutor.referencesEnv(legacyKey)) {
-                return List.of(envKey.trim());
+                return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
             }
             String substituted = substitute(legacyKey).trim();
             if (!substituted.isBlank()) {
-                return List.of(substituted);
+                KeySource source = EnvSubstitutor.referencesEnv(legacyKey) ? KeySource.ENV : KeySource.CONFIG;
+                return new ResolvedKeys(List.of(substituted), source);
             }
         }
-        if (active && envKey != null && !envKey.isBlank()) {
-            return List.of(envKey.trim());
+        if (envKey != null && !envKey.isBlank()) {
+            return new ResolvedKeys(List.of(envKey.trim()), KeySource.ENV);
         }
-        return List.of();
+        return new ResolvedKeys(List.of(), emptySource);
+    }
+
+    private static boolean rawKeyPresent(Object raw) {
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                if (item != null && !String.valueOf(item).isBlank()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return raw != null && !String.valueOf(raw).isBlank();
+    }
+
+    static Path resolveSecretPath(String configured) {
+        Path path = Path.of(configured);
+        if (path.isAbsolute()) {
+            return path;
+        }
+        Path base = secretsBase;
+        if (base == null) {
+            return path;
+        }
+        return base.resolve(path).normalize();
+    }
+
+    private record ResolvedKeys(List<String> keys, KeySource source) {
     }
 
     private static boolean referencesEnv(Object raw) {
@@ -910,6 +989,13 @@ public final class PluginConfig {
     }
 
     /**
+     * Warnings from {@code api-key-file} on the last reload. Paths may appear. Key text does not.
+     */
+    public List<String> keyFileWarnings() {
+        return List.copyOf(keyFileWarnings);
+    }
+
+    /**
      * Resolved secrets longer than four characters. Used only to strip them from command text.
      */
     public List<String> configuredSecrets() {
@@ -949,6 +1035,9 @@ public final class PluginConfig {
             }
             masked.append(token);
         }
-        return masked.toString();
+        if (masked.isEmpty()) {
+            return "";
+        }
+        return masked + active.keySource().statusSuffix();
     }
 }

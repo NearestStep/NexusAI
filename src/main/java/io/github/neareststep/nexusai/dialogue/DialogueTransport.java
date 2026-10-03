@@ -110,7 +110,9 @@ public final class DialogueTransport {
             Thread.currentThread().interrupt();
             throw new AiRequestException(AiErrorKind.OTHER, 0, "Request interrupted", e);
         } catch (Exception e) {
-            throw new AiRequestException(AiErrors.classify(e), 0, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), e);
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            throw new AiRequestException(
+                    AiErrors.classify(e), 0, SecretMask.redact(message, secrets(request.apiKey())), null);
         }
     }
 
@@ -135,7 +137,7 @@ public final class DialogueTransport {
                 allowMarkup
         );
         formatted = FormatEnforcer.enforce(formatted, current.presetFor(formatId));
-        formatted = SecretMask.redact(formatted, apiKey == null || apiKey.isBlank() ? current.configuredSecrets() : List.of(apiKey));
+        formatted = SecretMask.redact(formatted, secrets(apiKey));
         if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw, allowMarkup).isBlank()) {
             if (PlayerInput.emptiedByMarkup(raw, allowMarkup)) {
                 throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
@@ -161,6 +163,19 @@ public final class DialogueTransport {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    private List<String> secrets(String apiKey) {
+        List<String> secrets = new java.util.ArrayList<>();
+        if (apiKey != null && !apiKey.isBlank()) {
+            secrets.add(apiKey.trim());
+        }
+        for (String configured : config().configuredSecrets()) {
+            if (configured != null && !secrets.contains(configured)) {
+                secrets.add(configured);
+            }
+        }
+        return secrets;
     }
 
     private static boolean looksLikeHtml(String body) {
