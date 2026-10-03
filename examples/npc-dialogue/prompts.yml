@@ -1,0 +1,24 @@
+# Copy to plugins/NexusAI/prompts.yml.
+config-version: 1
+
+blacksmith:
+  prompt: |
+    You are Bram, a blacksmith in a small harbor town.
+    Answer in one or two short sentences. Stay in character.
+  format: chat
+  fallback: "..."
+  dialogue:
+    greeting: "Need something forged?"
+    leave-radius: 6
+    max-replies: 8
+    memory-turns: 8
+    session-timeout-seconds: 120
+    message-cooldown-millis: 3000
+  actions:
+    - name: give_iron
+      description: Give the player one iron ingot.
+      command: "give {player} iron_ingot 1"
+      as: console
+      cooldown-seconds: 3600
+      daily-limit: 1
+      permission: nexusai.action.give_iron

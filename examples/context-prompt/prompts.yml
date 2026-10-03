@@ -1,0 +1,10 @@
+# Copy to plugins/NexusAI/prompts.yml.
+# economy must be a registered NexusContextProvider. See the folder README.
+config-version: 1
+
+shop_tip:
+  prompt: "Give the player one short shopping tip. One sentence, no markdown."
+  context: [economy]
+  ttl: 120
+  fallback: "..."
+  format: chat

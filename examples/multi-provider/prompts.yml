@@ -1,0 +1,10 @@
+# Copy to plugins/NexusAI/prompts.yml.
+config-version: 1
+
+survival_tips:
+  prompt: |
+    Give one short Minecraft survival tip.
+    One sentence, no markdown.
+  ttl: 600
+  fallback: "..."
+  format: simple
