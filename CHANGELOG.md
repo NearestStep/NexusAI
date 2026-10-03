@@ -1,5 +1,64 @@
 # Changelog
 
+## [1.1.0] - 2026-10-03
+
+The release jar is `NexusAI-1.1.0.jar`. Replace `NexusAI-1.0.2.jar` with it. `config.yml` stays on schema version 2. Existing values keep their meaning. `prompts.yml` stays on version 1. A prompt that omits `context:` keeps the 1.0.x text and cache key.
+
+On startup, missing keys are appended from the jar default. That write uses one `config.yml.bak` (or `config.yml.bak.<timestamp>` when a backup already exists) and logs `Added missing config keys: …`. The keys are `model-queue-strategy` (`failover`), `context.enabled`, `context.max-provider-timeout-millis`, `context.total-timeout-millis`, `context.max-chars-per-provider`, `context.max-chars`, `context.refresh-seconds`, `context.suspend-after-timeouts`, `context.suspend-seconds`, `dialogue.summary.enabled`, `dialogue.summary.threshold-turns`, `dialogue.summary.max-chars`, `dialogue.summary.max-tokens`, `dialogue.summary.provider`, `dialogue.summary.model` inside an existing `dialogue:` section, and `http.max-in-flight` (`64`) with `http.queue-size` (`64`). `api-key-file` is not inserted. Comments already in the file stay. Rollback is in `docs/migration-1.1.0.md`.
+
+### API keys
+
+- `${ENV:VAR}` is the same placeholder as `${VAR}`. An unset variable is logged by name and replaced with an empty string.
+- `providers.<id>.api-key-file` reads UTF-8 keys, one per line, at startup and on `/nai reload`. A relative path is under `plugins/NexusAI/`. An absolute path is allowed. A non-empty path wins over `api-key`. `NEXUSAI_API_KEY` does not replace keys that came from the file. An empty file still falls back to `NEXUSAI_API_KEY` on the active provider. A missing file, a file over 64KB, or a line that contains a space or `:`, logs one warning with the path and without the line text. A key file that is readable by the group or by others logs `chmod 600 <path>`.
+- `/nai status` and the startup `API keys:` line mark a file key as `****abcd (file)` and an environment key as `****abcd (env)`. A literal key stays `****abcd`.
+- Logs, `/nai status`, `/nai test`, and a failed `/nai reload` pass through the same mask. A resolved key from the environment or from a key file is not written into `config.yml` or any `.bak`. `FileBackup` copies POSIX attributes. A literal key that the admin wrote in `config.yml` is still present in `config.yml.bak`, because that file is a copy of the admin's config.
+- A key of 4 characters or fewer is masked as `****` (with the `(env)` or `(file)` tag when that is where it came from). It is redacted from a 401 body and from `/nai test` as a whole token, so it is not printed in clear. Startup and `/nai reload` log one warning that the key looks too short. The warning names the provider and the length. It does not print the key.
+- There is no encryption of keys in the config.
+
+### Model queue
+
+- `model-queue-strategy` is `failover` or `round-robin`. The default is `failover`: every new request starts at the first available row. `round-robin` starts each new request at the next available row and then walks the circle. Cooldown, `daily-request-limit`, and remaining budget at or below `model-queue-remaining-threshold` are skipped in both modes. An unknown value is `failover`, with one warning on startup and on `/nai reload`.
+- `usage.yml` accounting is unchanged. `/nai status` prints the strategy and the next row (`failover (next: groq/llama)`, or `none`).
+
+### Context providers
+
+- Other plugins can register a `NexusContextProvider` through Bukkit's services manager (or `NexusAIApi.registerContextProvider`, which is that same registry). `NexusAIApi.API_VERSION` is 2. `ServicePriority` does not set the order.
+- Prompts that list `context:` (a list of ids, or `all`) append a sanitized player-context block to `%ainexus_cached_%` and to `/nai talk` / `NexusAIApi.talk`. `/nai test <id>` from a player uses that player's context. `generate_`, the pool, prewarm, console `/nai test`, and literal placeholders do not call providers. Pool or prewarm entries that name such a prompt log that context is ignored there.
+- Providers run on `nexusai-context-N` (2 threads, queue 256), never on the main thread. A call that is still running when its timeout expires is interrupted, and the value is skipped. A provider that blocks should stop when the thread is interrupted. Five timeouts or exceptions in a row suspend it. `/nai status` lists providers and does not print their values.
+- A player `/nai test` of a prompt that lists `context:` reaches providers as `Purpose.PLACEHOLDER`. There is no separate test purpose.
+- The context block is part of the `cached_` cache key. Snapshots last `context.refresh-seconds`. Greeting cache keys are SHA-256 of the system text.
+- In `/nai talk`, the block is placed after a stored dialogue summary and before the format instruction.
+
+### Dialogue summaries
+
+- `dialogue.summary.enabled` defaults to false. While it is false, `/nai talk` and `dialogue-memory.yml` behave as in 1.0.2.
+- While it is true, lines that fall out of `memory-turns` / `memory-max-chars` are folded by one model call after `dialogue.summary.threshold-turns` player lines have dropped. The summary is wrapped as player input and placed in the character system prompt, after the sheet and before a context block. The recent window is unchanged. Each summary is its own request.
+- A refused summary (including `HTTP queue is full`) drops the waiting lines and keeps the previous summary. The model-queue row is not cooled down for that refusal. Waiting lines are not written to disk. A restart before the call trims them.
+- An unpinned summary follows `model-queue-strategy` on its own round-robin cursor. It does not move the cursor that player replies and placeholders use. Setting both `dialogue.summary.provider` and `dialogue.summary.model` pins that call and does not move either cursor.
+- With summaries on, `dialogue-memory.yml` stores `summary`, `summary-updated`, and `format: 2`. The first rewrite of a file that is not format 2 copies it to `dialogue-memory.yml.bak` once. Saves write a temporary file and move it into place. On a POSIX file system the temporary file takes the existing file's mode and, when the process may change it, its owner. A new file is created as mode `0600`. The same replace is used for `pool.yml`, `usage.yml`, config rewrites, and `prompts.yml` imports. A non-POSIX volume is unchanged.
+- `/nai status` shows `Dialogue summaries: off` or `Dialogue summaries: on (N ok, M failed today)`. The counters reset at local midnight and on `/nai reload`.
+
+### HTTP pool and markup-only replies
+
+- Placeholder and queue calls no longer block the four `nexusai-http-*` threads on `HttpClient.send`. The worker queue holds at most 64 tasks. `http.max-in-flight` (default 64) caps calls in flight. `http.queue-size` (default 64) caps how many more may wait. Both must be greater than 0. `0` or a negative value is replaced with 64 before the gate is built, on startup and on `/nai reload`, so the running cap matches the warning. Each bad key logs its own line, naming the key, the rejected value, and 64. Anything beyond the cap fails immediately with `HTTP queue is full` (`LOCAL_LIMIT`) and is not queued or dropped quietly. Placeholders already returned fallback. One warning is written per 30 seconds, including when the four-thread worker queue is the thing that is full. One connection error still pauses that provider for 60 seconds, so a weak endpoint should lower `http.max-in-flight`. `/nai reload` applies a new cap and keeps the worker threads. `NexusAI.getHttpPool().snapshot()` reports queue depth, in-flight calls, waiters, and rejected submissions.
+- A base URL that already has a query string keeps that query after `/chat/completions`. `http://host/v1?key=X` is requested as `http://host/v1/chat/completions?key=X`. A URL that already ends in `/chat/completions` is not given a second copy of that path. A trailing slash is ignored. The query string and fragment stay where they were.
+- The first time the plugin creates `config.yml` or `prompts.yml` from the jar, the new file is mode `0600` on a POSIX file system. `config.yml` may later contain an API key. An existing file keeps its mode. `/nai prompts import` creates a missing `prompts.yml` as `0600` as well. A non-POSIX volume is unchanged.
+- A markup-only reply still holds that prompt for 30 seconds. A successful reply on the same admission key no longer clears the hold. The hold ends when the timer expires or when `/nai reload` builds a new request gate. The empty-reply ladder and a generic backoff still clear on success.
+- A pool refill for a prompt on that hold sends no request while the hold is active, and at most one request in the 30 second window.
+
+### Talk, knowledge, and logs
+
+- `/nai talk` keeps one spelling of the character id for the whole session. The command that opened the session supplies it. Later replies do not switch it to lowercase.
+- While a provider pause is in effect (HTTP 429, quota, authentication failure, or a connection error), player replies are paused together with the provider. The turn is not sent, and `fallback-model` is not used for that reply. The player sees `talk.busy` (`The character is busy. Try again later.`). The provider error body is written to the server log with secrets masked, and is not shown in chat.
+- A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed. The line then shows only the length.
+- A knowledge file that is not valid UTF-8 logs one warning naming the file and asking for a UTF-8 re-save. The stack trace is logged only at FINE. The file is skipped. A prompt that lists that file does not also log `unknown knowledge file`.
+
+### Documentation
+
+- `docs/quickstart.md`, `docs/faq.md`, and `docs/migration-1.1.0.md`.
+- `docs/LOADTEST.md` — load scenarios, pass thresholds, and how to run them.
+- `examples/` holds configs and prompts the loader accepts, plus fragments for TAB, AnimatedScoreboard, and DeluxeMenus.
+
 ## 1.0.2 (2026-10-03)
 
 One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` stays on schema version 2. No new config keys.
@@ -15,10 +74,10 @@ One jar, `NexusAI-1.0.2.jar`; replace `NexusAI-1.0.1.jar` with it. `config.yml` 
 
 - A reply that is empty only after hex, MiniMessage, or an interactive JSON component is removed is not a provider failure. It is not cached and it is not stored in the pool. That prompt then waits 30 seconds before another placeholder or pool request. The wait does not climb and it is not the 5 / 15 / 30 / 60 minute empty-reply pause. During the wait, placeholders and the pool serve the pool or the prompt fallback, and no warning is written. `/nai test` reports `The model reply was empty after removing markup.`, is not held, and does not start the wait. A reply that is empty after legacy colour codes (`&c`, `§l`) is still the empty-reply pause. Local rate limits still apply.
 - A click, hover, or insertion nested inside JSON that is not itself a chat component is removed with the whole JSON value. The visible `text` stays (`{"note":{"text":"x","clickEvent":...}}` becomes `x`). `{"text":"Hi"}`, `{^_^}`, and ordinary brace text stay as written.
-- A length-trim INFO line names the prompt only when the id is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. A literal placeholder is not printed, including a short one such as `short_LT:long`.
+- A length-trim INFO line prints a prompt name only when that id is loaded from `prompts.yml`, or when it is `nai talk`. A literal that merely matches `[a-z0-9_-]{1,64}` is not printed, including a short one such as `short_LT:long` and an id-shaped literal that is not in `prompts.yml`. The line then shows only the length.
 - `/nai talk` still matches a character id without regard to case. The chat line shows the id as it was typed, so a JSON id keeps its capitals. The console unknown-character line does the same.
 - The first save that removes markup from answers already in `pool.yml` copies the file to `pool.yml.bak` (or `pool.yml.bak.<timestamp>` when that backup already exists), keeps the file mode, and replaces the file with an atomic write. The backup path is logged. A later save of clean answers does not write another backup.
-- A length-trim INFO line is `reply for prompt <id> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt` only when the id, after `&` and `§` codes are removed, is a `prompts.yml` id (`[a-z0-9_-]+`, at most 64 characters) or `nai talk`. For any other id, such as a literal placeholder, the text is not printed and the line is `reply for prompt (length <n>) ...`. `<n>` is the length of the id, not of the reply. A blank id prints `(blank)`. A literal that has the same form as a `prompts.yml` id is printed like one. The notice key is still that id (named prompt, pool entry, or talk character; `nai talk` when the character id is blank). The map is an access-order LRU of 256 ids. `/nai reload` clears it.
+- A length-trim INFO line is `reply for prompt <name> (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt` only when `<name>`, after `&` and `§` codes are removed, is an id loaded from `prompts.yml` or `nai talk`. A string that only matches `[a-z0-9_-]{1,64}` is not a name. For any other id, including a literal placeholder and an id-shaped literal that is not loaded, the text is not printed and the line is `reply for prompt (length <n>) hit max-tokens and was trimmed; increase max-tokens for this prompt`. `<n>` is the length of the id, not of the reply. A blank id prints `(blank)`. The notice key is still that id (named prompt, pool entry, or talk character; `nai talk` when the character id is blank). The map is an access-order LRU of 256 ids. `/nai reload` clears it and reloads the set of names from `prompts.yml`.
 - A `locale:` that is not bundled and has no file logs two warnings: the path, that English is the fallback, and the bundled locale codes. It does not say the file is missing from the jar. A locale file that is not valid YAML logs one warning with the path, the parser reason (line and column when the parser reports them), and the fallback (the bundled locale, or English). The stack trace is logged only at FINE.
 
 ### Documentation

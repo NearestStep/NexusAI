@@ -37,7 +37,8 @@ class ProviderParsingTest {
             assertEquals(List.of("sk-live-aaaa", "sk-live-bbbb"), config.provider("openai").apiKeys());
             assertEquals("gemini", config.provider("gemini").type());
             assertEquals("https://generativelanguage.googleapis.com/v1beta/openai", config.provider("gemini").url());
-            assertEquals("****aaaa, ****bbbb", config.maskedApiKeys());
+            assertEquals("****aaaa, ****bbbb (env)", config.maskedApiKeys());
+            assertEquals(KeySource.ENV, config.provider("openai").keySource());
             assertFalse(config.maskedApiKeys().contains("sk-live"));
         } finally {
             PluginConfig.environment = previous;
@@ -91,11 +92,70 @@ class ProviderParsingTest {
     }
 
     @Test
-    void redactReplacesSecretsLongerThanFourCharacters() {
+    void redactReplacesSecretsIncludingThoseTooShortForASuffix() {
         assertEquals("token ****9999", SecretMask.redact("token sk-secret-9999", List.of("sk-secret-9999")));
-        assertEquals("ab stays", SecretMask.redact("ab stays", List.of("ab")));
+        assertEquals("**** stays", SecretMask.redact("ab stays", List.of("ab")));
+        assertEquals("cabinet stays", SecretMask.redact("cabinet stays", List.of("ab")));
+        assertEquals("Bearer ****", SecretMask.redact("Bearer c4ry", List.of("c4ry")));
+        assertEquals("xc4ry stays", SecretMask.redact("xc4ry stays", List.of("c4ry")));
         assertEquals("****", SecretMask.mask("ab"));
         assertEquals("****", SecretMask.mask("key4"));
+        assertEquals("****bcde", SecretMask.mask("abcde"));
+    }
+
+    @Test
+    void aShortKeyIsMaskedWarnedAndRedactedFromA401Body() {
+        YamlConfiguration yaml = base();
+        yaml.set("providers.openai.type", "openai-compatible");
+        yaml.set("providers.openai.url", "https://api.openai.com/v1");
+        yaml.set("providers.openai.api-key", "c4ry");
+        PluginConfig config = new PluginConfig(yaml);
+        assertEquals(List.of("c4ry"), config.configuredSecrets());
+        assertEquals("****", config.maskedApiKeys());
+        assertFalse(config.maskedApiKeys().contains("c4ry"));
+        List<String> warnings = config.shortKeyWarnings();
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.getFirst().contains("providers.openai"));
+        assertTrue(warnings.getFirst().contains("4 characters"));
+        assertFalse(warnings.getFirst().contains("c4ry"));
+        String body = SecretMask.redact("HTTP 401 unauthorized. The API key was rejected: c4ry", config.configuredSecrets());
+        assertFalse(body.contains("c4ry"), body);
+        assertTrue(body.contains("****"), body);
+    }
+
+    @Test
+    void httpLimitsDefaultToSixtyFourAndRejectNonPositive() {
+        YamlConfiguration missing = base();
+        PluginConfig defaults = new PluginConfig(missing);
+        assertEquals(64, defaults.httpMaxInFlight());
+        assertEquals(64, defaults.httpQueueSize());
+        assertTrue(defaults.httpLimitWarnings().isEmpty());
+
+        YamlConfiguration yaml = base();
+        yaml.set("http.max-in-flight", 16);
+        yaml.set("http.queue-size", 8);
+        PluginConfig configured = new PluginConfig(yaml);
+        assertEquals(16, configured.httpMaxInFlight());
+        assertEquals(8, configured.httpQueueSize());
+        assertTrue(configured.httpLimitWarnings().isEmpty());
+
+        YamlConfiguration bad = base();
+        bad.set("http.max-in-flight", 0);
+        bad.set("http.queue-size", -1);
+        PluginConfig rejected = new PluginConfig(bad);
+        assertEquals(64, rejected.httpMaxInFlight());
+        assertEquals(64, rejected.httpQueueSize());
+        assertEquals(2, rejected.httpLimitWarnings().size());
+        String inFlight = rejected.httpLimitWarnings().get(0);
+        String queue = rejected.httpLimitWarnings().get(1);
+        assertTrue(inFlight.contains("http.max-in-flight"), inFlight);
+        assertTrue(inFlight.contains("is 0"), inFlight);
+        assertTrue(inFlight.contains("Using 64"), inFlight);
+        assertFalse(inFlight.contains("http.queue-size"), inFlight);
+        assertTrue(queue.contains("http.queue-size"), queue);
+        assertTrue(queue.contains("is -1"), queue);
+        assertTrue(queue.contains("Using 64"), queue);
+        assertFalse(queue.contains("http.max-in-flight"), queue);
     }
 
     private static YamlConfiguration base() {

@@ -53,8 +53,12 @@ api:
 
 # Endpoints and keys. type is openai-compatible or gemini.
 # api-key is one string or a list (round-robin). A key that returns 401 or 429 is skipped for a while.
-# ${ENV_VAR} is replaced in url and api-key. Empty string "" or empty list [].
-# Keys are masked to the last 4 characters in status and logs.
+# ${ENV_VAR} and ${ENV:VAR} are replaced in url and api-key. An unset variable becomes empty.
+# Its name is logged. The value is not. Empty string "" or empty list [].
+# Optional api-key-file reads one raw key per line (UTF-8). A relative path is under this folder.
+#   api-key-file: secrets/groq.key
+# A non-empty api-key-file replaces api-key for that provider. Do not put a key in url.
+# Keys are masked to the last 4 characters in status and logs. A file source is marked (file).
 providers:
   openai:
     type: openai-compatible
@@ -88,6 +92,12 @@ providers:
     url: "https://openrouter.ai/api/v1"
     api-key: ""
 
+# failover (default): every request starts at the first available row. The next row is used only
+# after a failure, a cooldown, a daily cap, or remaining budget at or below the threshold.
+# round-robin: each new request starts at the next available row, then walks the circle the same way.
+# Rows on cooldown, at daily-request-limit, or at or below the threshold are skipped.
+# Unknown values are treated as failover and logged once per startup and /nai reload.
+model-queue-strategy: failover
 # Switch to the next entry when remaining header budget hits the threshold, the daily cap is reached,
 # the provider returns 429, or the call errors or times out. A prompt's model: override still wins.
 # 0 threshold means "remaining is zero".
@@ -223,6 +233,17 @@ limits:
   # How often the same error kind is written to the server log.
   error-log-cooldown-seconds: 30
 
+# Outstanding HTTP calls. The four nexusai-http threads stay.
+# max-in-flight is how many calls may be in progress. queue-size is how many more may wait
+# for a slot. Anything beyond that fails at once with "HTTP queue is full".
+# One connection error pauses that provider for limits.provider-pause-seconds (60).
+# A weak endpoint (a local proxy, Ollama, a free-tier host) should use a lower max-in-flight.
+# Both values must be greater than 0. 0 or a negative value is replaced with 64.
+# Each bad key logs its own warning (the key, the rejected value, and 64).
+http:
+  max-in-flight: 64
+  queue-size: 64
+
 # Unique-answer pools for %ainexus_generate_<prompt>%
 pool:
   enabled: true
@@ -324,6 +345,20 @@ dialogue:
   # Cache a generated greeting. A greeting written under dialogue.greeting is not a model call.
   # The cache time is cache.ttl. Later lines in the same conversation are never cached.
   cache-greeting: true
+  # Fold lines that fall out of memory-turns into one short summary. false keeps the 1.0.2 trim.
+  # Each summary is its own model request. There is no per-character override.
+  # Lines waiting to be folded are not written to disk. A restart before the call trims them.
+  summary:
+    enabled: false
+    # Summarise once this many player turns have dropped out of memory-turns / memory-max-chars.
+    threshold-turns: 2
+    # Stored summary cap.
+    max-chars: 400
+    # Sent for the summary call only. 0 or a negative value omits max_tokens.
+    max-tokens: 200
+    # Both empty = model-queue. Both set = pin this provider/model (same rule as moderation).
+    provider: ""
+    model: ""
 
 # Character actions. The model may pick a name through OpenAI tools. It cannot change the command.
 # Placeholders never run these. A provider that rejects tools gets one retry with actions off.
@@ -333,6 +368,19 @@ actions:
   log: true
   # How many actions from one model reply may run. The rest are refused and the character is told.
   max-per-reply: 1
+
+# Context from other plugins (balance, rank, quest) for prompts that list context:.
+# Providers never run on the main thread. A call that is still running at its timeout is
+# interrupted, and the value is skipped. Providers should stop when the thread is interrupted.
+context:
+  enabled: true
+  max-provider-timeout-millis: 200   # 10..1000; provider.timeout() is clamped to this
+  total-timeout-millis: 300          # 10..2000
+  max-chars-per-provider: 200        # 20..1000
+  max-chars: 600                     # 50..4000, whole block before wrapping
+  refresh-seconds: 30                # 1..3600, snapshot age for cached_ placeholders
+  suspend-after-timeouts: 5          # 1..100
+  suspend-seconds: 60                # 1..3600
 
 # WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:

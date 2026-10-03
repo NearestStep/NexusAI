@@ -271,6 +271,44 @@ class PromptCatalogTest {
         assertThrows(NullPointerException.class, () -> prompt.render(null));
     }
 
+    @Test
+    void contextIsAListOrAllAndUnknownIdsAreWarned() {
+        PromptCatalog.Parsed parsed = PromptCatalog.parse("""
+                shop_tip:
+                  prompt: "Give the player one short shopping tip."
+                  context: [economy, rank]
+                quest_tip:
+                  prompt: "One quest hint."
+                  context: all
+                plain:
+                  prompt: "No context."
+                broken:
+                  prompt: "bad"
+                  context: "Not An Id"
+                """);
+        assertTrue(parsed.valid(), parsed.error());
+        assertTrue(parsed.warnings().isEmpty() || parsed.warnings().toString().contains("Not An Id"), parsed.warnings().toString());
+        assertTrue(parsed.warnings().toString().contains("Not An Id"));
+        assertFalse(parsed.warnings().toString().contains("unknown setting"));
+        NamedPrompt shop = parsed.catalog().find("shop_tip").orElseThrow();
+        assertEquals(List.of("economy", "rank"), shop.context().ids());
+        assertFalse(shop.context().includesAll());
+        assertTrue(parsed.catalog().find("quest_tip").orElseThrow().context().includesAll());
+        assertFalse(parsed.catalog().find("plain").orElseThrow().context().active());
+
+        List<String> unknown = parsed.catalog().unknownContextProviders(List.of("economy"));
+        assertEquals(1, unknown.size());
+        assertTrue(unknown.getFirst().contains("rank"));
+        assertTrue(parsed.catalog().unknownContextProviders(List.of("economy", "rank")).isEmpty());
+
+        List<String> pool = parsed.catalog().sharedContextWarnings("pool.entries", List.of("shop_tip", "plain"));
+        assertEquals(1, pool.size());
+        assertTrue(pool.getFirst().contains("context is ignored for pool/prewarm"));
+        assertTrue(parsed.catalog().sharedContextWarnings("prewarm.prompts", List.of("quest_tip"))
+                .getFirst().contains("context is ignored for pool/prewarm"));
+        assertTrue(parsed.catalog().sharedContextWarnings("pool.entries", List.of("plain")).isEmpty());
+    }
+
     private static PluginConfig config() {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("api.provider", "openai");

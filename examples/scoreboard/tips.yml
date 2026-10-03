@@ -1,0 +1,7 @@
+# AnimatedScoreboard compact board. First entry is the title.
+# Save as plugins/AnimatedScoreboard/scoreboards/tips.yml
+# Requires the survival_tips prompt from examples/placeholders.
+display:
+  - "&bServer"
+  - "&7Tip"
+  - "%ainexus_cached_survival_tips%"

@@ -1,0 +1,17 @@
+# Copy to plugins/NexusAI/prompts.yml.
+config-version: 1
+
+survival_tips:
+  prompt: |
+    Give one short Minecraft survival tip.
+    One sentence, no markdown.
+  ttl: 600
+  fallback: "..."
+  format: simple
+
+join_welcome:
+  prompt: |
+    Write one short welcome sentence for a Minecraft player.
+    Leave the token {player_name} in the sentence. No markdown.
+  format: chat
+  fallback: "Welcome."

@@ -23,4 +23,17 @@ class DialogueServiceTest {
         assertEquals("harbor", DialogueService.withDisplayId(
                 TalkResult.of(TalkCode.REPLY, "harbor"), "harbor").characterId());
     }
+
+    @Test
+    void laterSessionLinesKeepTheOpeningSpelling() {
+        assertEquals("Harbor", DialogueService.sessionLabel(null, "Harbor"));
+        assertEquals("Harbor", DialogueService.sessionLabel("Harbor", "harbor"));
+        assertEquals("Smith", DialogueService.sessionLabel("Harbor", "Smith"));
+        String opening = "Harbor";
+        String later = DialogueService.sessionLabel(opening, "harbor");
+        TalkResult reply = DialogueService.withDisplayId(TalkResult.of(TalkCode.REPLY, "harbor"), later);
+        assertEquals("Harbor", reply.characterId());
+        TalkResult started = DialogueService.withDisplayId(TalkResult.of(TalkCode.STARTED, "harbor"), opening);
+        assertEquals(started.characterId(), reply.characterId());
+    }
 }

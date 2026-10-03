@@ -1,7 +1,6 @@
 package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
-import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -12,7 +11,6 @@ import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +18,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -167,68 +166,132 @@ public final class PoolService {
             return;
         }
 
-        AtomicInteger duplicates = new AtomicInteger();
-        AtomicBoolean storedUnique = new AtomicBoolean();
-        List<CompletableFuture<Void>> jobs = new ArrayList<>(needed);
-        String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
-        GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
-        for (int i = 0; i < needed; i++) {
-            jobs.add(httpClient.generateFreshAsync(httpPrompt, poolKey, overrides).handle((answer, error) -> {
-                try {
-                    if (error != null) {
-                        logger.log(Level.FINE, "Pool replenish failed for prompt", error);
-                    } else if (answer != null && !answer.isBlank()) {
-                        if (pool.add(memory, answer, isPersonalizedTemplate(answer, entry))) {
-                            storedUnique.set(true);
-                            duplicateStrikes.remove(memory);
-                            duplicateLimitLogged.remove(memory);
-                            store.markDirty(pool, limits());
-                        } else {
-                            duplicates.incrementAndGet();
-                        }
-                    }
-                } catch (Throwable thrown) {
-                    logger.log(Level.WARNING, "Pool replenish handler failed", thrown);
-                }
-                return null;
-            }));
-        }
+        fillOne(
+                configuredPrompt,
+                poolKey,
+                memory,
+                entry,
+                needed,
+                new AtomicInteger(),
+                new AtomicBoolean());
+    }
 
-        CompletionSupport.onComplete(
-                CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new)),
-                logger,
-                "Pool replenish completion failed",
-                (ignored, error) -> {
-                    if (error != null) {
-                        logger.log(Level.WARNING, "Pool replenish completion failed", error);
-                    }
-                    flag.set(false);
-                    if (!running || pool.size(memory) >= entry.size()) {
-                        return;
-                    }
-                    if (httpClient.isAdmissionBlocked(poolKey)) {
-                        scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
-                        return;
-                    }
-                    int repeated = duplicates.get();
-                    if (repeated <= 0) {
-                        return;
-                    }
-                    if (storedUnique.get()) {
-                        scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
-                        return;
-                    }
-                    int strikeCount = duplicateStrikes.computeIfAbsent(memory, key -> new AtomicInteger()).addAndGet(repeated);
-                    int limit = Math.max(8, entry.size() * 4);
-                    if (strikeCount >= limit) {
-                        if (duplicateLimitLogged.putIfAbsent(memory, Boolean.TRUE) == null) {
-                            logger.warning("Stopped refilling pool for \"" + poolKey + "\" after " + strikeCount
-                                    + " duplicate answers. A different answer or /nai reload will try again.");
-                        }
-                        return;
-                    }
-                    scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+    /**
+     * One outstanding refill per prompt. A markup-only hold stops the rest of the wave, so a
+     * prompt on that hold sends at most one request per 30s window (zero while the hold is active).
+     */
+    private void fillOne(
+            String configuredPrompt,
+            String poolKey,
+            String memory,
+            PoolEntry entry,
+            int remaining,
+            AtomicInteger duplicates,
+            AtomicBoolean storedUnique
+    ) {
+        while (true) {
+            AtomicBoolean flag = replenishing.computeIfAbsent(memory, ignored -> new AtomicBoolean(false));
+            if (!running) {
+                flag.set(false);
+                return;
+            }
+            if (remaining <= 0 || pool.size(memory) >= entry.size()) {
+                finishWave(configuredPrompt, poolKey, memory, entry, duplicates, storedUnique);
+                return;
+            }
+            if (httpClient.isAdmissionBlocked(poolKey)) {
+                flag.set(false);
+                scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
+                return;
+            }
+            String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
+            GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
+            CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides);
+            if (!job.isDone()) {
+                int left = remaining - 1;
+                job.whenComplete((answer, error) -> {
+                    acceptFill(memory, entry, duplicates, storedUnique, answer, error);
+                    fillOne(configuredPrompt, poolKey, memory, entry, left, duplicates, storedUnique);
                 });
+                return;
+            }
+            if (job.isCompletedExceptionally()) {
+                Throwable error;
+                try {
+                    job.join();
+                    error = null;
+                } catch (CompletionException e) {
+                    error = e;
+                }
+                acceptFill(memory, entry, duplicates, storedUnique, null, error);
+            } else {
+                acceptFill(memory, entry, duplicates, storedUnique, job.join(), null);
+            }
+            remaining--;
+        }
+    }
+
+    private void acceptFill(
+            String memory,
+            PoolEntry entry,
+            AtomicInteger duplicates,
+            AtomicBoolean storedUnique,
+            String answer,
+            Throwable error
+    ) {
+        try {
+            if (error != null) {
+                logger.log(Level.FINE, "Pool replenish failed for prompt", error);
+            } else if (answer != null && !answer.isBlank()) {
+                if (pool.add(memory, answer, isPersonalizedTemplate(answer, entry))) {
+                    storedUnique.set(true);
+                    duplicateStrikes.remove(memory);
+                    duplicateLimitLogged.remove(memory);
+                    store.markDirty(pool, limits());
+                } else {
+                    duplicates.incrementAndGet();
+                }
+            }
+        } catch (Throwable thrown) {
+            logger.log(Level.WARNING, "Pool replenish handler failed", thrown);
+        }
+    }
+
+    private void finishWave(
+            String configuredPrompt,
+            String poolKey,
+            String memory,
+            PoolEntry entry,
+            AtomicInteger duplicates,
+            AtomicBoolean storedUnique
+    ) {
+        AtomicBoolean flag = replenishing.computeIfAbsent(memory, ignored -> new AtomicBoolean(false));
+        flag.set(false);
+        if (!running || pool.size(memory) >= entry.size()) {
+            return;
+        }
+        if (httpClient.isAdmissionBlocked(poolKey)) {
+            scheduleRetry(configuredPrompt, poolKey, httpClient.admissionDelayMillis(poolKey) + 25L);
+            return;
+        }
+        int repeated = duplicates.get();
+        if (repeated <= 0) {
+            return;
+        }
+        if (storedUnique.get()) {
+            scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
+            return;
+        }
+        int strikeCount = duplicateStrikes.computeIfAbsent(memory, key -> new AtomicInteger()).addAndGet(repeated);
+        int limit = Math.max(8, entry.size() * 4);
+        if (strikeCount >= limit) {
+            if (duplicateLimitLogged.putIfAbsent(memory, Boolean.TRUE) == null) {
+                logger.warning("Stopped refilling pool for \"" + poolKey + "\" after " + strikeCount
+                        + " duplicate answers. A different answer or /nai reload will try again.");
+            }
+            return;
+        }
+        scheduleRetry(configuredPrompt, poolKey, Math.max(50L, config.getErrorBackoffInitialSeconds() * 1000L));
     }
 
     /**

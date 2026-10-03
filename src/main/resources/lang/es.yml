@@ -35,13 +35,17 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Último error: &f{last_error}"
   status-provider-pause: "&7Pausa del proveedor: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderación: &f{state} &8({checks} comprobaciones, {flags} avisos hoy)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportar prompts desde la carpeta import"
   prompts-import-ok: "{prefix}&aImportado &f{file}&a. Añadidos: &f{added}&a. Omitidos: &f{skipped}&a. Conflictos: &f{conflicting}&a."
   prompts-import-fail: "{prefix}&cError al importar: &f{error}"
   status-fallback-model: "&7Modelo de respaldo: &f{entry}"
   status-knowledge: "&7Archivos de conocimiento: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ solicitado pero no está en el pool: &f{prompts}"
 
 common:

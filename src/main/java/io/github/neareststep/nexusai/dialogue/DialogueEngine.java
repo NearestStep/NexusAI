@@ -1,14 +1,20 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import java.util.logging.Logger;
 
 /**
  * Session, memory, limit, and action policy for {@code /nai talk}.
@@ -25,6 +31,10 @@ public final class DialogueEngine {
     private final ActionSink sink;
     private final ActionLog actionLog;
     private final ZoneId zone;
+    private final DialogueSummary summary;
+    private final Logger failureLog;
+    private final Supplier<List<String>> secrets;
+    private final AtomicLong failureLoggedAt = new AtomicLong();
 
     public DialogueEngine(
             MemoryStore memory,
@@ -37,6 +47,42 @@ public final class DialogueEngine {
             ActionLog actionLog,
             ZoneId zone
     ) {
+        this(memory, sessions, actionGate, budget, greetings, model, sink, actionLog, zone, null);
+    }
+
+    public DialogueEngine(
+            MemoryStore memory,
+            SessionBook sessions,
+            ActionGate actionGate,
+            DialogueBudget budget,
+            GreetingCache greetings,
+            DialogueModel model,
+            ActionSink sink,
+            ActionLog actionLog,
+            ZoneId zone,
+            DialogueSummary summary
+    ) {
+        this(memory, sessions, actionGate, budget, greetings, model, sink, actionLog, zone, summary, null, null);
+    }
+
+    /**
+     * @param failureLog where a provider error is written; the player never sees that text
+     * @param secrets configured keys, masked in {@code failureLog}
+     */
+    public DialogueEngine(
+            MemoryStore memory,
+            SessionBook sessions,
+            ActionGate actionGate,
+            DialogueBudget budget,
+            GreetingCache greetings,
+            DialogueModel model,
+            ActionSink sink,
+            ActionLog actionLog,
+            ZoneId zone,
+            DialogueSummary summary,
+            Logger failureLog,
+            Supplier<List<String>> secrets
+    ) {
         this.memory = memory;
         this.sessions = sessions;
         this.actionGate = actionGate;
@@ -46,6 +92,9 @@ public final class DialogueEngine {
         this.sink = sink;
         this.actionLog = actionLog == null ? ActionLog.noop() : actionLog;
         this.zone = zone == null ? ZoneId.systemDefault() : zone;
+        this.summary = summary;
+        this.failureLog = failureLog;
+        this.secrets = secrets;
     }
 
     public SessionBook sessions() {
@@ -104,6 +153,7 @@ public final class DialogueEngine {
         );
         String greeting = greeting(request);
         remember(request, "assistant", greeting);
+        foldIfNeeded(request);
         return TalkResult.text(TalkCode.STARTED, request.characterId(), greeting);
     }
 
@@ -154,10 +204,11 @@ public final class DialogueEngine {
         messages.add(new DialogueProtocol.MemoryLine("user", wrapped));
         trimWindow(messages, request.profile().memoryTurns(request.settings().memoryTurns()), request.settings().memoryMaxChars());
         List<CharacterAction> tools = offeredTools(request);
+        String system = systemFor(request);
         ModelReply first;
         try {
             first = model.complete(new ModelCall(
-                    request.system(),
+                    system,
                     messages,
                     tools,
                     noticed(request),
@@ -177,7 +228,7 @@ public final class DialogueEngine {
             }
             try {
                 ModelReply second = model.complete(new ModelCall(
-                        request.system() + "\n\n" + note,
+                        system + "\n\n" + note,
                         follow,
                         List.of(),
                         noticed(request),
@@ -195,6 +246,7 @@ public final class DialogueEngine {
         }
         remember(request, "user", sanitized);
         remember(request, "assistant", spoken);
+        foldIfNeeded(request);
         if (request.sessionChat()) {
             sessions.addReply(request.playerId());
             SessionBook.Session updated = sessions.get(request.playerId()).orElse(null);
@@ -207,17 +259,34 @@ public final class DialogueEngine {
     }
 
     private TalkResult failure(TalkRequest request, RuntimeException error) {
-        AiRequestException typed = io.github.neareststep.nexusai.ai.AiErrors.find(error);
-        if (typed != null && typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.LOCAL_LIMIT) {
-            return TalkResult.of(TalkCode.BUSY, request.characterId());
-        }
-        if (typed != null && (typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.REJECTED
-                || typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.EMPTY_REPLY
-                || typed.kind() == io.github.neareststep.nexusai.ai.AiErrorKind.MARKUP_ONLY)) {
+        AiRequestException typed = AiErrors.find(error);
+        if (typed != null && (typed.kind() == AiErrorKind.REJECTED
+                || typed.kind() == AiErrorKind.EMPTY_REPLY
+                || typed.kind() == AiErrorKind.MARKUP_ONLY)) {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
-        return TalkResult.failed(request.characterId(), detail);
+        if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
+            logProviderFailure(detail);
+        }
+        return TalkResult.of(TalkCode.BUSY, request.characterId());
+    }
+
+    /**
+     * The player sees {@code talk.busy}. The provider body stays on the console, masked, at most once per 30 seconds.
+     * A global pause does not send the turn and does not call {@code fallback-model}.
+     */
+    private void logProviderFailure(String detail) {
+        if (failureLog == null || detail == null || detail.isBlank()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = failureLoggedAt.get();
+        if (now - previous < 30_000L || !failureLoggedAt.compareAndSet(previous, now)) {
+            return;
+        }
+        List<String> known = secrets == null || secrets.get() == null ? List.of() : secrets.get();
+        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redact(detail, known));
     }
 
     /**
@@ -235,7 +304,7 @@ public final class DialogueEngine {
         if (request.profile().greeting() != null) {
             return request.profile().greeting();
         }
-        String cacheKey = GreetingCache.key(request.characterId(), request.system());
+        String cacheKey = GreetingCache.key(request.characterId(), systemFor(request));
         if (request.settings().cacheGreeting()) {
             String cached = greetings.get(cacheKey, request.nowMillis());
             if (cached != null) {
@@ -245,7 +314,7 @@ public final class DialogueEngine {
         ModelReply reply;
         try {
             reply = model.complete(new ModelCall(
-                    request.system(),
+                    systemFor(request),
                     List.of(new DialogueProtocol.MemoryLine("user", "Greet the player briefly in character.")),
                     List.of(),
                     noticed(request),
@@ -366,7 +435,8 @@ public final class DialogueEngine {
                 request.nowMillis(),
                 request.profile().memoryTurns(settings.memoryTurns()),
                 settings.memoryMaxChars(),
-                settings.memoryExpiryMillis()
+                settings.memoryExpiryMillis(),
+                settings.summaryEnabled()
         );
         List<DialogueProtocol.MemoryLine> messages = new ArrayList<>();
         for (TurnMemory.Line line : stored) {
@@ -389,8 +459,58 @@ public final class DialogueEngine {
                 request.nowMillis(),
                 request.profile().memoryTurns(settings.memoryTurns()),
                 settings.memoryMaxChars(),
+                settings.memoryExpiryMillis(),
+                settings.summaryEnabled()
+        );
+    }
+
+    /**
+     * When summaries are off, the system string is returned unchanged.
+     * A summary already placed by {@code characterSystem} is not added twice.
+     */
+    private String systemFor(TalkRequest request) {
+        String system = request.system();
+        if (!request.settings().summaryEnabled()) {
+            return system;
+        }
+        DialogueSettings settings = request.settings();
+        String summary = memory.summary(
+                request.playerId(),
+                request.characterId(),
+                request.nowMillis(),
                 settings.memoryExpiryMillis()
         );
+        String block = DialogueSummary.block(summary);
+        if (block.isEmpty() || (system != null && system.contains(DialogueSummary.HEADER))) {
+            return system;
+        }
+        if (system == null || system.isBlank()) {
+            return block;
+        }
+        return system + "\n\n" + block;
+    }
+
+    private void foldIfNeeded(TalkRequest request) {
+        if (summary == null || !request.settings().summaryEnabled()) {
+            return;
+        }
+        TurnMemory.Fold fold = memory.claimSummary(
+                request.playerId(),
+                request.characterId(),
+                request.settings().summaryThresholdTurns()
+        );
+        if (fold == null) {
+            return;
+        }
+        summary.schedule(new DialogueSummary.SummaryJob(
+                request.playerId(),
+                request.characterId(),
+                fold.previousSummary(),
+                fold.lines(),
+                fold.epoch(),
+                request.settings(),
+                request.nowMillis()
+        ));
     }
 
     public interface DialogueModel {
@@ -401,6 +521,11 @@ public final class DialogueEngine {
         String run(UUID playerId, CharacterAction action, String command);
     }
 
+    public enum CallKind {
+        DIALOGUE,
+        SUMMARY
+    }
+
     public record ModelCall(
             String system,
             List<DialogueProtocol.MemoryLine> messages,
@@ -408,8 +533,32 @@ public final class DialogueEngine {
             GenerationOverrides overrides,
             String formatId,
             UUID playerId,
-            String wrappedUser
+            String wrappedUser,
+            CallKind kind,
+            String pinProvider,
+            String pinModel
     ) {
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "");
+        }
+
+        public ModelCall {
+            kind = kind == null ? CallKind.DIALOGUE : kind;
+            pinProvider = pinProvider == null ? "" : pinProvider;
+            pinModel = pinModel == null ? "" : pinModel;
+        }
+
+        public boolean summaryPinned() {
+            return kind == CallKind.SUMMARY && !pinProvider.isBlank() && !pinModel.isBlank();
+        }
     }
 
     public record ModelReply(String text, List<String> toolNames, boolean toolsUnsupported) {
@@ -454,6 +603,13 @@ public final class DialogueEngine {
             characterId = characterId == null ? "" : characterId;
             fallback = fallback == null ? "..." : fallback;
             system = system == null ? "" : system;
+        }
+
+        public TalkRequest withSystem(String system) {
+            return new TalkRequest(
+                    playerId, playerName, characterId, message, sessionChat, end, characterMissing,
+                    system, fallback, profile, actions, settings, overrides, formatId,
+                    world, x, y, z, permissions, nowMillis);
         }
     }
 }

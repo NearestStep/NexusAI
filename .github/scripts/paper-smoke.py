@@ -71,6 +71,7 @@ def find_plugin(directory: Path) -> Path:
     jars = [
         path for path in directory.glob("NexusAI-*.jar")
         if "plain" not in path.name and "sources" not in path.name and "javadoc" not in path.name
+        and "LoadDriver" not in path.name
     ]
     if len(jars) != 1:
         raise RuntimeError(f"expected one NexusAI jar in {directory}, found {[p.name for p in jars]}")
@@ -125,34 +126,106 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def start_mock(port: int) -> None:
+class MockHandle:
+    """Request counter for the load harness. Smoke ignores the return value."""
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._lock = threading.Lock()
+        self.server: ThreadingHTTPServer | None = None
+
+    def add(self) -> int:
+        with self._lock:
+            self._count += 1
+            return self._count
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server = None
+
+
+def start_mock(
+    port: int,
+    latency_ms: int = 0,
+    requests_path: Path | None = None,
+    fail_every: int = 0,
+) -> MockHandle:
+    """OpenAI-compatible mock. Defaults match the smoke boot: instant HTTP 200, body discarded.
+
+    Load runs pass ``latency_ms``, ``requests_path`` (JSONL of request bodies), and
+    ``fail_every`` (HTTP 429 on every Nth request).
+    """
+    handle = MockHandle()
+    quiet = latency_ms > 0 or requests_path is not None or fail_every > 0
+    if requests_path is not None:
+        requests_path.parent.mkdir(parents=True, exist_ok=True)
+        requests_path.write_text("", encoding="utf-8")
+
     class Handler(BaseHTTPRequestHandler):
+        # Smoke stays on the historical HTTP/1.0 close. A load run speaks HTTP/1.1
+        # so Java HttpClient can reuse the socket. HTTP/1.0 close under a few
+        # dozen in-flight calls surfaces as "header parser received no bytes"
+        # and then a provider pause, which is the mock, not the pool.
+        protocol_version = "HTTP/1.1" if quiet else "HTTP/1.0"
+
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
-            if length:
-                self.rfile.read(length)
-            body = json.dumps({
-                "id": "smoke",
-                "object": "chat.completion",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "pong"},
-                    "finish_reason": "stop",
-                }],
-            }).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            raw = self.rfile.read(length) if length else b""
+            number = handle.add()
+            status = 429 if fail_every > 0 and number % fail_every == 0 else 200
+            if latency_ms > 0:
+                time.sleep(latency_ms / 1000.0)
+            if status == 429:
+                body = b'{"error":{"message":"rate limit","type":"rate_limit"}}'
+            else:
+                body = json.dumps({
+                    "id": "smoke",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }],
+                }).encode("utf-8")
+            try:
+                self.send_response(status)
+                if status == 429:
+                    self.send_header("Retry-After", "1")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
+            if requests_path is not None:
+                text = raw.decode("utf-8", errors="replace")
+                line = json.dumps({
+                    "n": number,
+                    "t": time.time(),
+                    "status": status,
+                    "path": self.path,
+                    "body": text,
+                }, ensure_ascii=False)
+                with handle._lock:
+                    with requests_path.open("a", encoding="utf-8") as handle_out:
+                        handle_out.write(line + "\n")
 
         def log_message(self, fmt: str, *args) -> None:
-            print("mock", fmt % args)
+            if not quiet:
+                print("mock", fmt % args)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    handle.server = server
     thread = threading.Thread(target=server.serve_forever, name="openai-mock", daemon=True)
     thread.start()
     print(f"mock OpenAI endpoint http://127.0.0.1:{port}/v1")
+    return handle
 
 
 def write_config(path: Path, mock_port: int) -> None:
@@ -188,32 +261,40 @@ def write_config(path: Path, mock_port: int) -> None:
     )
 
 
-def write_server(work: Path, server_port: int, rcon_port: int) -> None:
+def write_server(
+    work: Path,
+    server_port: int,
+    rcon_port: int,
+    max_players: int = 5,
+    rcon_password: str = "smoke",
+    motd: str = "NexusAI smoke",
+    extras: list[str] | None = None,
+) -> None:
     (work / "eula.txt").write_text("eula=true\n", encoding="utf-8")
-    (work / "server.properties").write_text(
-        "\n".join([
-            "online-mode=false",
-            "enforce-secure-profile=false",
-            "server-ip=127.0.0.1",
-            f"server-port={server_port}",
-            "motd=NexusAI smoke",
-            "max-players=5",
-            "view-distance=2",
-            "simulation-distance=2",
-            "spawn-monsters=false",
-            "spawn-animals=false",
-            "spawn-npcs=false",
-            "level-type=flat",
-            "enable-rcon=true",
-            "broadcast-rcon-to-ops=false",
-            "rcon.ip=127.0.0.1",
-            f"rcon.port={rcon_port}",
-            "rcon.password=smoke",
-            "sync-chunk-writes=false",
-            "",
-        ]),
-        encoding="utf-8",
-    )
+    lines = [
+        "online-mode=false",
+        "enforce-secure-profile=false",
+        "server-ip=127.0.0.1",
+        f"server-port={server_port}",
+        f"motd={motd}",
+        f"max-players={max_players}",
+        "view-distance=2",
+        "simulation-distance=2",
+        "spawn-monsters=false",
+        "spawn-animals=false",
+        "spawn-npcs=false",
+        "level-type=flat",
+        "enable-rcon=true",
+        "broadcast-rcon-to-ops=false",
+        "rcon.ip=127.0.0.1",
+        f"rcon.port={rcon_port}",
+        f"rcon.password={rcon_password}",
+        "sync-chunk-writes=false",
+    ]
+    if extras:
+        lines.extend(extras)
+    lines.append("")
+    (work / "server.properties").write_text("\n".join(lines), encoding="utf-8")
 
 
 def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, timeout: int) -> int:

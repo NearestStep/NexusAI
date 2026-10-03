@@ -19,6 +19,8 @@ command:
   prompts-import-fail: "{prefix}&cImport failed: &f{error}"
   status-fallback-model: "&7Fallback model: &f{entry}"
   status-knowledge: "&7Knowledge files: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ requested but not pooled: &f{prompts}"
   test-sending: "{prefix}&7Sending a test request..."
   test-ok: "{prefix}&aAnswer &8({latency_ms} ms)&a: &f{answer}"
@@ -41,9 +43,11 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Last error: &f{last_error}"
   status-provider-pause: "&7Provider pause: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-queue-header: "&7Model queue:"
   status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderation: &f{state} &8({checks} checks, {flags} flags today)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
 common:
   "yes": "yes"

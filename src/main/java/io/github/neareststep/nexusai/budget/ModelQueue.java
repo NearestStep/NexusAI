@@ -3,8 +3,10 @@ package io.github.neareststep.nexusai.budget;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RateLimitHeaders;
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
+import io.github.neareststep.nexusai.config.QueueStrategy;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -43,6 +45,14 @@ public final class ModelQueue {
     private final Supplier<LocalDate> today;
     private final ZoneId zone;
     private final Logger logger;
+    private final QueueStrategy strategy;
+    /** Next starting row for {@link QueueStrategy#ROUND_ROBIN}. Not used for failover. */
+    private final AtomicInteger roundRobinCursor = new AtomicInteger();
+    /**
+     * Next starting row for an unpinned dialogue summary. Player replies and placeholders
+     * keep {@link #roundRobinCursor}.
+     */
+    private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
     private LocalDate day;
     private int moderationChecks;
@@ -65,7 +75,31 @@ public final class ModelQueue {
                 System::currentTimeMillis,
                 LocalDate::now,
                 ZoneId.systemDefault(),
-                logger
+                logger,
+                QueueStrategy.FAILOVER
+        );
+    }
+
+    public ModelQueue(
+            List<QueueEntryConfig> entries,
+            int remainingThreshold,
+            long errorCooldownMillis,
+            long authCooldownMillis,
+            File usageFile,
+            Logger logger,
+            QueueStrategy strategy
+    ) {
+        this(
+                entries,
+                remainingThreshold,
+                errorCooldownMillis,
+                authCooldownMillis,
+                usageFile,
+                System::currentTimeMillis,
+                LocalDate::now,
+                ZoneId.systemDefault(),
+                logger,
+                strategy
         );
     }
 
@@ -80,6 +114,32 @@ public final class ModelQueue {
             ZoneId zone,
             Logger logger
     ) {
+        this(
+                entries,
+                remainingThreshold,
+                errorCooldownMillis,
+                authCooldownMillis,
+                usageFile,
+                clock,
+                today,
+                zone,
+                logger,
+                QueueStrategy.FAILOVER
+        );
+    }
+
+    public ModelQueue(
+            List<QueueEntryConfig> entries,
+            int remainingThreshold,
+            long errorCooldownMillis,
+            long authCooldownMillis,
+            File usageFile,
+            LongSupplier clock,
+            Supplier<LocalDate> today,
+            ZoneId zone,
+            Logger logger,
+            QueueStrategy strategy
+    ) {
         this.remainingThreshold = Math.max(0, remainingThreshold);
         this.errorCooldownMillis = Math.max(0L, errorCooldownMillis);
         this.authCooldownMillis = Math.max(0L, authCooldownMillis);
@@ -88,6 +148,7 @@ public final class ModelQueue {
         this.today = today == null ? LocalDate::now : today;
         this.zone = zone == null ? ZoneId.systemDefault() : zone;
         this.logger = logger == null ? Logger.getLogger("nexusai.queue") : logger;
+        this.strategy = strategy == null ? QueueStrategy.FAILOVER : strategy;
         this.day = this.today.get();
         List<Slot> loaded = new ArrayList<>();
         List<QueueEntryConfig> source = entries == null ? List.of() : entries;
@@ -113,7 +174,91 @@ public final class ModelQueue {
      *                        A daily cap is never ignored.
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
+        return selectFrom(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    /**
+     * Same walk as {@link #selectable(long, boolean)} for an unpinned dialogue summary.
+     * Round-robin advances {@link #summaryRoundRobinCursor} and leaves the player-reply cursor
+     * where it is. Failover does not use either cursor. A pinned summary must not call this.
+     */
+    public synchronized List<Choice> selectableSummary(long nowMillis) {
+        return selectFrom(nowMillis, false, summaryRoundRobinCursor);
+    }
+
+    private List<Choice> selectFrom(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
         roll(nowMillis);
+        if (strategy != QueueStrategy.ROUND_ROBIN || slots.isEmpty()) {
+            return readyInOrder(nowMillis, ignoreCooldown);
+        }
+        int start = nextIndex(nowMillis, ignoreCooldown, cursor);
+        if (start < 0) {
+            return List.of();
+        }
+        // The next request of this cursor starts at the following row.
+        cursor.set(Math.floorMod(start + 1, slots.size()));
+        List<Choice> ready = new ArrayList<>();
+        for (int i = 0; i < slots.size(); i++) {
+            Slot slot = slots.get(Math.floorMod(start + i, slots.size()));
+            if (isSelectable(slot, nowMillis, ignoreCooldown)) {
+                ready.add(slot.choice());
+            }
+        }
+        return ready;
+    }
+
+    public QueueStrategy strategy() {
+        return strategy;
+    }
+
+    /**
+     * The row the next request will start from. Does not advance the round-robin cursor.
+     * Failover and round-robin both report the next selectable row. A cooled, exhausted, or
+     * threshold-blocked row is skipped. Empty when nothing is selectable.
+     */
+    public synchronized Optional<Choice> nextStart(long nowMillis) {
+        roll(nowMillis);
+        if (slots.isEmpty()) {
+            return Optional.empty();
+        }
+        if (strategy != QueueStrategy.ROUND_ROBIN) {
+            for (Slot slot : slots) {
+                if (isSelectable(slot, nowMillis, false)) {
+                    return Optional.of(slot.choice());
+                }
+            }
+            return Optional.empty();
+        }
+        int index = nextRoundRobinIndex(nowMillis, false);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(slots.get(index).choice());
+    }
+
+    /**
+     * First selectable row at or after the round-robin cursor. Does not move the cursor.
+     */
+    private int nextRoundRobinIndex(long nowMillis, boolean ignoreCooldown) {
+        return nextIndex(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    private int nextIndex(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
+        int size = slots.size();
+        if (size == 0) {
+            return -1;
+        }
+        int at = Math.floorMod(cursor.get(), size);
+        for (int i = 0; i < size; i++) {
+            int index = Math.floorMod(at + i, size);
+            if (isSelectable(slots.get(index), nowMillis, ignoreCooldown)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private List<Choice> readyInOrder(long nowMillis, boolean ignoreCooldown) {
         List<Choice> ready = new ArrayList<>();
         for (Slot slot : slots) {
             if (isSelectable(slot, nowMillis, ignoreCooldown)) {
@@ -498,7 +643,10 @@ public final class ModelQueue {
                 if (parent != null) {
                     parent.mkdirs();
                 }
-                yaml.save(usageFile);
+                if (!usageFile.isFile()) {
+                    AtomicFiles.createPrivate(usageFile.toPath());
+                }
+                AtomicFiles.preserving(usageFile.toPath(), () -> yaml.save(usageFile));
             } catch (IOException e) {
                 logger.log(Level.WARNING, "Failed to save usage counters", e);
             }

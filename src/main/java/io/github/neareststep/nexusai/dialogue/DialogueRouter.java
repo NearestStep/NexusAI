@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
@@ -17,6 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -60,15 +62,24 @@ public final class DialogueRouter {
         if (!current.canSendChatRequests()) {
             throw new AiRequestException(AiErrorKind.OTHER, 0, "NexusAI API key is not configured", null);
         }
-        String admissionKey = "dialogue:" + (call.messages().isEmpty() ? "greeting" : "turn");
+        String admissionKey = admissionKey(call);
         Optional<String> rejected = admission.admit(call.playerId(), admissionKey);
         if (rejected.isPresent()) {
             throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejected.get(), null);
         }
         long now = clock.getAsLong();
-        List<ModelQueue.Choice> choices = currentQueue.selectable(now, false);
+        // selectable() advances the player-reply round-robin cursor.
+        // A summary uses its own cursor. A pin must not take either turn.
+        List<ModelQueue.Choice> choices = call.summaryPinned()
+                ? pin(currentQueue, call, now)
+                : call.kind() == DialogueEngine.CallKind.SUMMARY
+                ? currentQueue.selectableSummary(now)
+                : currentQueue.selectable(now, false);
         if (choices.isEmpty()) {
             throw currentQueue.explain(null, now);
+        }
+        if (transport.saturated()) {
+            throw HttpPool.queueFull(null);
         }
         AiRequestException last = null;
         boolean toolsDropped = false;
@@ -97,7 +108,7 @@ public final class DialogueRouter {
                     last = new AiRequestException(AiErrorKind.OTHER, 0, "API key is not configured", null);
                     break;
                 }
-                if (!currentQueue.tryConsume(choice.index(), now)) {
+                if (choice.index() >= 0 && !currentQueue.tryConsume(choice.index(), now)) {
                     break;
                 }
                 try {
@@ -110,7 +121,14 @@ public final class DialogueRouter {
                     if (sent.result() == null) {
                         throw new AiRequestException(AiErrorKind.OTHER, 0, "Provider does not support tools", null);
                     }
-                    currentQueue.observe(choice.index(), sent.result().headers(), clock.getAsLong());
+                    if (choice.index() >= 0) {
+                        currentQueue.observe(choice.index(), sent.result().headers(), clock.getAsLong());
+                    }
+                    if (call.kind() == DialogueEngine.CallKind.SUMMARY) {
+                        admission.success(admissionKey);
+                        String content = sent.result().content();
+                        return new DialogueEngine.ModelReply(content == null ? "" : content, List.of(), false);
+                    }
                     if (!sent.result().toolNames().isEmpty() && !toolsDropped) {
                         admission.success(admissionKey);
                         return new DialogueEngine.ModelReply(sent.result().content(), sent.result().toolNames(), false);
@@ -124,20 +142,25 @@ public final class DialogueRouter {
                 } catch (AiRequestException error) {
                     last = error;
                     now = clock.getAsLong();
+                    if (HttpPool.isQueueFull(error)) {
+                        throw HttpPool.queueFull(error);
+                    }
                     if (error.kind() == AiErrorKind.MARKUP_ONLY) {
-                        logger.fine(error.getMessage());
+                        log(call, Level.FINE, SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
                     if (error.kind() == AiErrorKind.EMPTY_REPLY) {
-                        logger.warning(error.getMessage());
+                        log(call, Level.WARNING, SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
                     if (error.kind() == AiErrorKind.REJECTED) {
-                        currentQueue.recordRejection(choice.index());
-                        logger.info("Rejected dialogue answer from " + choice.provider() + " / " + model
-                                + ". " + error.getMessage());
+                        if (choice.index() >= 0) {
+                            currentQueue.recordRejection(choice.index());
+                        }
+                        log(call, Level.INFO, "Rejected dialogue answer from " + choice.provider() + " / " + model
+                                + ". " + SecretMask.redact(error.getMessage(), current.configuredSecrets()));
                         break;
                     }
                     if (!key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
@@ -145,7 +168,7 @@ public final class DialogueRouter {
                                 ? current.getAuthPauseSeconds() * 1000L
                                 : Math.max(current.getProviderPauseSeconds() * 1000L, error.retryAfterSeconds() * 1000L);
                         ring.skip(key, now + skipFor);
-                        logger.warning("Dialogue call skipped key " + SecretMask.mask(key)
+                        log(call, Level.WARNING, "Dialogue call skipped key " + SecretMask.mask(key)
                                 + " on " + choice.provider() + " after HTTP " + error.status());
                     }
                     boolean anotherKey = !key.isEmpty() && error.kind() == AiErrorKind.BAD_KEY && ring.hasAvailable(now);
@@ -224,6 +247,44 @@ public final class DialogueRouter {
      * The persona name identifies the talk. The rendered character sheet is not logged.
      * A blank id still names the command.
      */
+    private static String admissionKey(DialogueEngine.ModelCall call) {
+        if (call.kind() == DialogueEngine.CallKind.SUMMARY) {
+            return "dialogue:summary";
+        }
+        return "dialogue:" + (call.messages().isEmpty() ? "greeting" : "turn");
+    }
+
+    /**
+     * Pinned summary calls follow {@code ModerationService.reserveDaily}: a queue row on cooldown
+     * or over its daily cap is not called. A provider and model that are not in the queue are
+     * called directly. This does not call {@link ModelQueue#selectable(long, boolean)}, so a pin
+     * does not advance the round-robin cursor.
+     */
+    private static List<ModelQueue.Choice> pin(ModelQueue queue, DialogueEngine.ModelCall call, long now) {
+        for (ModelQueue.Status row : queue.status(now)) {
+            if (!call.pinProvider().equals(row.provider()) || !call.pinModel().equals(row.model())) {
+                continue;
+            }
+            String state = row.state() == null ? "" : row.state();
+            if (state.startsWith("LIMIT REACHED") || state.startsWith("COOLDOWN")) {
+                throw queue.explain(null, now);
+            }
+            return List.of(new ModelQueue.Choice(row.index(), row.provider(), row.model()));
+        }
+        return List.of(new ModelQueue.Choice(-1, call.pinProvider(), call.pinModel()));
+    }
+
+    private void log(DialogueEngine.ModelCall call, Level level, String message) {
+        if (message == null) {
+            return;
+        }
+        if (call.kind() == DialogueEngine.CallKind.SUMMARY && level.intValue() > Level.FINE.intValue()) {
+            logger.fine(message);
+            return;
+        }
+        logger.log(level, message);
+    }
+
     private static String talkNotice(DialogueEngine.ModelCall call) {
         GenerationOverrides overrides = call.overrides();
         String id = overrides == null ? null : overrides.noticeId();

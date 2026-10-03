@@ -36,6 +36,8 @@ config-version: 1
 #   fallback-model      provider and model tried once after the model queue fails for this call.
 #                       Omit it to use fallback-model from config.yml.
 #   knowledge           file names from plugins/NexusAI/knowledge without .md or .txt
+#   context             provider ids, or all. Omitted prompts keep the 1.0.x text and cache key.
+#                       Ignored for pool.entries, prewarm, and generate_.
 #
 # Answer order: model-queue, then fallback-model, then a pooled answer, then fallback text.
 #

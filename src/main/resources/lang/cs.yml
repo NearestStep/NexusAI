@@ -35,13 +35,17 @@ command:
   status-papi: "&7PlaceholderAPI: &f{papi}"
   status-last-error: "&7Poslední chyba: &f{last_error}"
   status-provider-pause: "&7Pauza poskytovatele: &f{provider_pause}"
+  status-queue-strategy: "&7Model queue strategy: &f{strategy}"
   status-moderation: "&7Moderace: &f{state} &8(dnes {checks} kontrol, {flags} označení)"
+  status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
 
   help-prompts-import: "&7/nai prompts import <file> [--overwrite] &8- &fImportovat prompty ze složky import"
   prompts-import-ok: "{prefix}&aImportováno &f{file}&a. Přidáno: &f{added}&a. Přeskočeno: &f{skipped}&a. Konflikty: &f{conflicting}&a."
   prompts-import-fail: "{prefix}&cImport selhal: &f{error}"
   status-fallback-model: "&7Záložní model: &f{entry}"
   status-knowledge: "&7Soubory znalostí: &f{files}"
+  status-context: "&7Context providers: &f{count}"
+  status-context-line: "&7- &f{line}"
   status-unpooled: "&7generate_ požadován, ale není v poolu: &f{prompts}"
 
 common:
