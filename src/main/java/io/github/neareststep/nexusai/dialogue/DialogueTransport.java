@@ -32,16 +32,29 @@ public final class DialogueTransport {
 
     private final HttpClient httpClient;
     private final Supplier<PluginConfig> config;
-    private final HttpGate gate;
+    private final Supplier<HttpGate> gates;
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient) {
-        this(config, httpClient, HttpGate.unlimited());
+        this(config, httpClient, (HttpGate) null);
     }
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient, HttpGate gate) {
+        this(config, httpClient, gate == null ? HttpGate::unlimited : () -> gate);
+    }
+
+    /**
+     * {@code gates} is read on every send. {@code /nai reload} replaces the pool gate, and talk
+     * must see that cap without rebuilding this transport.
+     */
+    public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient, Supplier<HttpGate> gates) {
         this.config = Objects.requireNonNull(config, "config");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
-        this.gate = gate == null ? HttpGate.unlimited() : gate;
+        this.gates = gates == null ? HttpGate::unlimited : gates;
+    }
+
+    private HttpGate gate() {
+        HttpGate current = gates.get();
+        return current == null ? HttpGate.unlimited() : current;
     }
 
     private PluginConfig config() {
@@ -53,7 +66,7 @@ public final class DialogueTransport {
      * with {@link HttpPool#QUEUE_FULL} without being sent.
      */
     public boolean saturated() {
-        HttpGate.Snapshot snapshot = gate.snapshot();
+        HttpGate.Snapshot snapshot = gate().snapshot();
         return snapshot.inFlight() >= snapshot.maxInFlight() && snapshot.waiting() >= snapshot.waitCapacity();
     }
 
@@ -82,7 +95,7 @@ public final class DialogueTransport {
                 builder.header("Authorization", "Bearer " + request.apiKey());
             }
             HttpRequest httpRequest = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
-            HttpResponse<String> response = gate.schedule(
+            HttpResponse<String> response = gate().schedule(
                     () -> httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
             ).join();
             String body = response.body() == null ? "" : response.body();

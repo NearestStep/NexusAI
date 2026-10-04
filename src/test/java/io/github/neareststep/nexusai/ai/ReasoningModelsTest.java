@@ -11,8 +11,12 @@ class ReasoningModelsTest {
     void chatModelsAreNotReasoningModels() {
         assertFalse(ReasoningModels.isReasoning("gpt-4o-mini"));
         assertFalse(ReasoningModels.isReasoning("gpt-4o"));
+        assertFalse(ReasoningModels.isReasoning("gpt-4.1"));
+        assertFalse(ReasoningModels.isReasoning("gpt-50"));
         assertFalse(ReasoningModels.isReasoning("llama-3.1-8b"));
         assertFalse(ReasoningModels.usesCompletionTokenCap("gpt-4o-mini"));
+        assertFalse(ReasoningModels.usesCompletionTokenCap("gpt-4.1"));
+        assertFalse(ReasoningModels.usesCompletionTokenCap("gpt-50"));
     }
 
     @Test
@@ -30,5 +34,22 @@ class ReasoningModelsTest {
         assertTrue(ReasoningModels.usesCompletionTokenCap("o4-mini"));
         assertFalse(ReasoningModels.usesCompletionTokenCap("openai/gpt-oss-20b"));
         assertFalse(ReasoningModels.usesCompletionTokenCap("deepseek-reasoner"));
+    }
+
+    @Test
+    void gpt5FamilyUsesTheCompletionTokenCap() {
+        for (String model : new String[] {
+                "gpt-5",
+                "gpt-5-mini",
+                "gpt-5-nano",
+                "gpt-5.1",
+                "GPT-5-mini",
+                "openai/gpt-5",
+                "openai/gpt-5-mini"
+        }) {
+            assertTrue(ReasoningModels.isReasoning(model), model);
+            assertTrue(ReasoningModels.usesCompletionTokenCap(model), model);
+        }
+        assertFalse(ReasoningModels.usesCompletionTokenCap("openai/gpt-oss-20b"));
     }
 }

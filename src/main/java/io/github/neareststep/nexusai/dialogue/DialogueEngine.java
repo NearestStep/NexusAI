@@ -272,9 +272,14 @@ public final class DialogueEngine {
         return TalkResult.of(TalkCode.BUSY, request.characterId());
     }
 
+    private List<String> secretList() {
+        return secrets == null || secrets.get() == null ? List.of() : secrets.get();
+    }
+
     /**
      * The player sees {@code talk.busy}. The provider body stays on the console, masked, at most once per 30 seconds.
-     * A global pause does not send the turn and does not call {@code fallback-model}.
+     * A pause that covers only the queue provider still sends the turn to {@code fallback-model}
+     * when that model is a different provider and is not paused. Anything else stays {@code talk.busy}.
      */
     private void logProviderFailure(String detail) {
         if (failureLog == null || detail == null || detail.isBlank()) {
@@ -347,13 +352,14 @@ public final class DialogueEngine {
         for (String name : names) {
             CharacterAction action = find(defined, name);
             if (action == null) {
-                note.append("\n- ").append(name).append(": refused: unknown action");
-                actionLog.record(request.playerName(), request.characterId(), name, "refused: unknown action");
+                note.append("\n- refused: unknown action");
+                recordAction(request, name, "refused: unknown action");
                 continue;
             }
+            String shown = maskedAction(name);
             if (ran >= max) {
-                note.append("\n- ").append(name).append(": refused: too many actions");
-                actionLog.record(request.playerName(), request.characterId(), name, "refused: too many actions");
+                note.append("\n- ").append(shown).append(": refused: too many actions");
+                recordAction(request, name, "refused: too many actions");
                 continue;
             }
             boolean permitted = action.permission() == null || request.permissions().test(action.permission());
@@ -361,15 +367,15 @@ public final class DialogueEngine {
                     action, request.characterId(), request.playerId(), permitted, request.nowMillis(), zone);
             if (!decision.allowed()) {
                 String result = "refused: " + decision.reason();
-                note.append("\n- ").append(name).append(": ").append(result);
-                actionLog.record(request.playerName(), request.characterId(), name, result);
+                note.append("\n- ").append(shown).append(": ").append(result);
+                recordAction(request, name, result);
                 continue;
             }
             String command = ActionCommands.render(action.command(), request.playerName(), request.playerId());
             if (command == null) {
                 String result = "refused: unsafe player name";
-                note.append("\n- ").append(name).append(": ").append(result);
-                actionLog.record(request.playerName(), request.characterId(), name, result);
+                note.append("\n- ").append(shown).append(": ").append(result);
+                recordAction(request, name, result);
                 continue;
             }
             String result;
@@ -385,10 +391,23 @@ public final class DialogueEngine {
                 actionGate.record(action, request.characterId(), request.playerId(), request.nowMillis(), zone);
                 ran++;
             }
-            note.append("\n- ").append(name).append(": ").append(result);
-            actionLog.record(request.playerName(), request.characterId(), name, result);
+            note.append("\n- ").append(shown).append(": ").append(maskedAction(result));
+            recordAction(request, name, result);
         }
         return note.toString();
+    }
+
+    /**
+     * A tool name is untrusted. Logs always show it masked. An unknown name is not repeated in the
+     * follow-up note at all, so a key that the mask does not recognise is not sent back to the model.
+     */
+    private void recordAction(TalkRequest request, String name, String result) {
+        actionLog.record(request.playerName(), request.characterId(), maskedAction(name), maskedAction(result));
+    }
+
+    private String maskedAction(String value) {
+        List<String> known = secrets == null || secrets.get() == null ? List.of() : secrets.get();
+        return SecretMask.redact(value, known);
     }
 
     private static CharacterAction find(List<CharacterAction> actions, String name) {
@@ -480,7 +499,7 @@ public final class DialogueEngine {
                 request.nowMillis(),
                 settings.memoryExpiryMillis()
         );
-        String block = DialogueSummary.block(summary);
+        String block = DialogueSummary.block(summary, secretList());
         if (block.isEmpty() || (system != null && system.contains(DialogueSummary.HEADER))) {
             return system;
         }

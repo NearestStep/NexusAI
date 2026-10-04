@@ -318,6 +318,12 @@ public final class RoutingProvider implements AiProvider {
             return CompletableFuture.failedFuture(HttpPool.queueFull(error));
         }
         AiRequestException typed = asAi(error);
+        if (typed.kind().pausesProvider()) {
+            last.pausedProviders.add(providerId);
+            for (String paused : last.pausedProviders) {
+                typed = typed.withPausedProvider(paused);
+            }
+        }
         last.error = typed;
         long now = clock.getAsLong();
         if (typed.kind() == AiErrorKind.EMPTY_REPLY || typed.kind() == AiErrorKind.MARKUP_ONLY) {
@@ -385,6 +391,7 @@ public final class RoutingProvider implements AiProvider {
 
     private static final class Attempt {
         private AiRequestException error;
+        private final java.util.LinkedHashSet<String> pausedProviders = new java.util.LinkedHashSet<>();
     }
 
     /**

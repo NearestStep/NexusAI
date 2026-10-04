@@ -80,11 +80,49 @@ Every scenario: no `ERROR]: [NexusAI]`, no NexusAI stack frame outside the load-
 
 S-pool is the overflow check. Fifty misses per second at 300 ms is about 15 calls in flight. The cap is 64 in flight and 64 waiting, so S2-over does not fill the pool. The old picture (an unbounded queue, or four blocking threads near 13 requests/s) does not describe this build.
 
-The JFR 2% line is a gate only when the recording has about 200 to 500 Server-thread samples, or more. `jdk.ExecutionSample` hits a thread only while it is running. On an idle or lightly loaded server the server thread is parked, and a 110s recording can contain 2 to 5 samples. A share computed from that handful is noise: 1 of 5 is 20% and is not a measurement of a 2% budget. Below that sample count, treat the JFR share as not enough data. Do not fail the scenario on it. Judge the run by the tick delta, the max tick, and the p99 of the placeholder or talk call, which the plugin records itself.
+The JFR 2% line is a gate only when the recording has at least 200 Server-thread samples. `jdk.ExecutionSample` hits a thread only while it is running. On an idle or lightly loaded server the server thread is parked, and a 110s recording can contain 2 to 5 samples. A share computed from that handful is noise: 1 of 5 is 20% and is not a measurement of a 2% budget. Below that sample count, treat the JFR share as not enough data. Do not fail the scenario on it. Judge the run by the tick delta, the max tick, and the p99 of the placeholder or talk call, which the plugin records itself.
 
 `RateLimiter` is a tumbling 60s window opened at construction, not a sliding minute. S3's judge accepts a series when some alignment keeps every 60s bucket at or under 31. Thirty requests, a reset, then thirty more, is a pass. Sixty requests at one instant is a fail. `LOCAL_LIMIT` is not logged, so S3's warning count can be 0 and still pass.
 
-## Recorded run
+## Recorded run — 1.1.1
+
+2026-10-04, NexusAI 1.1.1, Java 21.0.10, 4 vCPU Intel Xeon, mock latency 300 ms. Mode A and mode B were separate servers, so the bots do not sit inside the mode A MSPT. Both exited 0. On every scenario `nexusai-http-*` stayed at 4 and `nexusai-context-*` stayed at 2. No `ERROR]: [NexusAI]`. The canary is masked as `****2e1b`.
+
+`jcmd` resolves `settings` and `filename` from the Paper process directory and still exits 0 when the file is missing. A relative `load.jfc` therefore produced no recording, and S2 failed with "JFR produced no Server thread samples" before any sample existed. The harness now passes absolute paths and treats that `jcmd` message as a failed recording. The 2% Server-thread share is a fail only when the recording has at least 200 Server samples, which is the rule in the pass table above. Fewer samples are listed here and are not a gate.
+
+### Mode A — Paper 1.20.6 build 151
+
+No game client. Baseline mean **0.1496 ms** (p95 0.405, p99 1.156, max 4.313, 1202 samples). TPS min 20.018.
+
+| Scenario | Result | ΔMSPT | Other numbers |
+|----------|--------|-------|----------------|
+| baseline | pass, attempt 1 | — | mean 0.1496 ms, max 4.313 ms |
+| S1 | pass, attempt 1 | +0.055 ms | 119900 resolutions, 1 mock request (the warm), call p99 8867 ns (8.9 µs), call max 1.10 ms, MSPT max 45.6 ms, JFR 6/12 Server samples (50%, under 200 samples, not a gate) |
+| S2 | pass, attempt 2 | −0.073 ms | attempt 1 failed: max tick 190.2 ms (JFR 0/12, so the 2% line was not the cause). Attempt 2: mock 1199 = unique 1199, resolutions 3597 (three copies, one HTTP), max in flight 3, max tick 0.58 ms, TPS min 20.0, call p99 43 µs, drain 250 ms, JFR 0/7 |
+| S2-over | pass, attempt 1 | −0.045 ms | mock 5997 = unique 5997 (~50 req/s), resolutions 17991, max in flight 15, wait queue 0, rejected 0, max tick 0.63 ms, drain 300 ms, JFR 1/4 = 25% (not a gate). The queue did not grow. |
+| S3 | pass, attempt 1 | −0.032 ms | 23990 resolutions, mock 90, warnings 0 (cap 6), max in flight 30, JFR 0/4 |
+| S-pool | pass, attempt 1 | +0.015 ms (not a gate) | rejected delta 1720, in flight peaked at 64, HTTP wait peaked at 64, worker queue 0, threads stayed 4 and 2, call p99 16 µs, mock 640, drain 550 ms, log said `HTTP queue is full`, JFR 0/0 on the 3s window |
+
+S2-over at 50 req/s and 300 ms peaked at 15 in flight, under the cap of 64. S-pool is the case that fills the cap.
+
+Server-thread samples on this host were 0 to 12 over a 110s recording. That is under the 200-sample floor, so S1's 6/12 and S2-over's 1/4 are not a 2% measurement. The MSPT deltas are the evidence that the main thread stayed cheap.
+
+### Mode B — Paper 1.21.4 build 232, 20 mineflayer 4.33.0 bots
+
+Separate boot. Baseline mean **0.8763 ms** with the bots already online (p95 1.323, p99 1.983, max 6.213, 1199 samples). ΔMSPT is against that baseline, not against the mode A number.
+
+| Scenario | Result | ΔMSPT | Other numbers |
+|----------|--------|-------|----------------|
+| S4 | pass, attempt 1 | +0.233 ms | 20 players, 4798 resolutions, `provide()` on the main thread 0, slow suspended (10 timeouts), fast still ok (47 calls, 0 timeouts), boom suspended, call p99 243 µs, MSPT max 139.5 ms (not an S4 gate), JFR 7/120 = 5.83% (under 200 samples), threads 4 and 2, 4 mock requests in the S4 window |
+| S5 | pass, attempt 1 | +0.022 ms | 820 `/nai talk` commands, 1180 mock requests, no `Dialogue failed`, drain settled in 2.95s, fast 784 calls and not suspended, `provide()` on the main thread 0, JFR 1/117 = 0.85% |
+
+Across both scenarios, 806 mock bodies contained `coins ~12k` between `§§§ PLAYER INPUT §§§` and `§§§ END §§§`. None contained `load-boom-secret`. S4's own window sent 4 HTTP calls; the rest of the wrapped bodies are from S5, which also requests `context: all`.
+
+S4 does not gate on JFR. 120 Server samples is still under the 200-sample floor, so 5.83% is not a 2% budget. S5 was 0.85% on 117 samples.
+
+After S5 had already been judged, stopping the server logged `Failed to schedule a command result` (16 lines). The scheduler was going down while a few talk replies were still being delivered. Those lines are outside the scenario window.
+
+## Recorded run — 1.1.0
 
 2026-10-03, Java 21.0.10, 4 vCPU Intel Xeon, mock latency 300 ms. Mode A and mode B were separate servers, so the bots do not sit inside the mode A MSPT. Both exited 0. On every scenario `nexusai-http-*` stayed at 4 and `nexusai-context-*` stayed at 2. No `ERROR]: [NexusAI]`, no NexusAI stack trace, canary masked as `****2e1b`.
 

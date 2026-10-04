@@ -3,8 +3,11 @@ package io.github.neareststep.nexusai.ai;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 
+import java.util.Collection;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -41,6 +44,12 @@ public final class RequestGate {
     private final AtomicLong pauseGeneration = new AtomicLong();
     private volatile long pausedUntil;
     private volatile AiErrorKind pauseKind = AiErrorKind.OTHER;
+    /**
+     * Providers named on the failure that armed the current pause.
+     * Empty while a pause is active means the pause is global: every provider is paused.
+     * Placeholders still see {@link #isPaused()} either way.
+     */
+    private final Set<String> pausedProviderIds = ConcurrentHashMap.newKeySet();
 
     public RequestGate(
             RateLimiter rateLimiter,
@@ -115,6 +124,31 @@ public final class RequestGate {
         return clock.getAsLong() < pausedUntil;
     }
 
+    /**
+     * True when {@code providerId} is inside the current pause.
+     * A pause that names no provider covers every provider. A pause that names
+     * {@code openai} does not cover {@code groq}.
+     */
+    public boolean isProviderPaused(String providerId) {
+        if (!isPaused()) {
+            return false;
+        }
+        if (pausedProviderIds.isEmpty()) {
+            return true;
+        }
+        if (providerId == null || providerId.isBlank()) {
+            return true;
+        }
+        return pausedProviderIds.contains(providerId.trim().toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * True when the active pause was not tied to a provider id, so every provider is paused.
+     */
+    public boolean pauseIsGlobal() {
+        return isPaused() && pausedProviderIds.isEmpty();
+    }
+
     public AiErrorKind pauseKind() {
         return isPaused() ? pauseKind : null;
     }
@@ -186,6 +220,7 @@ public final class RequestGate {
         if (clearPause && pauseGeneration.get() == pauseStamp) {
             pausedUntil = 0L;
             pauseKind = null;
+            pausedProviderIds.clear();
         }
     }
 
@@ -204,6 +239,20 @@ public final class RequestGate {
      * @param armPause {@code false} for {@code /nai test}: a probe may observe 401/402/429 but must not start or extend the provider pause
      */
     public void recordFailure(String admissionKey, AiErrorKind kind, long retryAfterSeconds, boolean armPause) {
+        recordFailure(admissionKey, kind, retryAfterSeconds, armPause, Set.of());
+    }
+
+    /**
+     * @param providers providers that returned the pausing status. Empty arms a global pause,
+     *                  which is what a caller that does not know the provider still does.
+     */
+    public void recordFailure(
+            String admissionKey,
+            AiErrorKind kind,
+            long retryAfterSeconds,
+            boolean armPause,
+            Collection<String> providers
+    ) {
         Objects.requireNonNull(admissionKey, "admissionKey");
         if (kind == AiErrorKind.MARKUP_ONLY) {
             if (!armPause) {
@@ -255,10 +304,40 @@ public final class RequestGate {
             if (kind == AiErrorKind.RATE_LIMIT && retryAfterSeconds > 0L) {
                 pause = Math.max(pause, retryAfterSeconds * 1000L);
             }
+            boolean stillPaused = now < pausedUntil;
+            boolean previousGlobal = stillPaused && pausedProviderIds.isEmpty();
             pausedUntil = now + pause;
             pauseKind = kind;
             pauseGeneration.incrementAndGet();
+            if (providers == null || providers.isEmpty() || previousGlobal) {
+                pausedProviderIds.clear();
+            } else {
+                if (!stillPaused) {
+                    pausedProviderIds.clear();
+                }
+                for (String provider : providers) {
+                    if (provider != null && !provider.isBlank()) {
+                        pausedProviderIds.add(provider.trim().toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
         }
+    }
+
+    /**
+     * Rate limits and per-prompt backoff still apply. The provider pause does not.
+     * Used by {@code /nai talk} when a different provider can answer.
+     */
+    public Optional<String> tryAdmitIgnoringPause(UUID playerId, String admissionKey) {
+        Objects.requireNonNull(admissionKey, "admissionKey");
+        Backoff backoff = backoffByKey.get(admissionKey);
+        if (backoff != null && clock.getAsLong() < backoff.untilMillis) {
+            return Optional.of("Backing off after a provider error for this prompt");
+        }
+        if (!rateLimiter.tryAcquire(playerId)) {
+            return Optional.of("Local rate limit reached");
+        }
+        return Optional.empty();
     }
 
     private String pauseMessage() {

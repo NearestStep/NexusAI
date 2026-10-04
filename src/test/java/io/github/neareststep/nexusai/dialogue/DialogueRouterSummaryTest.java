@@ -77,6 +77,41 @@ class DialogueRouterSummaryTest {
     }
 
     @Test
+    void summaryThatEchoesAKeyIsStoredMasked() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        HttpServer server = server(bodies, (exchange, body) -> {
+            if (body.contains("third person")) {
+                return "{\"choices\":[{\"message\":{\"content\":\"The smith kept test-key in the notes.\"}}]}";
+            }
+            return "{\"choices\":[{\"message\":{\"content\":\"Hello.\"}}]}";
+        });
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("nai-summary");
+        try {
+            Fixture fixture = fixture(server, List.of(row("gpt-4o-mini", 0)), admitting());
+            MemoryStore memory = new MemoryStore();
+            DialogueEngine engine = engine(fixture, memory, new SummaryStats(ZoneId.of("UTC")), Runnable::run);
+            DialogueSettings settings = summarySettings(2, 2);
+            for (int i = 0; i < 4; i++) {
+                assertEquals(TalkCode.REPLY, engine.talk(talk("m" + i, settings, 10_000L + i)).code());
+            }
+            String stored = memory.summary(player, "blacksmith", 20_000L, 0L);
+            assertTrue(stored.contains("****-key"), stored);
+            assertFalse(stored.contains("test-key"), stored);
+            java.io.File file = dir.resolve("dialogue-memory.yml").toFile();
+            memory.save(file, fixture.logger, true);
+            String yaml = java.nio.file.Files.readString(file.toPath());
+            assertTrue(yaml.contains("****-key"), yaml);
+            assertFalse(yaml.contains("test-key"), yaml);
+            engine.talk(talk("next", settings, 20_000L));
+            String next = bodies.get(bodies.size() - 1);
+            assertTrue(next.contains("****-key"), next);
+            assertFalse(next.contains("test-key"), next);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void disabledDialogueBodyHasNoSummary() throws Exception {
         List<String> off = new ArrayList<>();
         List<String> defaults = new ArrayList<>();
@@ -361,7 +396,8 @@ class DialogueRouterSummaryTest {
     }
 
     private DialogueEngine engine(Fixture fixture, MemoryStore memory, SummaryStats stats, java.util.concurrent.Executor executor) {
-        DialogueSummary summaries = new DialogueSummary(memory, fixture.router::route, stats, fixture.logger, executor);
+        DialogueSummary summaries = new DialogueSummary(
+                memory, fixture.router::route, stats, fixture.logger, executor, fixture.config::configuredSecrets);
         return new DialogueEngine(
                 memory,
                 new SessionBook(),

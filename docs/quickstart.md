@@ -4,7 +4,7 @@ About five minutes from an empty `plugins/` folder to the first cached answer. T
 
 ## 1. Install
 
-1. Put `NexusAI-1.1.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.0.jar`. The `version` in `build.gradle.kts` is `1.1.0`.
+1. Put `NexusAI-1.1.1.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.1.jar`. The `version` in `build.gradle.kts` is `1.1.1`.
 2. Install [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer.
 3. Start the server once. NexusAI creates `plugins/NexusAI/` (`config.yml`, `prompts.yml`, `lang/`, `knowledge/example.md`). Stop the server before editing those files.
 

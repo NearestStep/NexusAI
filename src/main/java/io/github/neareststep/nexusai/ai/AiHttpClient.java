@@ -188,6 +188,17 @@ public final class AiHttpClient {
         return gate.isPaused();
     }
 
+    /**
+     * @return true when this provider is inside the current pause. A pause with no provider id covers every provider.
+     */
+    public boolean isProviderPaused(String providerId) {
+        return gate.isProviderPaused(providerId);
+    }
+
+    public boolean pauseIsGlobal() {
+        return gate.pauseIsGlobal();
+    }
+
     public AiErrorKind pauseKind() {
         return gate.pauseKind();
     }
@@ -330,7 +341,8 @@ public final class AiHttpClient {
                 } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
-                    gate.recordFailure(admissionKey, kind, retryAfter, clearPause);
+                    gate.recordFailure(
+                            admissionKey, kind, retryAfter, clearPause, AiRequestException.pausedProvidersOf(failure));
                     diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
                 }
                 if (kind == AiErrorKind.REJECTED) {
@@ -414,8 +426,23 @@ public final class AiHttpClient {
         }
         AiRequestException typed = AiErrors.find(error);
         long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
-        gate.recordFailure(admissionKey, kind, retryAfter, true);
+        gate.recordFailure(admissionKey, kind, retryAfter, true, AiRequestException.pausedProvidersOf(error));
         diagnostics.report(kind, AiErrors.detail(error), gate.isPaused());
+    }
+
+    /**
+     * Spends a rate-limit slot without treating a provider pause as a block.
+     * {@code /nai talk} uses this when another provider can still answer.
+     */
+    public Optional<String> tryAdmitIgnoringPause(UUID playerId, String admissionKey) {
+        return gate.tryAdmitIgnoringPause(playerId, admissionKey);
+    }
+
+    /**
+     * Clears per-prompt backoff for this key and leaves the provider pause in place.
+     */
+    public void recordSuccessKeepingPause(String admissionKey) {
+        gate.recordSuccess(admissionKey, gate.pauseStamp(), gate.failureEpoch(admissionKey), false);
     }
 
     public io.github.neareststep.nexusai.ai.KeyRing sharedRing(String providerId) {

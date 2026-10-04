@@ -7,6 +7,7 @@ import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.command.SenderTasks;
+import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.context.ContextBlock;
@@ -67,7 +68,12 @@ public final class DialogueService {
         }
         HttpClient http = HttpClient.newBuilder().connectTimeout(plugin.getPluginConfig().getConnectTimeout()).build();
         DialogueTransport transport = new DialogueTransport(
-                plugin::getPluginConfig, http, plugin.getHttpPool().gate());
+                plugin::getPluginConfig,
+                http,
+                () -> {
+                    io.github.neareststep.nexusai.ai.HttpPool pool = plugin.getHttpPool();
+                    return pool == null ? io.github.neareststep.nexusai.ai.HttpGate.unlimited() : pool.gate();
+                });
         DialogueRouter router = new DialogueRouter(
                 ignored -> plugin.getPluginConfig(),
                 ignored -> plugin.getModelQueue(),
@@ -95,6 +101,36 @@ public final class DialogueService {
                             plugin.getAiHttpClient().recordAdmissionFailure(key, error);
                         }
                     }
+
+                    @Override
+                    public boolean providerPauseActive() {
+                        return plugin.getAiHttpClient() != null && plugin.getAiHttpClient().isProviderPaused();
+                    }
+
+                    @Override
+                    public boolean pauseIsGlobal() {
+                        return plugin.getAiHttpClient() != null && plugin.getAiHttpClient().pauseIsGlobal();
+                    }
+
+                    @Override
+                    public boolean providerPaused(String providerId) {
+                        return plugin.getAiHttpClient() != null && plugin.getAiHttpClient().isProviderPaused(providerId);
+                    }
+
+                    @Override
+                    public Optional<String> admitIgnoringPause(UUID playerId, String key) {
+                        if (plugin.getAiHttpClient() == null) {
+                            return Optional.of("NexusAI is not ready");
+                        }
+                        return plugin.getAiHttpClient().tryAdmitIgnoringPause(playerId, key);
+                    }
+
+                    @Override
+                    public void successKeepingPause(String key) {
+                        if (plugin.getAiHttpClient() != null) {
+                            plugin.getAiHttpClient().recordSuccessKeepingPause(key);
+                        }
+                    }
                 },
                 plugin.getLogger(),
                 System::currentTimeMillis
@@ -105,7 +141,8 @@ public final class DialogueService {
                 router::route,
                 summaryStats,
                 plugin.getLogger(),
-                httpExecutor
+                httpExecutor,
+                () -> plugin.getPluginConfig().configuredSecrets()
         );
         this.engine = new DialogueEngine(
                 memory,
@@ -435,7 +472,7 @@ public final class DialogueService {
                     characterId,
                     System.currentTimeMillis(),
                     config.dialogueSettings().memoryExpiryMillis()
-            ));
+            ), config.configuredSecrets());
         }
         DialogueEngine.TalkRequest request = new DialogueEngine.TalkRequest(
                 player.getUniqueId(),
@@ -450,7 +487,7 @@ public final class DialogueService {
                 prompt.dialogue(),
                 prompt.actions(),
                 config.dialogueSettings(),
-                prompt.overrides().withFormat(format),
+                withTalkFallback(prompt, config).withFormat(format),
                 format,
                 world,
                 location.getX(),
@@ -471,6 +508,21 @@ public final class DialogueService {
             selection = prompt.context();
         }
         return new Prepared(request, contextRequest, selection, instruction);
+    }
+
+    /**
+     * A per-prompt {@code fallback-model} replaces the global one. The router reads this on the call.
+     */
+    private static GenerationOverrides withTalkFallback(NamedPrompt prompt, PluginConfig config) {
+        GenerationOverrides overrides = prompt.overrides();
+        if (overrides.fallbackModel() != null) {
+            return overrides;
+        }
+        FallbackModel chosen = prompt.fallbackModel() != null ? prompt.fallbackModel() : config.fallbackModel();
+        if (chosen != null && chosen.configured()) {
+            return overrides.withFallbackModel(chosen.provider(), chosen.model());
+        }
+        return overrides;
     }
 
     static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player) {

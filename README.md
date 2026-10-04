@@ -25,7 +25,7 @@ Supported servers are Paper and Purpur 1.20.6 through 26.2. Folia is not support
 
 ## Installation
 
-1. Put `NexusAI-1.1.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.0.jar`. `version` in `build.gradle.kts` is `1.1.0`.
+1. Put `NexusAI-1.1.1.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.1.jar`. `version` in `build.gradle.kts` is `1.1.1`.
 2. Install PlaceholderAPI
 3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 
@@ -167,9 +167,9 @@ Daily counters for each provider and each queue entry are stored in `plugins/Nex
 
 `http.max-in-flight` (default 64) is how many HTTP calls may be in progress. `http.queue-size` (default 64) is how many more may wait for a slot. The four `nexusai-http-*` threads are unchanged. A call past both caps fails at once with `HTTP queue is full` and a placeholder keeps its fallback. One warning is written per 30 seconds. Both values must be greater than 0. `0` or a negative value is replaced with 64 before the limit is applied, on startup and on `/nai reload`. Each bad key logs its own warning, naming the key, the rejected value, and 64. A call that does not fit fails at once with `HTTP queue is full` and is not dropped quietly. `/nai reload` applies a new cap without replacing the worker threads.
 
-One connection error pauses that provider for `limits.provider-pause-seconds` (default 60). A weak endpoint — a local proxy, Ollama, or a free-tier host — should use a lower `http.max-in-flight`, because 64 parallel calls are enough to make that endpoint fail and pause every request to it.
+One connection error, or a timeout, pauses every provider for `limits.provider-pause-seconds` (default 60). A weak endpoint — a local proxy, Ollama, or a free-tier host — should use a lower `http.max-in-flight`, because 64 parallel calls are enough to make that endpoint fail and pause every request to it. While that global pause is in effect, placeholders stay on their fallback text and `/nai talk` is not sent. The player sees `talk.busy`. `fallback-model` is not used after a connection error, a timeout, or HTTP 500.
 
-While that pause is in effect, `/nai talk` player replies are paused together with the provider. The turn is not sent, and `fallback-model` is not called for it. The player sees the `talk.busy` line (`The character is busy. Try again later.`). The provider error, including an HTTP 429 body, is written to the server log with secrets masked. It is not shown in chat.
+HTTP 429 pauses the provider that returned it. `/nai talk` uses `fallback-model` only for that kind of named pause, and only when no unpaused queue provider is left and the fallback model is a different provider that is not paused. A successful talk reply does not clear the queue provider's cooldown, and it does not arm the request-gate pause. The queue row stays on cooldown, and a later placeholder follows the usual queue-then-fallback order, so it can receive a fresh answer from that same fallback model. Placeholders stay on their fallback text when the request gate itself is paused: a placeholder's own 429, a fallback on the same provider, a fallback that also returns 429, or a global pause. `/nai status` then shows `Provider pause: rate limit`. If talk has no such fallback, the line is not sent and the player sees the `talk.busy` line (`The character is busy. Try again later.`). A reply that is empty only after colour codes or markup are removed, and a rejected reply, do not cool that fallback; the next line tries it again. Content that is missing, null, or only whitespace is a transport error: the player sees `talk.busy` and that row cools down for `limits.provider-pause-seconds`, on the fallback and on the main path. A boundary marker returned next to a real tool call rejects the whole reply, and the action does not run. The provider error, including an HTTP 429 body, is written to the server log with secrets masked. It is not shown in chat. `/nai reload` applies a new `http.max-in-flight` and `http.queue-size` to the next `/nai talk` as well as to placeholders.
 
 ### Formats
 
@@ -187,13 +187,13 @@ On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usag
 
 ### Generation
 
-Optional request fields. `system-prompt` is omitted when empty, and `temperature` is omitted when negative. `api.max-tokens` defaults to **256** and is sent as `max_tokens` on every bundled provider (`openai`, `groq`, `cerebras`, `gemini`, `deepseek`, `ollama`, `openrouter`). They all use the same chat-completions body. o-series models receive `max_completion_tokens` instead. `0` or a negative value, including `-1`, leaves the field off. A missing `api.max-tokens` in an older `config.yml` is appended as `256` on startup, with the usual `<file>.bak` copy. A value you already set, other than the old default `0` on a file that is not yet version 2, is left as it is. See [Migration](#migration).
+Optional request fields. `system-prompt` is omitted when empty, and `temperature` is omitted when negative. `api.max-tokens` defaults to **256** and is sent as `max_tokens` on every bundled provider (`openai`, `groq`, `cerebras`, `gemini`, `deepseek`, `ollama`, `openrouter`). They all use the same chat-completions body. o-series and gpt-5 models receive `max_completion_tokens` instead, and temperature is left off. `0` or a negative value, including `-1`, leaves the field off. A missing `api.max-tokens` in an older `config.yml` is appended as `256` on startup, with the usual `<file>.bak` copy. A value you already set, other than the old default `0` on a file that is not yet version 2, is left as it is. See [Migration](#migration).
 
 - `api.system-prompt` — sent as the system message before the user prompt. The format instruction is appended after it. The player-input guard is appended after that only when the request contains wrapped player input. An empty system prompt with no wrapped input sends no system message
 - `api.temperature` and `api.max-tokens` — copied onto the JSON body. A prompt may set `max-tokens`, and so may a pool entry. That value replaces `api.max-tokens` for that call. A model-queue row does not have its own cap; it uses this value unless the prompt or pool entry overrides it
 - each `pool.entries[]` item may override those three for pool refills only
 - `api.strip-markdown`, `api.max-answer-chars`, `api.max-answer-lines` — applied to every answer (`0` means no limit)
-- `api.reasoning-effort` — sent only for reasoning models (`o1` / `o3` / `o4`, `gpt-oss`, `deepseek-r1`, `qwq`, names containing `reasoner`). Their token budget is raised to at least 2048. o-series models receive `max_completion_tokens` instead of `max_tokens`, and temperature is not sent. Set the effort to `off` to skip the field.
+- `api.reasoning-effort` — sent only for reasoning models (`o1` / `o3` / `o4`, `gpt-5` and names that continue it such as `gpt-5-mini` or `gpt-5.1`, `gpt-oss`, `deepseek-r1`, `qwq`, names containing `reasoner`). Their token budget is raised to at least 2048. o-series and gpt-5 models receive `max_completion_tokens` instead of `max_tokens`, and temperature is not sent. Other reasoning names keep `max_tokens`. Set the effort to `off` to skip the field.
 
 Answers whose `content` is an array of parts are joined into one string.
 
@@ -265,7 +265,7 @@ blacksmith:
     max-replies: 8
 ```
 
-Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cache it for `cache.ttl` (`dialogue.cache-greeting`). Later replies are not cached and are not taken from the answer pool. During a provider pause, player replies are paused together with the provider: the line is not sent, `fallback-model` is not used, and the player sees `talk.busy` instead of the provider's error body. See [HTTP pool](#http-pool).
+Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cache it for `cache.ttl` (`dialogue.cache-greeting`). Later replies are not cached and are not taken from the answer pool. After HTTP 429 pauses only the queue provider, a player reply is sent to `fallback-model` when that model is on a different provider and that provider is not paused. A successful reply leaves the queue row on cooldown and does not arm the request-gate pause, so a later placeholder can still be answered by that fallback model. Placeholders stay on fallback text while the request gate itself is paused. A connection error, a timeout, and HTTP 500 do not send the line to `fallback-model`. If nothing else can answer, the line is not sent and the player sees `talk.busy` instead of the provider's error body. See [HTTP pool](#http-pool).
 
 A session ends when `dialogue.session-timeout-seconds` passes with no line, the player moves farther than `dialogue.leave-radius` blocks from where the session started, they run `/nai talk end`, or they quit. While it is open, their chat is cancelled at the highest priority so it is not broadcast. Listeners that run earlier still see the line.
 

@@ -244,6 +244,8 @@ def execute_scenario(
         jfr_server, jfr_nexus = (0, 0)
         if jfr_path.is_file() and jfr_path.stat().st_size > 0:
             jfr_server, jfr_nexus = read_jfr(jfr_path, out / f"jfr-{scenario}-try{attempt}.txt")
+        elif not args.skip_jfr and scenario not in {"baseline"} and not jfr_note:
+            jfr_note = "JFR recording was not written"
         bot_messages = read_bot_messages(out / "bots.json")
         judged = judge(scenario, report, {
             "baseline_mean": baseline_mean,
@@ -289,6 +291,11 @@ def record_jfr(process, log_chunks, before, jfc, destination, load_seconds, scen
         wait_marker(process, log_chunks, before, "SCENARIO_MEASURE ", min(45, load_seconds + 40))
     except RuntimeError as error:
         return str(error)
+    # jcmd resolves settings and filename from the target JVM's working directory
+    # (the Paper server dir). A relative path misses load.jfc and writes nothing,
+    # and jcmd still exits 0.
+    jfc = Path(jfc).resolve()
+    destination = Path(destination).resolve()
     jcmd = tool("jcmd")
     subprocess.run([jcmd, str(process.pid), "JFR.stop", "name=nexusai"], capture_output=True, text=True)
     if destination.exists():
@@ -297,16 +304,18 @@ def record_jfr(process, log_chunks, before, jfc, destination, load_seconds, scen
         [jcmd, str(process.pid), "JFR.start", "name=nexusai", f"settings={jfc}", f"filename={destination}", "dumponexit=true"],
         capture_output=True, text=True,
     )
-    if started.returncode != 0:
-        return (started.stdout + started.stderr).strip()
+    start_text = (started.stdout + started.stderr).strip()
+    if started.returncode != 0 or "Could not" in start_text:
+        return start_text or f"JFR.start failed with exit {started.returncode}"
     warmup = 0 if scenario in {"S-pool"} else 10
     time.sleep(max(1, load_seconds - warmup))
     stopped = subprocess.run(
         [jcmd, str(process.pid), "JFR.stop", "name=nexusai", f"filename={destination}"],
         capture_output=True, text=True,
     )
-    if stopped.returncode != 0:
-        return (stopped.stdout + stopped.stderr).strip()
+    stop_text = (stopped.stdout + stopped.stderr).strip()
+    if stopped.returncode != 0 or "Could not" in stop_text:
+        return stop_text or f"JFR.stop failed with exit {stopped.returncode}"
     return ""
 
 
@@ -349,10 +358,13 @@ def judge(scenario: str, report: dict, ctx: dict) -> dict:
         if report.get("tpsMin", 0) < 19.8:
             reasons.append(f"TPS {report.get('tpsMin')} < 19.8")
         if ctx.get("jfr_required", True):
-            if ctx.get("jfr_server", 0) <= 0:
-                reasons.append(ctx.get("jfr_note") or "JFR produced no Server thread samples")
-            elif percent(ctx["jfr_nexus"], ctx["jfr_server"]) > 2.0:
-                reasons.append(f"JFR {percent(ctx['jfr_nexus'], ctx['jfr_server']):.2f}% > 2%")
+            note = ctx.get("jfr_note") or ""
+            server_samples = ctx.get("jfr_server", 0)
+            if note:
+                reasons.append(note)
+            elif server_samples >= 200 and percent(ctx["jfr_nexus"], server_samples) > 2.0:
+                # Below ~200 Server-thread samples the 2% line is noise. See docs/LOADTEST.md.
+                reasons.append(f"JFR {percent(ctx['jfr_nexus'], server_samples):.2f}% > 2%")
         unique = report.get("uniquePrompts", 0)
         if ctx.get("mock_count", 0) > unique:
             reasons.append(f"mock requests {ctx['mock_count']} > unique prompts {unique}")
@@ -1016,6 +1028,21 @@ def self_check() -> int:
     slow["callNanos"] = {"p99": 500_000}
     if judge("S1", slow, ctx)["status"] != "fail":
         raise SystemExit("S1 p99 should fail")
+    noisy = dict(ctx)
+    noisy["jfr_server"] = 5
+    noisy["jfr_nexus"] = 1
+    if judge("S2", base, noisy)["status"] != "pass":
+        raise SystemExit(f"S2 should ignore a 2% JFR share below 200 samples: {judge('S2', base, noisy)}")
+    hot = dict(ctx)
+    hot["jfr_server"] = 1000
+    hot["jfr_nexus"] = 30
+    if judge("S2", base, hot)["status"] != "fail":
+        raise SystemExit("S2 should fail a 3% JFR share at 1000 samples")
+    missing = dict(ctx)
+    missing["jfr_server"] = 0
+    missing["jfr_note"] = "JFR recording was not written"
+    if judge("S2", base, missing)["status"] != "fail":
+        raise SystemExit("S2 should fail when the JFR recording was not written")
     leaked = dict(ctx)
     leaked["canary"] = True
     if judge("baseline", base, leaked)["status"] != "fail":

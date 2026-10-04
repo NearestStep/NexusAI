@@ -2,10 +2,12 @@ package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -28,6 +30,7 @@ public final class DialogueSummary {
     private final SummaryStats stats;
     private final Logger logger;
     private final Executor executor;
+    private final Supplier<List<String>> secrets;
 
     public DialogueSummary(
             MemoryStore memory,
@@ -36,11 +39,23 @@ public final class DialogueSummary {
             Logger logger,
             Executor executor
     ) {
+        this(memory, model, stats, logger, executor, List::of);
+    }
+
+    public DialogueSummary(
+            MemoryStore memory,
+            DialogueEngine.DialogueModel model,
+            SummaryStats stats,
+            Logger logger,
+            Executor executor,
+            Supplier<List<String>> secrets
+    ) {
         this.memory = memory;
         this.model = model;
         this.stats = stats == null ? new SummaryStats(null) : stats;
         this.logger = logger;
         this.executor = executor == null ? Runnable::run : executor;
+        this.secrets = secrets == null ? List::of : secrets;
     }
 
     public SummaryStats stats() {
@@ -48,10 +63,22 @@ public final class DialogueSummary {
     }
 
     public static String block(String summary) {
+        return block(summary, List.of());
+    }
+
+    /**
+     * The stored summary is player-derived text. Configured secrets are masked before it is wrapped
+     * into a later request.
+     */
+    public static String block(String summary, Iterable<String> secrets) {
         if (summary == null || summary.isBlank()) {
             return "";
         }
-        return HEADER + PlayerInput.wrap(summary);
+        String masked = SecretMask.redact(summary, secrets);
+        if (masked.isBlank()) {
+            return "";
+        }
+        return HEADER + PlayerInput.wrap(masked);
     }
 
     public static String foldedText(String previousSummary, List<TurnMemory.Line> lines) {
@@ -88,6 +115,7 @@ public final class DialogueSummary {
                     wrapped,
                     job.settings().summaryMaxChars()
             );
+            clean = SecretMask.redact(clean, secrets.get());
             if (clean.isEmpty()) {
                 refuse(job);
                 return;

@@ -40,13 +40,14 @@ api:
   # 256 fits a short placeholder or talk reply. A prompt or pool entry may set a higher max-tokens.
   # A config-version 1 file that still has the old default 0 is migrated to 256 once.
   # Groq in the model queue logs one warning when this value is not positive.
-  # Reasoning models are raised to at least 2048. o-series models receive max_completion_tokens instead.
+  # Reasoning models are raised to at least 2048. o-series and gpt-5 models receive max_completion_tokens instead.
   max-tokens: 256
   # Strip markdown and clamp the answer (0 = no limit). Useful for holograms and menus.
   strip-markdown: false
   max-answer-chars: 0
   max-answer-lines: 0
-  # Sent only for reasoning models (o1/o3/o4, gpt-oss, deepseek-r1, qwq, *reasoner*). off = never send.
+  # Sent only for reasoning models (o1/o3/o4, gpt-5*, gpt-oss, deepseek-r1, qwq, *reasoner*). off = never send.
+  # o-series and gpt-5 send max_completion_tokens and omit temperature. The others keep max_tokens.
   reasoning-effort: low
   connect-timeout: 5
   read-timeout: 30

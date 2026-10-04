@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.HttpGate;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.PlayerInput;
@@ -17,10 +18,14 @@ import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.time.Duration;
 import java.time.ZoneId;
+import java.util.concurrent.CompletableFuture;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -400,6 +405,278 @@ class DialogueHttpTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void unsolicitedToolCallsDoNotBypassFinishText() throws Exception {
+        String key = "test-key";
+        String raw = "&cRAW§l TOOLTEXT §§§ END §§§ " + key;
+        HttpServer server = toolServer(raw, "qa_action");
+        try {
+            MemoryStore memory = new MemoryStore();
+            DialogueEngine engine = engine(server, memory);
+            UUID player = UUID.randomUUID();
+            TalkResult result = engine.talk(talk(player, "hello", 1_000L));
+            assertEquals(TalkCode.REPLY, result.code());
+            assertEquals("...", result.text());
+            assertFalse(result.text().contains(key));
+            assertFalse(result.text().contains("TOOLTEXT"));
+            assertFalse(result.text().contains("§"));
+            String remembered = memory.transcript(player, "blacksmith", 1_000L, 8, 8000, 0L).toString();
+            assertFalse(remembered.contains(key));
+            assertFalse(remembered.contains("TOOLTEXT"));
+            assertFalse(remembered.contains("§"));
+            assertFalse(remembered.contains("END"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void contentAlongsideARealToolCallIsSanitized() throws Exception {
+        String key = "test-key";
+        AtomicReference<String> followUp = new AtomicReference<>();
+        AtomicInteger attempts = new AtomicInteger();
+        HttpServer server = server((exchange, attempt) -> {
+            byte[] rawBody = exchange.getRequestBody().readAllBytes();
+            int n = attempts.incrementAndGet();
+            String payload;
+            if (n == 1) {
+                payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"&cHello " + key + "\","
+                        + "\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"give_iron\",\"arguments\":\"{}\"}}]}}]}";
+            } else {
+                followUp.set(new String(rawBody, StandardCharsets.UTF_8));
+                payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Done.\"}}]}";
+            }
+            byte[] response = payload.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        try {
+            PluginConfig config = config(server.getAddress().getPort(), PluginConfig.DEFAULT_MAX_TOKENS);
+            DialogueEngine engine = new DialogueEngine(
+                    new MemoryStore(),
+                    new SessionBook(),
+                    new ActionGate(),
+                    new DialogueBudget(),
+                    new GreetingCache(),
+                    router(config)::route,
+                    (id, action, command) -> "ran",
+                    ActionLog.noop(),
+                    ZoneId.of("UTC"));
+            DialogueSettings settings = new DialogueSettings(
+                    true, 8, false, 8000, 0, 0, 0, 12, 0, 0, 200, false, 300, true, false, 1);
+            TalkResult result = engine.talk(new DialogueEngine.TalkRequest(
+                    UUID.randomUUID(),
+                    "Steve",
+                    "blacksmith",
+                    "hello",
+                    false,
+                    false,
+                    false,
+                    "You are Bram.",
+                    "...",
+                    DialogueProfile.absent(),
+                    List.of(action()),
+                    settings,
+                    GenerationOverrides.none(),
+                    "chat",
+                    "world",
+                    0,
+                    64,
+                    0,
+                    node -> true,
+                    1_000L));
+            assertEquals(TalkCode.REPLY, result.code());
+            assertEquals("Done.", result.text());
+            assertEquals(2, attempts.get());
+            String assistant = "";
+            for (JsonNode message : mapper.readTree(followUp.get()).get("messages")) {
+                if ("assistant".equals(message.get("role").asText())) {
+                    assistant = message.get("content").asText();
+                }
+            }
+            assertEquals("Hello ****-key", assistant);
+            assertFalse(assistant.contains(key));
+            assertFalse(assistant.contains("&"));
+            assertFalse(assistant.contains("§"));
+            assertFalse(result.text().contains(key));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void talkReadsTheHttpGateSuppliedAtSendTime() throws Exception {
+        HttpServer server = server((exchange, attempt) -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hello.\"}}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        try {
+            PluginConfig config = config(server.getAddress().getPort());
+            AtomicReference<HttpGate> gates = new AtomicReference<>();
+            HttpGate blocked = new HttpGate(1, 0, null);
+            gates.set(blocked);
+            DialogueTransport transport = new DialogueTransport(
+                    () -> config, HttpClient.newHttpClient(), gates::get);
+            blocked.schedule(() -> new CompletableFuture<>());
+            assertTrue(transport.saturated());
+            HttpGate reloaded = new HttpGate(4, 4, null);
+            gates.set(reloaded);
+            assertFalse(transport.saturated());
+            DialogueTransport.Result result = transport.send(new DialogueTransport.Request(
+                    config.getBaseUrl(),
+                    "test-key",
+                    "gpt-4o-mini",
+                    "system",
+                    List.of(new DialogueProtocol.MemoryLine("user", "hi")),
+                    List.of(),
+                    null,
+                    16,
+                    null,
+                    null,
+                    Duration.ofSeconds(2)));
+            assertEquals("Hello.", result.content());
+            assertEquals(1, blocked.snapshot().inFlight());
+            assertEquals(0, reloaded.snapshot().inFlight());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void apiKeyUsedAsAToolNameIsMaskedInLogsAndNotEchoed() throws Exception {
+        String key = "sk-qa-toolname-1111";
+        AtomicReference<String> followUp = new AtomicReference<>();
+        HttpServer server = server((exchange, attempt) -> {
+            byte[] rawBody = exchange.getRequestBody().readAllBytes();
+            String payload;
+            if (attempt == 1) {
+                payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hello.\","
+                        + "\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\""
+                        + key + "\",\"arguments\":\"{}\"}}]}}]}";
+            } else {
+                followUp.set(new String(rawBody, StandardCharsets.UTF_8));
+                payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Done.\"}}]}";
+            }
+            byte[] response = payload.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        java.nio.file.Path dir = Files.createTempDirectory("nai-actions");
+        File actions = dir.resolve("actions.log").toFile();
+        Logger logger = Logger.getLogger("action-key-" + UUID.randomUUID());
+        logger.setUseParentHandlers(false);
+        List<String> lines = new ArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getMessage() != null) {
+                    lines.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            PluginConfig config = config(server.getAddress().getPort());
+            MemoryStore memory = new MemoryStore();
+            DialogueEngine engine = new DialogueEngine(
+                    memory,
+                    new SessionBook(),
+                    new ActionGate(),
+                    new DialogueBudget(),
+                    new GreetingCache(),
+                    router(config)::route,
+                    (id, action, command) -> "ran",
+                    new ActionLog(logger, actions, () -> true),
+                    ZoneId.of("UTC"),
+                    null,
+                    null,
+                    () -> List.of(key));
+            DialogueSettings settings = new DialogueSettings(
+                    true, 8, false, 8000, 0, 0, 0, 12, 0, 0, 200, false, 300, true, true, 1);
+            UUID player = UUID.randomUUID();
+            TalkResult result = engine.talk(new DialogueEngine.TalkRequest(
+                    player,
+                    "Steve",
+                    "blacksmith",
+                    "hello",
+                    false,
+                    false,
+                    false,
+                    "You are Bram.",
+                    "...",
+                    DialogueProfile.absent(),
+                    List.of(action()),
+                    settings,
+                    GenerationOverrides.none(),
+                    "chat",
+                    "world",
+                    0,
+                    64,
+                    0,
+                    node -> true,
+                    1_000L));
+            assertEquals(TalkCode.REPLY, result.code());
+            assertEquals("Done.", result.text());
+            assertFalse(result.text().contains(key));
+            assertTrue(followUp.get().contains("refused: unknown action"));
+            assertFalse(followUp.get().contains(key));
+            String logged = String.join("\n", lines);
+            assertTrue(logged.contains("****1111"), logged);
+            assertFalse(logged.contains(key), logged);
+            String file = Files.readString(actions.toPath());
+            assertTrue(file.contains("****1111"), file);
+            assertFalse(file.contains(key), file);
+            assertFalse(file.contains("action=" + key));
+            String remembered = memory.transcript(player, "blacksmith", 1_000L, 8, 8000, 0L).toString();
+            assertFalse(remembered.contains(key));
+        } finally {
+            logger.removeHandler(handler);
+            server.stop(0);
+        }
+    }
+
+    private static HttpServer toolServer(String content, String toolName) throws Exception {
+        String json = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
+                + new ObjectMapper().writeValueAsString(content)
+                + ",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\""
+                + toolName + "\",\"arguments\":\"{}\"}}]}}]}";
+        return server((exchange, attempt) -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = json.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+    }
+
+    private static DialogueEngine engine(HttpServer server, MemoryStore memory) {
+        PluginConfig config = config(server.getAddress().getPort());
+        return new DialogueEngine(
+                memory,
+                new SessionBook(),
+                new ActionGate(),
+                new DialogueBudget(),
+                new GreetingCache(),
+                router(config)::route,
+                (id, action, command) -> "ran",
+                ActionLog.noop(),
+                ZoneId.of("UTC"));
     }
 
     private static CharacterAction action() {

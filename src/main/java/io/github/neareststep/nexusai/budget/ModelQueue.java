@@ -437,6 +437,32 @@ public final class ModelQueue {
         return new AiRequestException(AiErrorKind.OTHER, 0, "Model queue entry is cooling down." + retry, null);
     }
 
+    /**
+     * True when every queue row for {@code provider} is held by a rate-limit, quota, or auth failure.
+     * A daily cap and a generic error cooldown are not this hold. A provider with no row is false.
+     */
+    public synchronized boolean providerPauseHold(String provider, long nowMillis) {
+        if (provider == null || provider.isBlank()) {
+            return false;
+        }
+        boolean saw = false;
+        for (Slot slot : slots) {
+            if (!slot.provider.equals(provider)) {
+                continue;
+            }
+            saw = true;
+            if (nowMillis >= slot.unavailableUntil) {
+                return false;
+            }
+            boolean pausing = slot.hold == Hold.HEADER
+                    || (slot.lastError != null && slot.lastError.kind().pausesProvider());
+            if (!pausing) {
+                return false;
+            }
+        }
+        return saw;
+    }
+
     public synchronized void markFailure(int index, AiRequestException error, long nowMillis) {
         markSlotFailure(slot(index), error, nowMillis);
     }
@@ -775,13 +801,17 @@ public final class ModelQueue {
         if (!retry.isEmpty() && !message.contains("Retry after")) {
             message = message.isEmpty() ? retry.strip() : message + retry;
         }
-        return new AiRequestException(
+        AiRequestException copied = new AiRequestException(
                 cause.kind(),
                 cause.status(),
                 message,
                 cause,
                 cause.retryAfterSeconds(),
                 cause.headers());
+        for (String provider : AiRequestException.pausedProvidersOf(cause)) {
+            copied = copied.withPausedProvider(provider);
+        }
+        return copied;
     }
 
     private void holdUntilMidnight(Slot slot, long nowMillis) {

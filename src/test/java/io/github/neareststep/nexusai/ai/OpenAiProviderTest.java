@@ -12,6 +12,7 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
@@ -148,6 +149,46 @@ class OpenAiProviderTest {
         assertFalse(oJson.has("temperature"));
         assertEquals("system", oJson.get("messages").get(0).get("content").asText());
         assertFalse(oJson.toString().contains(PlayerInput.GUARD));
+
+        for (String model : new String[] {"gpt-5", "gpt-5-mini", "openai/gpt-5.1"}) {
+            PluginConfig gpt5 = config(model, "system", 0.4, 100, "low", false, 0, 0, "low");
+            JsonNode json = mapper.valueToTree(OpenAiProvider.buildBody(gpt5, "hi", GenerationOverrides.none()));
+            assertEquals("low", json.get("reasoning_effort").asText(), model);
+            assertTrue(json.get("max_completion_tokens").asInt() >= ReasoningModels.TOKEN_FLOOR, model);
+            assertFalse(json.has("max_tokens"), model);
+            assertFalse(json.has("temperature"), model);
+        }
+    }
+
+    @Test
+    void nonReasoningRequestBodiesStayByteIdenticalTo110() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper bytes = new com.fasterxml.jackson.databind.ObjectMapper()
+                .setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
+        PluginConfig plain = config("gpt-4o-mini", "", -1, 256, "", false, 0, 0, "low");
+        assertEquals(
+                "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":256}",
+                new String(bytes.writeValueAsBytes(OpenAiProvider.buildBody(plain, "hi", GenerationOverrides.none())),
+                        java.nio.charset.StandardCharsets.UTF_8));
+
+        PluginConfig shaped = config("llama-3.1-8b", "Be brief.", 0.2, 128, "", false, 0, 0, "low");
+        GenerationOverrides overrides = GenerationOverrides.of(true, "Pool system", true, 0.0, true, 32);
+        assertEquals(
+                "{\"model\":\"llama-3.1-8b\",\"messages\":[{\"role\":\"system\",\"content\":\"Pool system\"},{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0.0,\"max_tokens\":32}",
+                new String(bytes.writeValueAsBytes(OpenAiProvider.buildBody(shaped, "hi", overrides)),
+                        java.nio.charset.StandardCharsets.UTF_8));
+
+        byte[] talk = io.github.neareststep.nexusai.dialogue.DialogueProtocol.requestJson(
+                "gpt-4o-mini",
+                "You are Bram.",
+                java.util.List.of(new io.github.neareststep.nexusai.dialogue.DialogueProtocol.MemoryLine("user", "hi")),
+                java.util.List.of(),
+                null,
+                256,
+                null,
+                null);
+        assertEquals(
+                "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"system\",\"content\":\"You are Bram.\"},{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":256}",
+                new String(talk, java.nio.charset.StandardCharsets.UTF_8));
     }
 
     @Test
@@ -244,12 +285,48 @@ class OpenAiProviderTest {
         assertEquals(
                 "http://127.0.0.1/v1/chat/completions?key=X",
                 ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/?key=X").toString());
+        URI withFragment = ChatEndpoints.chatCompletions("http://127.0.0.1/v1#frag");
+        assertEquals("http://127.0.0.1/v1/chat/completions#frag", withFragment.toString());
+        assertEquals("frag", withFragment.getFragment());
         assertEquals(
                 "http://127.0.0.1/v1/chat/completions#frag",
                 ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions#frag").toString());
+        assertEquals("frag", ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions#frag").getFragment());
         assertEquals(
                 "http://127.0.0.1/v1/chat/completions?key=X#frag",
                 ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/?key=X#frag").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/Chat/Completions",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/Chat/Completions").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/Chat/Completions?key=X",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/Chat/Completions/?key=X").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions/extra",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/extra").toString());
+        assertEquals(
+                "http://127.0.0.1/v1/chat/completions/extra?key=X",
+                ChatEndpoints.chatCompletions("http://127.0.0.1/v1/chat/completions/extra/?key=X").toString());
+        URI extraFragment = ChatEndpoints.chatCompletions("http://127.0.0.1/v1/CHAT/COMPLETIONS/extra/#frag");
+        assertEquals("http://127.0.0.1/v1/CHAT/COMPLETIONS/extra#frag", extraFragment.toString());
+        assertEquals("frag", extraFragment.getFragment());
+        for (String provider : ProviderCatalog.IDS) {
+            String url = ChatEndpoints.chatCompletions(ProviderCatalog.officialUrl(provider)).toString().toLowerCase(java.util.Locale.ROOT);
+            int at = 0;
+            int count = 0;
+            while (at >= 0) {
+                at = url.indexOf("/chat/completions", at);
+                if (at >= 0) {
+                    count++;
+                    at += "/chat/completions".length();
+                }
+            }
+            assertEquals(1, count, provider + " -> " + url);
+            String already = ProviderCatalog.officialUrl(provider) + "/Chat/Completions";
+            String kept = ChatEndpoints.chatCompletions(already).toString();
+            assertEquals(already, kept, provider);
+            assertFalse(kept.toLowerCase(java.util.Locale.ROOT).contains("/chat/completions/chat/completions"), provider);
+        }
 
         AtomicReference<String> path = new AtomicReference<>();
         AtomicReference<String> query = new AtomicReference<>();
