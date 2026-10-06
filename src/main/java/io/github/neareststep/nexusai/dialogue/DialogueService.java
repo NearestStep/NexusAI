@@ -38,6 +38,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
+import java.util.logging.Level;
 
 /**
  * Bukkit-facing dialogue sessions. Model calls run off the region thread.
@@ -49,6 +50,13 @@ public final class DialogueService {
     private final ExecutorService httpExecutor;
     private final ScheduledExecutorService scheduler;
     private final MemoryStore memory;
+    /**
+     * True after the live file has been loaded. Stays false while persistence is off, and until the
+     * first off-to-on load finishes, so a save cannot run in that gap.
+     */
+    private volatile boolean memoryLoadedFromDisk;
+    /** Background load started by {@link #onReload}. Null when none is running. */
+    private Thread diskLoader;
     private final DialogueEngine engine;
     private final SummaryStats summaryStats;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
@@ -63,8 +71,12 @@ public final class DialogueService {
         this.scheduler = scheduler;
         this.memory = new MemoryStore();
         DialogueSettings initial = plugin.getPluginConfig().dialogueSettings();
+        java.util.List<String> secrets = plugin.getPluginConfig().configuredSecrets();
         if (initial.persistMemory()) {
-            memory.load(memoryFile(), System.currentTimeMillis(), initial.memoryExpiryMillis(), plugin.getLogger());
+            memory.load(memoryFile(), System.currentTimeMillis(), initial.memoryExpiryMillis(), plugin.getLogger(), secrets);
+            memoryLoadedFromDisk = true;
+        } else {
+            MemoryStore.redactOnDisk(memoryFile(), secrets, plugin.getLogger(), memory);
         }
         HttpClient http = HttpClient.newBuilder().connectTimeout(plugin.getPluginConfig().getConnectTimeout()).build();
         DialogueTransport transport = new DialogueTransport(
@@ -169,6 +181,45 @@ public final class DialogueService {
         summaryStats.reset();
     }
 
+    /**
+     * {@code /nai reload} keeps this service. When persistence flips from off to on, the file on disk
+     * is loaded before the next save. The read runs off this thread. A file that could not be copied
+     * aside stays in place.
+     */
+    public void onReload() {
+        resetSummaryStats();
+        Thread worker;
+        synchronized (this) {
+            if (memoryLoadedFromDisk || diskLoader != null) {
+                return;
+            }
+            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
+            if (!settings.persistMemory()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            long expiry = settings.memoryExpiryMillis();
+            List<String> secrets = List.copyOf(plugin.getPluginConfig().configuredSecrets());
+            File file = memoryFile();
+            worker = new Thread(() -> {
+                try {
+                    if (memory.loadForPersistence(file, now, expiry, plugin.getLogger(), secrets)) {
+                        memoryLoadedFromDisk = true;
+                    }
+                } catch (RuntimeException e) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to load dialogue-memory.yml", e);
+                } finally {
+                    synchronized (DialogueService.this) {
+                        diskLoader = null;
+                    }
+                }
+            }, "nexusai-memory-load");
+            worker.setDaemon(true);
+            diskLoader = worker;
+            worker.start();
+        }
+    }
+
     public void start() {
         this.sweep = scheduler.scheduleWithFixedDelay(this::sweep, 1, 1, TimeUnit.SECONDS);
         this.save = scheduler.scheduleWithFixedDelay(this::saveMemory, 30, 30, TimeUnit.SECONDS);
@@ -180,6 +231,17 @@ public final class DialogueService {
         }
         if (save != null) {
             save.cancel(false);
+        }
+        Thread pending;
+        synchronized (this) {
+            pending = diskLoader;
+        }
+        if (pending != null) {
+            try {
+                pending.join(5_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         saveMemory();
     }
@@ -628,7 +690,7 @@ public final class DialogueService {
     private void saveMemory() {
         try {
             DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
-            if (!settings.persistMemory()) {
+            if (!settings.persistMemory() || !memoryLoadedFromDisk) {
                 return;
             }
             memory.save(memoryFile(), plugin.getLogger(), settings.summaryEnabled());

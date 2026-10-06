@@ -19,6 +19,8 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -299,6 +301,160 @@ class TalkFallbackPauseTest {
     }
 
     @Test
+    void aDailyBudgetOnFallbackIsNamedBesideTheQueue429() throws Exception {
+        AtomicInteger queueHits = new AtomicInteger();
+        AtomicInteger fallbackHits = new AtomicInteger();
+        HttpServer queue = server(429, "nope", queueHits);
+        HttpServer fallback = server(200, "from-fallback", fallbackHits);
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        Logger failureLog = Logger.getLogger("talk-fallback-budget-" + UUID.randomUUID());
+        failureLog.setUseParentHandlers(false);
+        List<String> lines = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getMessage() != null) {
+                    lines.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        failureLog.addHandler(handler);
+        try {
+            Harness harness = harness(
+                    queue,
+                    fallback,
+                    "groq",
+                    "llama",
+                    1_000,
+                    executor,
+                    List.of("sk-groq-2222"),
+                    failureLog,
+                    List.of(
+                            new QueueEntryConfig("openai", "gpt-4o-mini", 0),
+                            new QueueEntryConfig("groq", "llama", 1)));
+            assertTrue(harness.queue().tryConsume(1, System.currentTimeMillis()));
+            TalkResult result = harness.engine.talk(talk(UUID.randomUUID(), "hello"));
+            assertEquals(TalkCode.BUSY, result.code());
+            assertEquals("", result.text());
+            assertEquals("", result.error());
+            assertEquals(1, queueHits.get());
+            assertEquals(0, fallbackHits.get());
+            String sent = lines.stream().filter(line -> line.contains("Dialogue reply was not sent")).findFirst().orElse("");
+            assertTrue(sent.contains("openai / gpt-4o-mini: HTTP 429"), sent);
+            assertTrue(sent.contains("groq / llama: daily request limit reached (1/1)"), sent);
+            assertFalse(sent.substring(sent.indexOf("groq / llama:")).contains("429"), sent);
+        } finally {
+            failureLog.removeHandler(handler);
+            queue.stop(0);
+            fallback.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void aPlayerVendorKeyIsMaskedWhenStoredAndStaysInTheRequest() throws Exception {
+        String slug = "sk-learn-pipeline-v2-2024-final";
+        String key = "sk-qaUnconfigured9999zz";
+        List<String> bodies = new CopyOnWriteArrayList<>();
+        HttpServer queue = capturingServer(bodies);
+        HttpServer fallback = server(200, "unused", new AtomicInteger());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Harness harness = harness(queue, fallback, "groq", "llama-3.3-70b-versatile", 1_000, executor);
+            UUID player = UUID.randomUUID();
+            TalkResult result = harness.engine.talk(talk(player, "see " + slug + " and " + key));
+            assertEquals(TalkCode.REPLY, result.code());
+            assertEquals(1, bodies.size());
+            assertTrue(bodies.get(0).contains(key), bodies.get(0));
+            assertTrue(bodies.get(0).contains(slug), bodies.get(0));
+            String stored = harness.memory().transcript(player, "blacksmith", 1_000L, 8, 8000, 0L).get(0).text();
+            assertTrue(stored.contains(slug), stored);
+            assertTrue(stored.contains("****99zz"), stored);
+            assertFalse(stored.contains(key), stored);
+            Path dir = Files.createTempDirectory("talk-player-key");
+            Path file = dir.resolve("dialogue-memory.yml");
+            harness.memory().save(file.toFile(), null, false);
+            String yaml = Files.readString(file);
+            assertFalse(yaml.contains(key), yaml);
+            assertTrue(yaml.contains(slug), yaml);
+            assertTrue(yaml.contains("****99zz"), yaml);
+        } finally {
+            queue.stop(0);
+            fallback.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void everyDailyCapLogsTheExhaustedQueueOnce() throws Exception {
+        AtomicInteger queueHits = new AtomicInteger();
+        AtomicInteger fallbackHits = new AtomicInteger();
+        HttpServer queue = server(200, "unused", queueHits);
+        HttpServer fallback = server(200, "unused", fallbackHits);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Logger failureLog = Logger.getLogger("talk-daily-only-" + UUID.randomUUID());
+        failureLog.setUseParentHandlers(false);
+        List<String> lines = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                if (record.getMessage() != null) {
+                    lines.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        failureLog.addHandler(handler);
+        try {
+            Harness harness = harness(
+                    queue,
+                    fallback,
+                    "groq",
+                    "llama",
+                    1_000,
+                    executor,
+                    List.of("sk-groq-2222"),
+                    failureLog,
+                    List.of(
+                            new QueueEntryConfig("openai", "gpt-4o-mini", 1),
+                            new QueueEntryConfig("groq", "llama", 1)));
+            long now = System.currentTimeMillis();
+            assertTrue(harness.queue().tryConsume(0, now));
+            assertTrue(harness.queue().tryConsume(1, now));
+            TalkResult first = harness.engine.talk(talk(UUID.randomUUID(), "hello"));
+            TalkResult second = harness.engine.talk(talk(UUID.randomUUID(), "again"));
+            assertEquals(TalkCode.BUSY, first.code());
+            assertEquals("", first.text());
+            assertEquals(TalkCode.BUSY, second.code());
+            assertEquals(0, queueHits.get());
+            assertEquals(0, fallbackHits.get());
+            List<String> sent = lines.stream().filter(line -> line.contains("Dialogue reply was not sent")).toList();
+            assertEquals(1, sent.size(), lines.toString());
+            assertTrue(sent.get(0).contains("All model-queue entries are exhausted"), sent.get(0));
+        } finally {
+            failureLog.removeHandler(handler);
+            queue.stop(0);
+            fallback.stop(0);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void aGenericQueueErrorDoesNotSendTalkToFallback() throws Exception {
         AtomicInteger queueHits = new AtomicInteger();
         AtomicInteger fallbackHits = new AtomicInteger();
@@ -350,6 +506,21 @@ class TalkFallbackPauseTest {
                 : ",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\""
                 + toolName + "\",\"arguments\":\"{}\"}}]";
         return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + escaped + "\"" + tools + "}}]}";
+    }
+
+    private static HttpServer capturingServer(List<String> bodies) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        return server;
     }
 
     private static HttpServer server(int status, String text, AtomicInteger hits) throws Exception {
@@ -417,7 +588,8 @@ class TalkFallbackPauseTest {
             ExecutorService executor
     ) {
         return harness(
-                queue, fallback, fallbackProvider, fallbackModel, perMinute, executor, List.of("sk-groq-2222"), null);
+                queue, fallback, fallbackProvider, fallbackModel, perMinute, executor, List.of("sk-groq-2222"), null,
+                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)));
     }
 
     private static Harness harness(
@@ -430,10 +602,26 @@ class TalkFallbackPauseTest {
             List<String> groqKeys,
             Logger failureLog
     ) {
+        return harness(
+                queue, fallback, fallbackProvider, fallbackModel, perMinute, executor, groqKeys, failureLog,
+                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)));
+    }
+
+    private static Harness harness(
+            HttpServer queue,
+            HttpServer fallback,
+            String fallbackProvider,
+            String fallbackModel,
+            int perMinute,
+            ExecutorService executor,
+            List<String> groqKeys,
+            Logger failureLog,
+            List<QueueEntryConfig> rows
+    ) {
         PluginConfig config = config(queue, fallback, fallbackProvider, fallbackModel, groqKeys);
         Logger logger = Logger.getLogger("talk-fallback-" + queue.getAddress().getPort());
         ModelQueue modelQueue = new ModelQueue(
-                List.of(new QueueEntryConfig("openai", "gpt-4o-mini", 0)),
+                rows,
                 0,
                 60_000L,
                 300_000L,
@@ -489,7 +677,7 @@ class TalkFallbackPauseTest {
                 null,
                 failureLog,
                 config::configuredSecrets);
-        return new Harness(client, engine, gate, memory);
+        return new Harness(client, engine, gate, memory, modelQueue);
     }
 
     private static DialogueRouter.Admission admission(RequestGate gate) {
@@ -601,6 +789,12 @@ class TalkFallbackPauseTest {
                 1_000L);
     }
 
-    private record Harness(AiHttpClient client, DialogueEngine engine, RequestGate gate, MemoryStore memory) {
+    private record Harness(
+            AiHttpClient client,
+            DialogueEngine engine,
+            RequestGate gate,
+            MemoryStore memory,
+            ModelQueue queue
+    ) {
     }
 }

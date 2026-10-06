@@ -104,6 +104,108 @@ class ProviderParsingTest {
     }
 
     @Test
+    void vendorShapedKeysAreMaskedAndOrdinaryTextIsNot() {
+        String openAi = "sk-qaUnconfigured9999zz";
+        String groq = "gsk_Q1w2E3r4T5y6U7i8O9p0A1s2";
+        String google = "AIza" + "FAKE0EXAMPLE0KEY0for0tests0onlyrstu";
+        String sentence = "The smith asked about the sky and the task-list. sk-iron stays in the chest.";
+        String noDigit = "sk-abcdefghijklmnopqrst";
+        String configured = "sk-abcdefghijklmnopqrst1";
+        String combined = sentence + " " + openAi + " " + groq + " " + google + " " + noDigit;
+        String masked = SecretMask.redact(combined, List.of());
+        assertFalse(masked.contains(openAi), masked);
+        assertFalse(masked.contains(groq), masked);
+        assertFalse(masked.contains(google), masked);
+        assertTrue(masked.contains("****99zz"), masked);
+        assertTrue(masked.contains("****A1s2"), masked);
+        assertTrue(masked.contains("****rstu"), masked);
+        String lowerGroq = "gsk_" + "a".repeat(19) + "2";
+        assertEquals(lowerGroq, SecretMask.redact(lowerGroq, List.of()));
+        String digitGoogle = "AIza" + "1".repeat(35);
+        assertEquals(digitGoogle, SecretMask.redact(digitGoogle, List.of()));
+        assertTrue(masked.contains(noDigit), masked);
+        assertTrue(masked.contains("sk-iron"), masked);
+        assertTrue(masked.contains("task-list"), masked);
+        assertTrue(masked.contains("The smith asked about the sky"), masked);
+        assertEquals(sentence, SecretMask.redact(sentence, List.of()));
+        assertFalse(SecretMask.redact("AIza" + "1".repeat(34), List.of()).contains("****"));
+        String configuredMasked = SecretMask.redact("token " + configured, List.of(configured));
+        assertEquals("token ****rst1", configuredMasked);
+        assertFalse(configuredMasked.contains(configured));
+    }
+
+    @Test
+    void vendorKeyCorpusLeavesReadableTextAndMasksRealKeys() {
+        String prose = "AIza" + "ReadTheSmithingGuideBeforeNightogYe";
+        assertEquals(35, prose.substring(4).length());
+        List<String> unchanged = List.of(
+                "Use sk-learn for that.",
+                "pip install scikit-learn sk-learn-1.5.2 now",
+                "The sk-8 board is fast.",
+                "Just ask-me anything.",
+                "Ticket task-1234567890abcdefghij is open.",
+                "File risk-assessment-2024-final-version-v3 is ready.",
+                "Order desk-1234567890abcdefghijk today.",
+                "Try whisk-2024-recipe-v1-final-edition please.",
+                "Config kiosk-2024-terminal-config-v12-final loaded.",
+                "Branch sk-learn-pipeline-v2-2024-final was merged.",
+                "Read sk-hynix-2024-q3-earnings-report first.",
+                "Post sk-tips-for-new-players-part-2 on the forum.",
+                "Flag task-sk-1234567890abcdefghijk set.",
+                "Run it with --sk-1234567890abcdefghij enabled.",
+                "Смотри sk-learn и gsk_test в коде, кузнец.",
+                "Кузнец сказал: возьми sk-инструменты и иди в шахту 12345.",
+                "123e4567-e89b-12d3-a456-426614174000",
+                "6eee52304b255396fbc16b80eeb15101981cd2a7",
+                "c2stbGVhcm4tMTIzNDU2Nzg5MGFiY2RlZmdoaWo=",
+                "QUJD+sk-abc123def456ghi789jkl0/ZZ==",
+                "https://example.com/sk-learn/docs",
+                "https://example.com/download/sk-12345678901234567890abc.zip",
+                "minecraft:diamond_sword minecraft:netherite_upgrade_smithing_template",
+                "QABot1 Sk_Player2024",
+                "x=-1234 y=64 z=5678",
+                "deadbeefcafebabe0123456789abcdef0123456789abcdef",
+                "AIza is a strange word.",
+                prose,
+                "gsk_config_value_2024",
+                "my_gsk_token_ABCDEFGHIJ1234567890",
+                "gsk_ABCDEFGHIJKLMNOPQRSTU1",
+                "sk_learn_1234567890abcdefghij",
+                "SK-1234567890ABCDEFGHIJK",
+                "sk-abcdefghijklmnopqrstuvwxyz");
+        assertEquals(34, unchanged.size());
+        for (String line : unchanged) {
+            assertEquals(line, SecretMask.redact(line, List.of()), line);
+        }
+
+        String anthropic = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        String openAi = "sk-qaUnconfigured9999zz";
+        String project = "sk-proj-AbCdEfGhIjKlMn9pQrStUv";
+        String groq = "gsk_Q1w2E3r4T5y6U7i8O9p0A1s2";
+        String google = "AIza" + "FAKE0EXAMPLE0KEY0for0tests0onlyrstu";
+        String quoted = "`" + openAi + "`";
+        assertEquals(35, google.substring(4).length());
+        assertMasked(anthropic, "****6789");
+        assertMasked(openAi, "****99zz");
+        assertMasked(project, "****StUv");
+        assertMasked(groq, "****A1s2");
+        assertMasked(google, "****rstu");
+        assertEquals("`****99zz`", SecretMask.redact(quoted, List.of()));
+
+        String inPath = "https://example.com/download/" + project + ".zip";
+        String afterHyphen = "note-" + project;
+        assertFalse(SecretMask.redact(inPath, List.of()).contains(project));
+        assertTrue(SecretMask.redact(inPath, List.of()).contains("****StUv.zip"));
+        assertEquals("note-****StUv", SecretMask.redact(afterHyphen, List.of()));
+    }
+
+    private static void assertMasked(String token, String maskedTail) {
+        String masked = SecretMask.redact("see " + token + " now", List.of());
+        assertFalse(masked.contains(token), masked);
+        assertTrue(masked.contains(maskedTail), masked);
+    }
+
+    @Test
     void aShortKeyIsMaskedWarnedAndRedactedFromA401Body() {
         YamlConfiguration yaml = base();
         yaml.set("providers.openai.type", "openai-compatible");

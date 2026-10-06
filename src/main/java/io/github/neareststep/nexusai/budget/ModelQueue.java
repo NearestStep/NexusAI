@@ -392,6 +392,10 @@ public final class ModelQueue {
      * Why {@link #selectable(long)} is empty. The kind and text are the last provider failure
      * when one was recorded. Daily exhaustion stays a local limit. Every message names the
      * soonest time a retry is possible.
+     * <p>
+     * When one entry is blocked by a daily request limit or by a remaining request or token budget,
+     * and another entry failed with a different provider error, the text names each entry's own
+     * reason. A stored HTTP status is not used as the reason for the budget block.
      */
     public synchronized AiRequestException explain(AiRequestException last, long nowMillis) {
         roll(nowMillis);
@@ -401,16 +405,17 @@ public final class ModelQueue {
         boolean sawBlocked = false;
         boolean dailyOnly = true;
         boolean sawHeader = false;
+        List<Slot> blocked = new ArrayList<>();
         for (Slot slot : slots) {
             if (isSelectable(slot, nowMillis, false)) {
                 continue;
             }
             sawBlocked = true;
+            blocked.add(slot);
             if (slot.unavailableUntil > nowMillis) {
                 soonest = Math.min(soonest, slot.unavailableUntil);
             }
-            boolean daily = slot.hold == Hold.DAILY
-                    || (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit);
+            boolean daily = isDaily(slot);
             if (!daily) {
                 dailyOnly = false;
             }
@@ -422,8 +427,18 @@ public final class ModelQueue {
                 storedAt = slot.lastFailedAt;
             }
         }
-        String retry = soonest == Long.MAX_VALUE ? "" : " Retry after " + formatTime(soonest) + ".";
+        List<Slot> fallbackBudgets = blockedFallbackBudgets(nowMillis);
         AiRequestException cause = last != null ? last : stored;
+        if (namesDistinctReasons(blocked, fallbackBudgets)) {
+            for (Slot slot : fallbackBudgets) {
+                if (slot.unavailableUntil > nowMillis) {
+                    soonest = Math.min(soonest, slot.unavailableUntil);
+                }
+            }
+            String retry = soonest == Long.MAX_VALUE ? "" : " Retry after " + formatTime(soonest) + ".";
+            return namedReasons(blocked, fallbackBudgets, cause, retry);
+        }
+        String retry = soonest == Long.MAX_VALUE ? "" : " Retry after " + formatTime(soonest) + ".";
         if (cause != null && !(last == null && dailyOnly)) {
             return withRetry(cause, retry);
         }
@@ -796,6 +811,118 @@ public final class ModelQueue {
         return Instant.ofEpochMilli(epochMillis).atZone(zone).format(CLOCK);
     }
 
+    private boolean namesDistinctReasons(List<Slot> blocked, List<Slot> fallbackBudgets) {
+        boolean budget = !fallbackBudgets.isEmpty();
+        boolean other = false;
+        for (Slot slot : blocked) {
+            if (isBudgetBlock(slot)) {
+                budget = true;
+            } else {
+                other = true;
+            }
+        }
+        return budget && other;
+    }
+
+    private List<Slot> blockedFallbackBudgets(long nowMillis) {
+        List<Slot> extra = new ArrayList<>();
+        for (Slot slot : fallbackSlots.values()) {
+            if (findQueueSlot(slot.provider, slot.model) != null) {
+                continue;
+            }
+            if (isSelectable(slot, nowMillis, false) || !isBudgetBlock(slot)) {
+                continue;
+            }
+            extra.add(slot);
+        }
+        return extra;
+    }
+
+    private AiRequestException namedReasons(
+            List<Slot> blocked,
+            List<Slot> fallbackBudgets,
+            AiRequestException cause,
+            String retry
+    ) {
+        List<String> parts = new ArrayList<>();
+        for (Slot slot : blocked) {
+            parts.add(slot.provider + " / " + slot.model + ": " + slotReason(slot));
+        }
+        for (Slot slot : fallbackBudgets) {
+            parts.add(slot.provider + " / " + slot.model + ": " + slotReason(slot));
+        }
+        String message = String.join("; ", parts);
+        if (cause == null) {
+            return new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, message + retry, null);
+        }
+        AiRequestException named = new AiRequestException(
+                cause.kind(),
+                cause.status(),
+                message,
+                cause,
+                cause.retryAfterSeconds(),
+                cause.headers());
+        for (String provider : AiRequestException.pausedProvidersOf(cause)) {
+            named = named.withPausedProvider(provider);
+        }
+        return withRetry(named, retry);
+    }
+
+    private String slotReason(Slot slot) {
+        if (isDaily(slot)) {
+            if (slot.dailyLimit > 0) {
+                return "daily request limit reached (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
+            }
+            return "daily request limit reached";
+        }
+        if (slot.hold == Hold.HEADER && slot.lastError == null) {
+            return headerBudgetReason(slot);
+        }
+        if (slot.lastError != null && slot.lastError.getMessage() != null && !slot.lastError.getMessage().isBlank()) {
+            return withoutRetry(slot.lastError.getMessage());
+        }
+        if (slot.hold == Hold.HEADER) {
+            return "AI provider rate limit";
+        }
+        return "cooling down";
+    }
+
+    private String headerBudgetReason(Slot slot) {
+        boolean tokens = slot.remainingTokens != null && slot.remainingTokens <= remainingThreshold;
+        boolean requests = slot.remainingRequests != null && slot.remainingRequests <= remainingThreshold;
+        if (tokens && requests) {
+            return "request and token budget exhausted";
+        }
+        if (tokens) {
+            return "token budget exhausted";
+        }
+        if (requests) {
+            return "request budget exhausted";
+        }
+        return "request or token budget exhausted";
+    }
+
+    private static boolean isDaily(Slot slot) {
+        return slot.hold == Hold.DAILY
+                || (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit);
+    }
+
+    private boolean isBudgetBlock(Slot slot) {
+        if (isDaily(slot)) {
+            return true;
+        }
+        return slot.hold == Hold.HEADER && slot.lastError == null;
+    }
+
+    private static String withoutRetry(String message) {
+        String text = message == null ? "" : message.strip();
+        int at = text.indexOf(" Retry after ");
+        if (at >= 0) {
+            return text.substring(0, at).strip();
+        }
+        return text;
+    }
+
     private static AiRequestException withRetry(AiRequestException cause, String retry) {
         String message = cause.getMessage() == null ? "" : cause.getMessage().strip();
         if (!retry.isEmpty() && !message.contains("Retry after")) {
@@ -835,7 +962,7 @@ public final class ModelQueue {
         slot.warned = true;
         logger.warning("Model queue entry " + slot.provider + " / " + slot.model
                 + " has used " + count + "/" + slot.dailyLimit
-                + " requests today (80% of the daily limit).");
+                + " requests today (at least 80% of the daily limit).");
     }
 
     private Slot slot(int index) {

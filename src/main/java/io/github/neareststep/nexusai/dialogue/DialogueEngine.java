@@ -266,7 +266,7 @@ public final class DialogueEngine {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
-        if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
+        if (shouldLogFailure(typed, detail)) {
             logProviderFailure(detail);
         }
         return TalkResult.of(TalkCode.BUSY, request.characterId());
@@ -274,6 +274,18 @@ public final class DialogueEngine {
 
     private List<String> secretList() {
         return secrets == null || secrets.get() == null ? List.of() : secrets.get();
+    }
+
+    /**
+     * A local player limit stays quiet. The queue's own daily-cap message is the exception: the console
+     * names it, still at most once per 30 seconds, because every row being exhausted is the reason the
+     * line was not sent.
+     */
+    private static boolean shouldLogFailure(AiRequestException typed, String detail) {
+        if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
+            return true;
+        }
+        return detail != null && detail.contains("All model-queue entries are exhausted");
     }
 
     /**
@@ -474,7 +486,7 @@ public final class DialogueEngine {
                 request.playerId(),
                 request.characterId(),
                 role,
-                text,
+                SecretMask.redact(text, secretList()),
                 request.nowMillis(),
                 request.profile().memoryTurns(settings.memoryTurns()),
                 settings.memoryMaxChars(),

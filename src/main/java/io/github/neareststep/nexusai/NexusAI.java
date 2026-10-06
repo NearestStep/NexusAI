@@ -263,7 +263,7 @@ public final class NexusAI extends JavaPlugin {
             getServer().getPluginManager().registerEvents(new DialogueListener(this), this);
             NexusAIApi.bind(dialogueService);
         } else {
-            dialogueService.resetSummaryStats();
+            dialogueService.onReload();
         }
         startModeration();
     }

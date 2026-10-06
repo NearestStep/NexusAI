@@ -124,6 +124,10 @@ public final class DialogueTransport {
                 );
             }
             DialogueProtocol.ParsedCompletion parsed = DialogueProtocol.parse(body);
+            // Missing, null, or whitespace-only content is a transport error, not an empty reply.
+            // The row cools down and the player sees talk.busy. A reply that is empty only after
+            // colour codes or markup are removed is classified later, in finishText, and does not
+            // cool the row.
             if ((parsed.content() == null || parsed.content().isBlank()) && parsed.toolNames().isEmpty()) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
             }

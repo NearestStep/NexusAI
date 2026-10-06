@@ -251,6 +251,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             }
 
             ChatCompletionResponse parsed = objectMapper.readValue(responseBody, ChatCompletionResponse.class);
+            // Missing, null, or whitespace-only content is a transport error, not an empty reply.
+            // Callers cool the row down. A reply that is empty only after colour codes or markup
+            // are removed is classified below and does not use this error.
             if (parsed.getChoices() == null || parsed.getChoices().isEmpty()
                     || parsed.getChoices().getFirst().getMessage() == null) {
                 throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
