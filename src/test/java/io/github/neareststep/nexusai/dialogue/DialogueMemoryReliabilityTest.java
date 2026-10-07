@@ -1,0 +1,479 @@
+package io.github.neareststep.nexusai.dialogue;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * NAI-77, NAI-74, and NAI-75. The loader is substituted per case. The file on disk is not replaced
+ * by a failed or hung read, and stop does not wait out a load that is still going.
+ */
+class DialogueMemoryReliabilityTest {
+
+    private static final String SECRET = "sk-qaConfiguredKey1111";
+    private static final String PAUSED = "Saves of dialogue-memory.yml are paused because the first load "
+            + "did not finish. Restart the server to load the file and resume saves.";
+
+    @AfterEach
+    void resetLoaderHooks() {
+        MemoryStore.pauseDuringLoad = null;
+        DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
+    }
+
+    @Test
+    void runtimeExceptionInTheLoaderIsLoggedAndTheNextReloadLoads() throws Exception {
+        Fixture fixture = fixture("runtime-load");
+        byte[] before = Files.readAllBytes(fixture.file);
+        MemoryStore.pauseDuringLoad = () -> {
+            throw new IllegalStateException("load blew up " + SECRET + " " + fixture.file.toAbsolutePath());
+        };
+        try {
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertFalse(fixture.files.memoryLoadedFromDisk());
+            assertNull(fixture.files.diskLoader());
+            assertTrue(fixture.files.loadFinished());
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertEquals(1, warnings(fixture.records, "Failed to load dialogue-memory.yml").size());
+            assertSecretsHidden(fixture.records);
+            fixture.files.save();
+            fixture.files.save();
+            assertEquals(1, warnings(fixture.records, PAUSED).size());
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            assertTrue(millisSince(started) < 4_000L, "stop waited on a loader that had already failed");
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+
+            MemoryStore.pauseDuringLoad = null;
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk());
+            assertNull(fixture.files.diskLoader());
+            assertEquals("kept-from-disk", line(fixture.store, fixture.player, "blacksmith"));
+            fixture.files.save();
+            String saved = Files.readString(fixture.file);
+            assertTrue(saved.contains("kept-from-disk"), saved);
+            assertSecretsHidden(fixture.records);
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+        }
+    }
+
+    @Test
+    void errorInTheLoaderDoesNotOverwriteTheFileAndTheNextReloadLoads() throws Exception {
+        Fixture fixture = fixture("error-load");
+        byte[] before = Files.readAllBytes(fixture.file);
+        MemoryStore.pauseDuringLoad = () -> {
+            throw new OutOfMemoryError(SECRET + " " + fixture.file.toAbsolutePath());
+        };
+        try {
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertFalse(fixture.files.memoryLoadedFromDisk());
+            assertNull(fixture.files.diskLoader());
+            assertTrue(fixture.files.loadFinished());
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> failed = warnings(fixture.records, "Failed to load dialogue-memory.yml");
+            assertEquals(1, failed.size(), fixture.records.toString());
+            assertTrue(failed.get(0).contains("OutOfMemoryError"), failed.get(0));
+            assertSecretsHidden(fixture.records);
+            fixture.files.save();
+            fixture.files.save();
+            assertEquals(1, warnings(fixture.records, PAUSED).size());
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+
+            MemoryStore.pauseDuringLoad = null;
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk());
+            assertEquals("kept-from-disk", line(fixture.store, fixture.player, "blacksmith"));
+            assertSecretsHidden(fixture.records);
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+        }
+    }
+
+    /**
+     * NAI-77. {@code diskLoader = worker} happens before {@code worker.start()}. If {@code start}
+     * throws, the thread never runs, so its {@code finally} cannot clear {@code diskLoader}.
+     * The assertion message records that state when the assignment is left behind.
+     */
+    @Test
+    void threadStartFailureDoesNotStickDiskLoaderAndTheNextReloadLoads() throws Exception {
+        Fixture fixture = fixture("start-fail");
+        byte[] before = Files.readAllBytes(fixture.file);
+        List<Thread> created = new ArrayList<>();
+        DialogueMemoryPersistence.loaderThreads = task -> {
+            Thread worker = new Thread(task, "nexusai-memory-load") {
+                @Override
+                public synchronized void start() {
+                    throw new IllegalThreadStateException("start failed " + SECRET + " " + fixture.file.toAbsolutePath());
+                }
+            };
+            worker.setDaemon(true);
+            created.add(worker);
+            return worker;
+        };
+        Throwable thrown = null;
+        try {
+            fixture.files.onReload();
+        } catch (Throwable error) {
+            thrown = error;
+        }
+        assertEquals(1, created.size());
+        assertEquals(Thread.State.NEW, created.get(0).getState(), "start() ran the loader body");
+        assertNull(thrown, "diskLoader=" + fixture.files.diskLoader()
+                + " alive=" + (fixture.files.diskLoader() != null && fixture.files.diskLoader().isAlive())
+                + " state=" + created.get(0).getState()
+                + " loaded=" + fixture.files.memoryLoadedFromDisk());
+        assertNull(fixture.files.diskLoader());
+        assertFalse(fixture.files.memoryLoadedFromDisk());
+        assertTrue(fixture.files.loadFinished());
+        assertArrayEquals(before, Files.readAllBytes(fixture.file));
+        assertEquals(1, warnings(fixture.records, "Failed to load dialogue-memory.yml").size());
+        assertSecretsHidden(fixture.records);
+        fixture.files.save();
+        fixture.files.save();
+        assertEquals(1, warnings(fixture.records, PAUSED).size());
+        assertFalse(warnings(fixture.records, PAUSED).get(0).contains(fixture.file.toString()),
+                warnings(fixture.records, PAUSED).get(0));
+        assertArrayEquals(before, Files.readAllBytes(fixture.file));
+        long started = System.nanoTime();
+        fixture.files.shutdown();
+        assertTrue(millisSince(started) < 4_000L);
+        assertArrayEquals(before, Files.readAllBytes(fixture.file));
+
+        AtomicInteger second = new AtomicInteger();
+        DialogueMemoryPersistence.loaderThreads = task -> {
+            second.incrementAndGet();
+            Thread worker = new Thread(task, "nexusai-memory-load");
+            worker.setDaemon(true);
+            return worker;
+        };
+        fixture.files.onReload();
+        awaitFinished(fixture.files);
+        assertEquals(1, second.get(), "the reload after a failed start did not load");
+        assertTrue(fixture.files.memoryLoadedFromDisk());
+        assertNull(fixture.files.diskLoader());
+        assertEquals("kept-from-disk", line(fixture.store, fixture.player, "blacksmith"));
+        assertSecretsHidden(fixture.records);
+    }
+
+    @Test
+    void hungLoaderDoesNotOverwriteTheFileWarnsOnceAndStopReturns() throws Exception {
+        Fixture fixture = fixture("hung-load");
+        byte[] before = Files.readAllBytes(fixture.file);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = () -> {
+            inside.countDown();
+            try {
+                if (!release.await(15, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("hung load was not released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertFalse(fixture.files.memoryLoadedFromDisk());
+            assertTrue(fixture.files.diskLoader() != null && fixture.files.diskLoader().isAlive());
+            fixture.files.save();
+            assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            fixture.clock.addAndGet(DialogueMemoryPersistence.LOAD_HANG_WARNING_AFTER_MILLIS);
+            fixture.files.save();
+            fixture.files.save();
+            assertEquals(1, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(PAUSED, warnings(fixture.records, PAUSED).get(0));
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertTrue(elapsed < 4_000L, "stop took " + elapsed + "ms");
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertSecretsHidden(fixture.records);
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void unreadableFileOnTheFirstReloadWarnsOnceAndKeepsTheOriginal() throws Exception {
+        Fixture fixture = fixture("mode-000");
+        assumePosix(fixture.file.getParent());
+        byte[] before = Files.readAllBytes(fixture.file);
+        Files.setPosixFilePermissions(fixture.file, Set.of());
+        try {
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertFalse(fixture.files.memoryLoadedFromDisk());
+            assertNull(fixture.files.diskLoader());
+            assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(fixture.file));
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            fixture.files.save();
+            fixture.clock.addAndGet(65_000L);
+            fixture.files.save();
+            assertEquals(1, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(PAUSED, warnings(fixture.records, PAUSED).get(0));
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(fixture.file));
+            assertSecretsHidden(fixture.records);
+        } finally {
+            if (Files.exists(fixture.file)) {
+                Files.setPosixFilePermissions(fixture.file, Set.of(
+                        PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
+            }
+        }
+    }
+
+    @Test
+    void stopDuringALongFirstLoadKeepsDiskCharactersAndAddsMemoryOnlyOnes() throws Exception {
+        Fixture fixture = fixture("stop-during-load");
+        assumePosix(fixture.file.getParent());
+        UUID player = fixture.player;
+        String withMiner = """
+                entries:
+                  %s:
+                    blacksmith:
+                      updated: 50
+                      lines:
+                      - role: user
+                        text: kept-from-disk
+                    miner:
+                      updated: 40
+                      lines:
+                      - role: user
+                        text: from-disk-only
+                """.formatted(player);
+        Files.writeString(fixture.file, withMiner, StandardCharsets.UTF_8);
+        Files.setPosixFilePermissions(fixture.file, Set.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.GROUP_READ));
+        fixture.store.append(player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = () -> {
+            inside.countDown();
+            try {
+                if (!release.await(15, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("long load was not released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertTrue(elapsed < 4_000L, "stop took " + elapsed + "ms");
+            String merged = Files.readString(fixture.file);
+            assertTrue(merged.contains("kept-from-disk"), merged);
+            assertTrue(merged.contains("from-disk-only"), merged);
+            assertTrue(merged.contains("only-in-memory"), merged);
+            assertFalse(merged.contains("said-while-off"), merged);
+            assertTrue(Files.getPosixFilePermissions(fixture.file).contains(PosixFilePermission.GROUP_READ));
+            assertEquals(0, Files.list(fixture.file.getParent()).filter(path -> path.getFileName().toString().endsWith(".tmp")).count());
+            byte[] afterShutdown = Files.readAllBytes(fixture.file);
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertArrayEquals(afterShutdown, Files.readAllBytes(fixture.file));
+            assertEquals("kept-from-disk", line(fixture.store, player, "blacksmith"));
+            assertEquals("only-in-memory", line(fixture.store, player, "innkeeper"));
+            assertEquals("from-disk-only", line(fixture.store, player, "miner"));
+            assertSecretsHidden(fixture.records);
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    private static void awaitFinished(DialogueMemoryPersistence files) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!files.loadFinished()) {
+            if (System.nanoTime() > deadline) {
+                fail("loader did not finish");
+            }
+            Thread.sleep(5);
+        }
+    }
+
+    private static String line(MemoryStore store, UUID player, String character) {
+        List<TurnMemory.Line> lines = store.transcript(player, character, 80L, 8, 8_000, 0L);
+        assertFalse(lines.isEmpty(), character);
+        return lines.get(0).text();
+    }
+
+    private static long millisSince(long startedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static List<String> warnings(List<LogRecord> records, String text) {
+        List<String> found = new ArrayList<>();
+        for (LogRecord record : records) {
+            if (record.getLevel() != Level.WARNING || record.getMessage() == null) {
+                continue;
+            }
+            if (record.getMessage().contains(text)) {
+                found.add(record.getMessage());
+            }
+        }
+        return found;
+    }
+
+    private static void assertSecretsHidden(List<LogRecord> records) {
+        for (LogRecord record : records) {
+            String message = record.getMessage() == null ? "" : record.getMessage();
+            assertFalse(message.contains(SECRET), message);
+            if (record.getThrown() != null) {
+                assertFalse(String.valueOf(record.getThrown()).contains(SECRET), record.getThrown().toString());
+            }
+        }
+    }
+
+    private static void assumePosix(Path dir) {
+        assumeTrue(Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null,
+                "POSIX permissions are not available");
+    }
+
+    private static Fixture fixture(String name) throws Exception {
+        Path root = Files.createTempDirectory("nai-memory");
+        Path dir = root.resolve("kp_" + SECRET).resolve("NexusAI");
+        Files.createDirectories(dir);
+        UUID player = UUID.randomUUID();
+        Path file = dir.resolve("dialogue-memory.yml");
+        Files.writeString(file, """
+                entries:
+                  %s:
+                    blacksmith:
+                      updated: 50
+                      lines:
+                      - role: user
+                        text: kept-from-disk
+                """.formatted(player), StandardCharsets.UTF_8);
+        List<LogRecord> records = new ArrayList<>();
+        Logger logger = Logger.getLogger("memory-" + name + "-" + UUID.randomUUID());
+        logger.setUseParentHandlers(false);
+        logger.setLevel(Level.ALL);
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        handler.setLevel(Level.ALL);
+        logger.addHandler(handler);
+        MemoryStore store = new MemoryStore();
+        store.secrets(() -> List.of(SECRET));
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        DialogueSettings settings = persisting(false);
+        DialogueMemoryPersistence files = new DialogueMemoryPersistence(
+                store,
+                file::toFile,
+                () -> settings,
+                () -> List.of(SECRET),
+                logger,
+                clock::get);
+        return new Fixture(file, player, store, files, records, clock);
+    }
+
+    private static DialogueSettings persisting(boolean summaries) {
+        DialogueSettings defaults = DialogueSettings.defaults();
+        return new DialogueSettings(
+                defaults.dialogueEnabled(),
+                defaults.memoryTurns(),
+                true,
+                defaults.memoryMaxChars(),
+                defaults.memoryExpiryHours(),
+                defaults.sessionTimeoutSeconds(),
+                defaults.leaveRadius(),
+                defaults.maxRepliesPerSession(),
+                defaults.messageCooldownMillis(),
+                defaults.conversationsPerPlayerPerDay(),
+                defaults.maxMessageLength(),
+                defaults.cacheGreeting(),
+                defaults.greetingCacheSeconds(),
+                defaults.actionsEnabled(),
+                defaults.actionLog(),
+                defaults.maxActionsPerReply(),
+                summaries,
+                defaults.summaryThresholdTurns(),
+                defaults.summaryMaxChars(),
+                defaults.summaryMaxTokens(),
+                defaults.summaryProvider(),
+                defaults.summaryModel());
+    }
+
+    private record Fixture(
+            Path file,
+            UUID player,
+            MemoryStore store,
+            DialogueMemoryPersistence files,
+            List<LogRecord> records,
+            AtomicLong clock
+    ) {
+    }
+}

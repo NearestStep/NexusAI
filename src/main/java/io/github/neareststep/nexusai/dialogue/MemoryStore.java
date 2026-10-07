@@ -17,14 +17,17 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -58,9 +61,31 @@ public final class MemoryStore {
      */
     static CorruptMove corruptMove = MemoryStore::renameCorrupt;
 
+    /**
+     * Fsync used before and after an autosave rename. Tests substitute this to record the order
+     * and to fail the sync. A failure must not abort the save.
+     */
+    static DiskSync diskSync = MemoryStore::forceFile;
+
+    /** When non-null, autosave records {@code force-temp}, {@code rename}, {@code force-dir}. */
+    static List<String> durableTrace;
+
+    /** Held around a load's file mutation and around a shutdown merge, so the two cannot overlap. */
+    final Object publishGate = new Object();
+    /**
+     * Set when shutdown has already published a merged file. The in-flight load must not rewrite
+     * or quarantine over that file.
+     */
+    volatile boolean loaderMustNotPublish;
+
     @FunctionalInterface
     interface CorruptMove {
         void move(Path temporary, Path destination) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface DiskSync {
+        void force(Path path) throws IOException;
     }
 
     public TurnMemory get(UUID player, String characterId) {
@@ -272,13 +297,13 @@ public final class MemoryStore {
         try {
             yaml.load(file);
         } catch (Exception e) {
-            boolean preserved = quarantineUnreadable(file, secrets, logger, e);
+            boolean preserved = quarantineUnreadable(file, secrets, logger, e, store);
             if (store != null && !preserved) {
                 store.saveBlocked = true;
             }
             return null;
         }
-        if (redactDocument(yaml, secrets) && rewrite(file, yaml, logger, secrets) && logger != null) {
+        if (redactDocument(yaml, secrets) && rewrite(file, yaml, logger, secrets, store) && logger != null) {
             logger.info("Masked API keys in dialogue-memory.yml");
         }
         return yaml;
@@ -360,7 +385,19 @@ public final class MemoryStore {
         return dirty;
     }
 
-    private static boolean rewrite(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets) {
+    private static boolean rewrite(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets, MemoryStore store) {
+        if (store == null) {
+            return rewriteUnlocked(file, yaml, logger, secrets);
+        }
+        synchronized (store.publishGate) {
+            if (store.loaderMustNotPublish) {
+                return false;
+            }
+            return rewriteUnlocked(file, yaml, logger, secrets);
+        }
+    }
+
+    private static boolean rewriteUnlocked(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets) {
         File parent = file.getParentFile();
         File temporary = new File(parent == null ? new File(".") : parent,
                 file.getName() + "." + UUID.randomUUID() + ".tmp");
@@ -370,7 +407,7 @@ public final class MemoryStore {
             }
             AtomicFiles.createPrivate(temporary.toPath());
             yaml.save(temporary);
-            AtomicFiles.moveReplacing(temporary.toPath(), file.toPath());
+            durableReplace(temporary.toPath(), file.toPath());
             // The file just held a key. Do not keep a group- or world-readable mode.
             AtomicFiles.restrictOwnerReadWrite(file.toPath());
             return true;
@@ -421,11 +458,19 @@ public final class MemoryStore {
             }
             return;
         }
-        YamlConfiguration yaml = document(summaries);
+        publishYaml(file, document(summaries), logger, summaries, publish);
+    }
+
+    /**
+     * Writes {@code yaml} via a temp file and {@code publish}. A backup failure is logged and does
+     * not also log a save failure. Returns false when the file was not replaced.
+     */
+    private boolean publishYaml(
+            File file, YamlConfiguration yaml, Logger logger, boolean summaries, Publish publish) {
         File parent = file.getParentFile();
         try {
             if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
-                return;
+                return false;
             }
             if (summaries && file.isFile() && !hasFormat2(file)) {
                 try {
@@ -437,7 +482,7 @@ public final class MemoryStore {
                     if (logger != null) {
                         LogRedaction.warning(logger, "Failed to back up dialogue-memory.yml", e, secrets());
                     }
-                    return;
+                    return false;
                 }
             }
             File temporary = new File(parent == null ? new File(".") : parent,
@@ -451,11 +496,123 @@ public final class MemoryStore {
                     temporary.delete();
                 }
             }
+            return true;
         } catch (IOException e) {
             if (logger != null) {
                 LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
             }
+            return false;
         }
+    }
+
+    /**
+     * Adds transcripts that are not already in {@code file}, leaving every on-disk character as it
+     * was. An unreadable file is left untouched. Does not take {@link #diskLock}: a load may hold
+     * that lock for the whole read, and shutdown has to finish without waiting for it.
+     *
+     * @return {@code true} when a merged file was published
+     */
+    boolean appendCharactersAbsentFromFile(File file, Logger logger, boolean summaries, Iterable<String> secrets) {
+        if (saveBlocked || file == null || !file.isFile()) {
+            return false;
+        }
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(file);
+        } catch (IOException | InvalidConfigurationException | RuntimeException e) {
+            return false;
+        }
+        Set<String> present = characterKeys(yaml);
+        Map<String, StoredTranscript> extra;
+        synchronized (this) {
+            extra = transcriptsAbsent(present, summaries);
+        }
+        if (extra.isEmpty()) {
+            return false;
+        }
+        if (summaries) {
+            yaml.set("format", 2);
+        }
+        for (Map.Entry<String, StoredTranscript> entry : extra.entrySet()) {
+            writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
+        }
+        redactDocument(yaml, secrets);
+        synchronized (publishGate) {
+            if (saveBlocked || !file.isFile()) {
+                return false;
+            }
+            if (loaderMustNotPublish) {
+                return true;
+            }
+            loaderMustNotPublish = true;
+            boolean published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace);
+            if (!published) {
+                loaderMustNotPublish = false;
+            }
+            return published;
+        }
+    }
+
+    private static Set<String> characterKeys(YamlConfiguration yaml) {
+        Set<String> keys = new java.util.HashSet<>();
+        ConfigurationSection entries = yaml.getConfigurationSection("entries");
+        if (entries == null) {
+            return keys;
+        }
+        for (String playerKey : entries.getKeys(false)) {
+            ConfigurationSection characters = entries.getConfigurationSection(playerKey);
+            if (characters == null) {
+                continue;
+            }
+            for (String characterId : characters.getKeys(false)) {
+                keys.add(playerKey + "\u0000" + characterId);
+            }
+        }
+        return keys;
+    }
+
+    private Map<String, StoredTranscript> transcriptsAbsent(Set<String> present, boolean summaries) {
+        Map<String, StoredTranscript> extra = new LinkedHashMap<>();
+        for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
+            if (present.contains(entry.getKey())) {
+                continue;
+            }
+            TurnMemory memory = entry.getValue();
+            List<TurnMemory.Line> lines = memory.view();
+            String summary = summaries ? memory.summary() : "";
+            if (lines.isEmpty() && (summary == null || summary.isBlank())) {
+                continue;
+            }
+            extra.put(entry.getKey(), new StoredTranscript(
+                    lines, memory.updatedAt(), summary == null ? "" : summary, memory.summaryUpdatedAt()));
+        }
+        return extra;
+    }
+
+    private static void writeTranscript(YamlConfiguration yaml, String key, StoredTranscript transcript, boolean summaries) {
+        String[] parts = key.split("\u0000", 2);
+        if (parts.length != 2) {
+            return;
+        }
+        String base = "entries." + parts[0] + "." + parts[1];
+        yaml.set(base + ".updated", transcript.updatedAt);
+        if (!transcript.lines.isEmpty()) {
+            List<Map<String, String>> stored = new ArrayList<>();
+            for (TurnMemory.Line line : transcript.lines) {
+                Map<String, String> row = new LinkedHashMap<>();
+                row.put("role", line.role());
+                row.put("text", line.text());
+                stored.add(row);
+            }
+            yaml.set(base + ".lines", stored);
+        }
+        if (summaries && !transcript.summary.isBlank()) {
+            yaml.set(base + ".summary", transcript.summary);
+            yaml.set(base + ".summary-updated", transcript.summaryUpdatedAt);
+        }
+    }
+
+    private record StoredTranscript(List<TurnMemory.Line> lines, long updatedAt, String summary, long summaryUpdatedAt) {
     }
 
     private YamlConfiguration document(boolean summaries) {
@@ -505,7 +662,49 @@ public final class MemoryStore {
     }
 
     private static void moveIntoPlace(File temporary, File target) throws IOException {
-        AtomicFiles.moveReplacing(temporary.toPath(), target.toPath());
+        durableReplace(temporary.toPath(), target.toPath());
+    }
+
+    /**
+     * Flushes the temp file, renames it onto the target, then flushes the directory.
+     * Either fsync failing is ignored: the rename still happens, and the caller's {@code finally}
+     * removes a temp file that was not moved. Permissions stay with {@link AtomicFiles#moveReplacing}.
+     */
+    static void durableReplace(Path temporary, Path target) throws IOException {
+        traceDurable("force-temp");
+        try {
+            diskSync.force(temporary);
+        } catch (IOException ignored) {
+            // A failed fsync must not abort the rename or leave the temp file behind.
+        }
+        traceDurable("rename");
+        AtomicFiles.moveReplacing(temporary, target);
+        Path parent = target == null || target.getParent() == null ? Path.of(".") : target.getParent();
+        traceDurable("force-dir");
+        try {
+            diskSync.force(parent);
+        } catch (IOException ignored) {
+            // Directory fsync is best effort, the same as after a quarantine rename.
+        }
+    }
+
+    private static void traceDurable(String event) {
+        List<String> trace = durableTrace;
+        if (trace == null) {
+            return;
+        }
+        synchronized (trace) {
+            trace.add(event);
+        }
+    }
+
+    private static void forceFile(Path path) throws IOException {
+        if (path == null || !Files.exists(path)) {
+            return;
+        }
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            channel.force(true);
+        }
     }
 
     @FunctionalInterface
@@ -518,54 +717,144 @@ public final class MemoryStore {
      * {@code 0600}, then removes the live file so a later save cannot replace it or back it up raw.
      * The copy is written to a temp sibling, forced to disk, and renamed, so a crash leaves either
      * a complete {@code .corrupt} or no {@code .corrupt} at all.
+     * When a {@code .corrupt} file already holds those same masked bytes, the original is removed
+     * and no second copy is written.
      *
      * @return {@code true} when the broken text is preserved aside and the live path is free
      */
-    private static boolean quarantineUnreadable(File file, Iterable<String> secrets, Logger logger, Exception error) {
+    private static boolean quarantineUnreadable(
+            File file, Iterable<String> secrets, Logger logger, Exception error, MemoryStore store) {
         String detail = SecretMask.redact(
                 error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage(),
                 secrets);
         try {
             byte[] raw = Files.readAllBytes(file.toPath());
             Preserved preserved = preserveBytes(raw, secrets);
-            Path copy = corruptDestination(file.toPath());
-            writeCorruptAtomically(copy, preserved.bytes());
-            try {
-                Files.delete(file.toPath());
-            } catch (IOException deleteFailed) {
-                Files.write(file.toPath(), preserved.bytes());
-                AtomicFiles.restrictOwnerReadWrite(file.toPath());
-                if (logger != null) {
-                    logger.warning("dialogue-memory.yml was not loaded: " + detail
-                            + ". It could not be moved aside, so it was masked in place as well as copied to "
-                            + copy.getFileName()
-                            + ". It will not be overwritten. Repair that file and restart.");
+            if (store == null) {
+                return publishQuarantine(file, secrets, logger, detail, preserved);
+            }
+            synchronized (store.publishGate) {
+                if (store.loaderMustNotPublish) {
+                    return true;
                 }
-                return false;
+                return publishQuarantine(file, secrets, logger, detail, preserved);
             }
-            if (logger != null) {
-                logger.warning("dialogue-memory.yml was not loaded: " + detail
-                        + ". " + preserved.note() + " The broken file was saved as " + copy.getFileName()
-                        + " with owner-only permissions. Repair that copy, replace dialogue-memory.yml with it, and restart."
-                        + " A new dialogue-memory.yml will be written for new lines and will not replace the copy.");
-            }
-            return true;
         } catch (IOException io) {
-            AtomicFiles.restrictOwnerReadWrite(file.toPath());
-            if (logger != null) {
-                String cause = io.getClass().getSimpleName();
-                String ioMessage = io.getMessage();
-                if (ioMessage != null && !ioMessage.isBlank()) {
-                    cause = cause + ": " + SecretMask.redact(ioMessage, secrets);
+            if (store != null) {
+                synchronized (store.publishGate) {
+                    if (store.loaderMustNotPublish) {
+                        return true;
+                    }
+                    return leaveUnreadableInPlace(file, secrets, logger, detail, io);
                 }
-                logger.warning("dialogue-memory.yml was not loaded: " + detail
-                        + ". The broken file was left in place because it could not be copied aside"
-                        + " (" + cause + ")."
-                        + " It was restricted to owner-only permissions and it will not be overwritten."
-                        + " Repair or replace dialogue-memory.yml and restart.");
             }
-            return false;
+            return leaveUnreadableInPlace(file, secrets, logger, detail, io);
         }
+    }
+
+    private static boolean publishQuarantine(
+            File file, Iterable<String> secrets, Logger logger, String detail, Preserved preserved) throws IOException {
+        Path existing = findIdenticalCorrupt(file.toPath(), preserved.bytes());
+        if (existing != null) {
+            return reuseCorruptCopy(file, logger, detail, preserved, existing);
+        }
+        Path copy = corruptDestination(file.toPath());
+        writeCorruptAtomically(copy, preserved.bytes());
+        try {
+            Files.delete(file.toPath());
+        } catch (IOException deleteFailed) {
+            return maskedInPlace(file, logger, detail, preserved.bytes(), copy);
+        }
+        if (logger != null) {
+            logger.warning("dialogue-memory.yml was not loaded: " + detail
+                    + ". " + preserved.note() + " The broken file was saved as " + copy.getFileName()
+                    + " with owner-only permissions. Repair that copy, replace dialogue-memory.yml with it, and restart."
+                    + " A new dialogue-memory.yml will be written for new lines and will not replace the copy.");
+        }
+        return true;
+    }
+
+    /**
+     * The original survived a crash between the {@code .corrupt} rename and its own delete.
+     * A byte-identical copy is enough; writing another one only piles up duplicates.
+     */
+    private static boolean reuseCorruptCopy(
+            File file, Logger logger, String detail, Preserved preserved, Path existing) throws IOException {
+        try {
+            Files.delete(file.toPath());
+        } catch (IOException deleteFailed) {
+            return maskedInPlace(file, logger, detail, preserved.bytes(), existing);
+        }
+        if (logger != null) {
+            logger.warning("dialogue-memory.yml was not loaded: " + detail
+                    + ". " + preserved.note() + " An identical copy already exists as " + existing.getFileName()
+                    + ". The original was removed. Repair that copy, replace dialogue-memory.yml with it, and restart."
+                    + " A new dialogue-memory.yml will be written for new lines and will not replace the copy.");
+        }
+        return true;
+    }
+
+    private static boolean maskedInPlace(File file, Logger logger, String detail, byte[] masked, Path copy) throws IOException {
+        Files.write(file.toPath(), masked);
+        AtomicFiles.restrictOwnerReadWrite(file.toPath());
+        if (logger != null) {
+            logger.warning("dialogue-memory.yml was not loaded: " + detail
+                    + ". It could not be moved aside, so it was masked in place as well as copied to "
+                    + copy.getFileName()
+                    + ". It will not be overwritten. Repair that file and restart.");
+        }
+        return false;
+    }
+
+    private static boolean leaveUnreadableInPlace(
+            File file, Iterable<String> secrets, Logger logger, String detail, IOException io) {
+        AtomicFiles.restrictOwnerReadWrite(file.toPath());
+        if (logger != null) {
+            String cause = io.getClass().getSimpleName();
+            String ioMessage = io.getMessage();
+            if (ioMessage != null && !ioMessage.isBlank()) {
+                cause = cause + ": " + SecretMask.redact(ioMessage, secrets);
+            }
+            logger.warning("dialogue-memory.yml was not loaded: " + detail
+                    + ". The broken file was left in place because it could not be copied aside"
+                    + " (" + cause + ")."
+                    + " It was restricted to owner-only permissions and it will not be overwritten."
+                    + " Repair or replace dialogue-memory.yml and restart.");
+        }
+        return false;
+    }
+
+    /**
+     * A {@code .corrupt} or {@code .corrupt.<millis>} sibling whose bytes equal {@code masked}.
+     * The plain {@code .corrupt} name wins when both match. Listing failures fall through to a new copy.
+     */
+    private static Path findIdenticalCorrupt(Path file, byte[] masked) {
+        Path parent = file.getParent() == null ? Path.of(".") : file.getParent();
+        String prefix = file.getFileName().toString() + ".corrupt";
+        Path stamped = null;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(parent)) {
+            for (Path candidate : stream) {
+                if (!Files.isRegularFile(candidate)) {
+                    continue;
+                }
+                String name = candidate.getFileName().toString();
+                if (!name.equals(prefix) && !name.startsWith(prefix + ".")) {
+                    continue;
+                }
+                if (!Arrays.equals(masked, Files.readAllBytes(candidate))) {
+                    continue;
+                }
+                if (name.equals(prefix)) {
+                    return candidate;
+                }
+                if (stamped == null) {
+                    stamped = candidate;
+                }
+            }
+        } catch (IOException ignored) {
+            return null;
+        }
+        return stamped;
     }
 
     private record Preserved(byte[] bytes, String note) {

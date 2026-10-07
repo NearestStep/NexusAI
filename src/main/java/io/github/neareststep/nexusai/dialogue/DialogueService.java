@@ -51,13 +51,7 @@ public final class DialogueService {
     private final ExecutorService httpExecutor;
     private final ScheduledExecutorService scheduler;
     private final MemoryStore memory;
-    /**
-     * True after the live file has been loaded. Stays false while persistence is off, and until the
-     * first off-to-on load finishes, so a save cannot run in that gap.
-     */
-    private volatile boolean memoryLoadedFromDisk;
-    /** Background load started by {@link #onReload}. Null when none is running. */
-    private Thread diskLoader;
+    private final DialogueMemoryPersistence memoryFiles;
     private final DialogueEngine engine;
     private final SummaryStats summaryStats;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
@@ -72,11 +66,18 @@ public final class DialogueService {
         this.scheduler = scheduler;
         this.memory = new MemoryStore();
         memory.secrets(() -> plugin.getPluginConfig().configuredSecrets());
+        this.memoryFiles = new DialogueMemoryPersistence(
+                memory,
+                this::memoryFile,
+                () -> plugin.getPluginConfig().dialogueSettings(),
+                () -> plugin.getPluginConfig().configuredSecrets(),
+                plugin.getLogger(),
+                System::currentTimeMillis);
         DialogueSettings initial = plugin.getPluginConfig().dialogueSettings();
         java.util.List<String> secrets = plugin.getPluginConfig().configuredSecrets();
         if (initial.persistMemory()) {
             memory.load(memoryFile(), System.currentTimeMillis(), initial.memoryExpiryMillis(), plugin.getLogger(), secrets);
-            memoryLoadedFromDisk = true;
+            memoryFiles.loadedAtStartup();
         } else {
             MemoryStore.redactOnDisk(memoryFile(), secrets, plugin.getLogger(), memory);
         }
@@ -189,36 +190,7 @@ public final class DialogueService {
      */
     public void onReload() {
         resetSummaryStats();
-        Thread worker;
-        synchronized (this) {
-            if (memoryLoadedFromDisk || diskLoader != null) {
-                return;
-            }
-            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
-            if (!settings.persistMemory()) {
-                return;
-            }
-            long now = System.currentTimeMillis();
-            long expiry = settings.memoryExpiryMillis();
-            List<String> secrets = List.copyOf(plugin.getPluginConfig().configuredSecrets());
-            File file = memoryFile();
-            worker = new Thread(() -> {
-                try {
-                    if (memory.loadForPersistence(file, now, expiry, plugin.getLogger(), secrets)) {
-                        memoryLoadedFromDisk = true;
-                    }
-                } catch (RuntimeException e) {
-                    logMemoryLoadFailure(plugin.getLogger(), e, secrets);
-                } finally {
-                    synchronized (DialogueService.this) {
-                        diskLoader = null;
-                    }
-                }
-            }, "nexusai-memory-load");
-            worker.setDaemon(true);
-            diskLoader = worker;
-            worker.start();
-        }
+        memoryFiles.onReload();
     }
 
     public void start() {
@@ -233,18 +205,7 @@ public final class DialogueService {
         if (save != null) {
             save.cancel(false);
         }
-        Thread pending;
-        synchronized (this) {
-            pending = diskLoader;
-        }
-        if (pending != null) {
-            try {
-                pending.join(5_000L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        saveMemory();
+        memoryFiles.shutdown();
     }
 
     public boolean capturesChat(UUID player) {
@@ -689,17 +650,7 @@ public final class DialogueService {
     }
 
     private void saveMemory() {
-        try {
-            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
-            if (!settings.persistMemory() || !memoryLoadedFromDisk) {
-                return;
-            }
-            memory.save(memoryFile(), plugin.getLogger(), settings.summaryEnabled());
-        } catch (Throwable thrown) {
-            plugin.getLogger().fine("Skipped dialogue memory save: "
-                    + io.github.neareststep.nexusai.config.SecretMask.redact(
-                    String.valueOf(thrown.getMessage()), plugin.getPluginConfig().configuredSecrets()));
-        }
+        memoryFiles.save();
     }
 
     private File memoryFile() {
