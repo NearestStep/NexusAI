@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.moderation;
 
+import io.github.neareststep.nexusai.config.LogRedaction;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -8,7 +10,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
-import java.util.logging.Level;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -21,10 +23,16 @@ public final class ModerationLog {
     private final java.io.File file;
     private final Logger logger;
     private final Object lock = new Object();
+    private volatile Supplier<Iterable<String>> secretSource = java.util.List::of;
 
     public ModerationLog(java.io.File file, Logger logger) {
         this.file = file;
         this.logger = logger == null ? Logger.getLogger("nexusai.moderation") : logger;
+    }
+
+    /** Keys used to mask a path when writing {@code moderation.log} fails. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? java.util.List::of : secrets;
     }
 
     public void append(UUID playerId, String playerName, String message, String category, String reason) {
@@ -51,7 +59,8 @@ public final class ModerationLog {
                         StandardOpenOption.APPEND
                 );
             } catch (IOException e) {
-                logger.log(Level.WARNING, "Failed to write moderation.log", e);
+                Iterable<String> known = secretSource.get();
+                LogRedaction.warning(logger, "Failed to write moderation.log", e, known == null ? java.util.List.of() : known);
             }
         }
     }

@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RateLimitHeaders;
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import io.github.neareststep.nexusai.config.QueueStrategy;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -23,7 +24,6 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -54,6 +54,8 @@ public final class ModelQueue {
      */
     private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
+    /** Resolved API keys. A data-directory path in a usage.yml warning is masked with these. */
+    private volatile Supplier<Iterable<String>> secretSource = List::of;
     private LocalDate day;
     private int moderationChecks;
     private int moderationFlags;
@@ -163,6 +165,11 @@ public final class ModelQueue {
 
     public int size() {
         return slots.size();
+    }
+
+    /** Keys used to mask a path in a usage.yml warning. Empty until the plugin wires config. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? List::of : secrets;
     }
 
     public synchronized List<Choice> selectable(long nowMillis) {
@@ -689,7 +696,8 @@ public final class ModelQueue {
                 }
                 AtomicFiles.preserving(usageFile.toPath(), () -> yaml.save(usageFile));
             } catch (IOException e) {
-                logger.log(Level.WARNING, "Failed to save usage counters", e);
+                Iterable<String> known = secretSource.get();
+                LogRedaction.warning(logger, "Failed to save usage counters", e, known == null ? List.of() : known);
             }
         }
     }

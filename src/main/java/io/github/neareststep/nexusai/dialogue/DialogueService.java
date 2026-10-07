@@ -9,6 +9,7 @@ import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.command.SenderTasks;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -70,6 +71,7 @@ public final class DialogueService {
         this.httpExecutor = httpExecutor;
         this.scheduler = scheduler;
         this.memory = new MemoryStore();
+        memory.secrets(() -> plugin.getPluginConfig().configuredSecrets());
         DialogueSettings initial = plugin.getPluginConfig().dialogueSettings();
         java.util.List<String> secrets = plugin.getPluginConfig().configuredSecrets();
         if (initial.persistMemory()) {
@@ -164,8 +166,7 @@ public final class DialogueService {
                 new GreetingCache(),
                 router::route,
                 this::runAction,
-                new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
-                        () -> plugin.getPluginConfig().dialogueSettings().actionLog()),
+                actionLog(),
                 ZoneId.systemDefault(),
                 summaries,
                 plugin.getLogger(),
@@ -207,7 +208,7 @@ public final class DialogueService {
                         memoryLoadedFromDisk = true;
                     }
                 } catch (RuntimeException e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to load dialogue-memory.yml", e);
+                    logMemoryLoadFailure(plugin.getLogger(), e, secrets);
                 } finally {
                     synchronized (DialogueService.this) {
                         diskLoader = null;
@@ -695,12 +696,28 @@ public final class DialogueService {
             }
             memory.save(memoryFile(), plugin.getLogger(), settings.summaryEnabled());
         } catch (Throwable thrown) {
-            plugin.getLogger().fine("Skipped dialogue memory save: " + thrown.getMessage());
+            plugin.getLogger().fine("Skipped dialogue memory save: "
+                    + io.github.neareststep.nexusai.config.SecretMask.redact(
+                    String.valueOf(thrown.getMessage()), plugin.getPluginConfig().configuredSecrets()));
         }
     }
 
     private File memoryFile() {
         return new File(plugin.getDataFolder(), "dialogue-memory.yml");
+    }
+
+    private ActionLog actionLog() {
+        ActionLog log = new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
+                () -> plugin.getPluginConfig().dialogueSettings().actionLog());
+        log.secrets(() -> plugin.getPluginConfig().configuredSecrets());
+        return log;
+    }
+
+    /**
+     * The reload loader's warning. The stack stays at FINE, and a key in the data-directory path is masked.
+     */
+    static void logMemoryLoadFailure(java.util.logging.Logger logger, Throwable error, Iterable<String> secrets) {
+        LogRedaction.warning(logger, "Failed to load dialogue-memory.yml", error, secrets);
     }
 
     private KeyRing ring(String providerId) {

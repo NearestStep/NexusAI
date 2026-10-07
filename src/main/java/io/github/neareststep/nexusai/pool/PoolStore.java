@@ -4,6 +4,8 @@ import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.FileBackup;
+import io.github.neareststep.nexusai.config.LogRedaction;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.config.YamlStrings;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -19,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -42,6 +45,8 @@ public final class PoolStore {
     private volatile boolean refuseOverwrite;
     /** The invalid-file warning is logged once until a later read succeeds. */
     private volatile boolean invalidNoted;
+    /** Resolved API keys. A data-directory path in a save error is masked with these. */
+    private volatile Supplier<Iterable<String>> secretSource = List::of;
 
     public PoolStore(File file, ScheduledExecutorService scheduler, Duration delay, Logger logger, boolean enabled) {
         this(file, scheduler, delay, logger, enabled, false);
@@ -69,6 +74,16 @@ public final class PoolStore {
 
     public boolean isEnabled() {
         return enabled;
+    }
+
+    /** Keys used to mask a path in a pool.yml warning. Empty until the plugin wires config. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? List::of : secrets;
+    }
+
+    private Iterable<String> secrets() {
+        Iterable<String> values = secretSource.get();
+        return values == null ? List.of() : values;
     }
 
     public void load(AiPool pool, Map<String, Integer> limits) {
@@ -194,15 +209,16 @@ public final class PoolStore {
 
     private void noteUnreadable(Exception error) {
         refuseOverwrite = true;
-        logger.log(Level.FINE, "Answer pool file could not be parsed: " + file.getAbsolutePath(), error);
+        Iterable<String> known = secrets();
+        String where = SecretMask.redact(file.getAbsolutePath(), known);
+        logger.log(Level.FINE, "Answer pool file could not be parsed: " + where,
+                LogRedaction.redactThrowable(error, known));
         if (invalidNoted) {
             return;
         }
         invalidNoted = true;
-        String detail = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
-        detail = detail.replace('\r', ' ').replace('\n', ' ').replaceAll(" +", " ").strip();
-        logger.warning("pool.yml at " + file.getAbsolutePath()
-                + " could not be parsed (" + detail
+        logger.warning("pool.yml at " + where
+                + " could not be parsed (" + LogRedaction.detail(error, known)
                 + "). The file was left untouched and the answer pool is empty until the file is fixed and reloaded.");
     }
 
@@ -217,7 +233,8 @@ public final class PoolStore {
             try {
                 if (file.isFile() && containsUncleanAnswers(file)) {
                     Path backup = FileBackup.backup(file.toPath());
-                    logger.info("Backed up pool.yml to " + backup.toAbsolutePath());
+                    logger.info("Backed up pool.yml to "
+                            + SecretMask.redact(backup.toAbsolutePath().toString(), secrets()));
                 }
                 StringBuilder yaml = new StringBuilder();
                 yaml.append("config-version: ").append(ConfigVersions.CURRENT).append('\n');
@@ -257,7 +274,7 @@ public final class PoolStore {
                 java.nio.file.Files.writeString(temporary.toPath(), yaml.toString(), java.nio.charset.StandardCharsets.UTF_8);
                 moveIntoPlace(temporary);
             } catch (Exception e) {
-                logger.log(Level.WARNING, "Failed to save answer pool to " + file.getName(), e);
+                LogRedaction.warning(logger, "Failed to save answer pool to " + file.getName(), e, secrets());
             }
         }
     }

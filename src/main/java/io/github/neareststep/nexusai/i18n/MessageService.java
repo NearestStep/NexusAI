@@ -1,6 +1,9 @@
 package io.github.neareststep.nexusai.i18n;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.LogRedaction;
+import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -261,7 +264,7 @@ public final class MessageService {
                 String fallback = bundledPresent
                         ? "Using the bundled " + localeCode + " locale."
                         : "Using English.";
-                warnBrokenLocale(plugin.getLogger(), userFile, e, fallback);
+                warnBrokenLocale(plugin.getLogger(), userFile, e, fallback, configuredSecrets());
                 user = new YamlConfiguration();
                 userPresent = false;
                 brokenUserFile = true;
@@ -269,7 +272,7 @@ public final class MessageService {
         }
         if (!brokenUserFile && !bundledPresent && !userPresent && !DEFAULT_LOCALE.equals(localeCode) && plugin != null) {
             File expected = userFile != null ? userFile : new File("lang/" + localeCode + ".yml");
-            warnMissingLocale(plugin.getLogger(), localeCode, expected);
+            warnMissingLocale(plugin.getLogger(), localeCode, expected, configuredSecrets());
         }
         YamlConfiguration merged = merge(user, bundledPresent ? bundled : new YamlConfiguration(), english);
         int filled = userPresent ? filledFromDefaults(user, merged) : 0;
@@ -312,7 +315,7 @@ public final class MessageService {
                 yaml.load(new InputStreamReader(in, StandardCharsets.UTF_8));
             }
         } catch (Exception e) {
-            warnBrokenLocale(plugin.getLogger(), new File(resourcePath), e, "Using English.");
+            warnBrokenLocale(plugin.getLogger(), new File(resourcePath), e, "Using English.", configuredSecrets());
         }
         return yaml;
     }
@@ -369,11 +372,15 @@ public final class MessageService {
      * There is no stack trace. The file is not described as missing from the jar alone.
      */
     static void warnMissingLocale(Logger logger, String localeCode, File expectedFile) {
+        warnMissingLocale(logger, localeCode, expectedFile, List.of());
+    }
+
+    static void warnMissingLocale(Logger logger, String localeCode, File expectedFile, Iterable<String> secrets) {
         if (logger == null) {
             return;
         }
         String path = expectedFile == null ? "lang/" + localeCode + ".yml" : expectedFile.getPath();
-        logger.warning("Locale '" + localeCode + "' is not available: " + path
+        logger.warning("Locale '" + localeCode + "' is not available: " + SecretMask.redact(path, secrets)
                 + " does not exist and lang/" + localeCode + ".yml is not bundled. Using English.");
         logger.warning("Bundled locales: " + String.join(", ", LocaleFiles.BUNDLED) + ".");
     }
@@ -383,14 +390,46 @@ public final class MessageService {
      * the message has them), and the fallback. The stack trace is logged at {@link Level#FINE} only.
      */
     static void warnBrokenLocale(Logger logger, File file, Exception error, String fallback) {
+        warnBrokenLocale(logger, file, error, fallback, List.of());
+    }
+
+    static void warnBrokenLocale(Logger logger, File file, Exception error, String fallback, Iterable<String> secrets) {
         if (logger == null) {
             return;
         }
         String path = file == null ? "(unknown locale file)" : file.getPath();
-        String reason = yamlReason(error);
+        String shown = SecretMask.redact(path, secrets);
+        String reason = SecretMask.redact(yamlReason(error), secrets);
         String where = fallback == null || fallback.isBlank() ? "Using English." : fallback;
-        logger.warning("Could not read " + path + " (" + reason + "). " + where);
-        logger.log(Level.FINE, "Could not read " + path, error);
+        logger.warning("Could not read " + shown + " (" + reason + "). " + where);
+        logger.log(Level.FINE, "Could not read " + shown, fineCause(error, secrets, !shown.equals(path)));
+    }
+
+    private Iterable<String> configuredSecrets() {
+        if (plugin instanceof io.github.neareststep.nexusai.NexusAI nexus) {
+            PluginConfig config = nexus.getPluginConfig();
+            if (config != null) {
+                return config.configuredSecrets();
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * Keeps the original throwable when neither its message nor the logged path holds a secret,
+     * so a locale parser failure still shows the same stack at FINE. A path that changed under
+     * the mask is not attached raw.
+     */
+    private static Throwable fineCause(Throwable error, Iterable<String> secrets, boolean pathChanged) {
+        if (error == null) {
+            return null;
+        }
+        String message = error.getMessage();
+        boolean messageChanged = message != null && !message.equals(SecretMask.redact(message, secrets));
+        if (!pathChanged && !messageChanged) {
+            return error;
+        }
+        return LogRedaction.redactThrowable(error, secrets);
     }
 
     static String yamlReason(Throwable error) {

@@ -10,6 +10,7 @@ import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
@@ -247,6 +248,7 @@ public final class NexusAI extends JavaPlugin {
                 pluginConfig.isPoolPersist(),
                 pluginConfig.allowMarkup()
         );
+        poolStore.secrets(pluginConfig::configuredSecrets);
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
                 (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS),
@@ -456,6 +458,7 @@ public final class NexusAI extends JavaPlugin {
                 new File(getDataFolder(), "usage.yml"),
                 getLogger(),
                 config.modelQueueStrategy());
+        this.modelQueue.secrets(config::configuredSecrets);
         return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
     }
 
@@ -610,6 +613,16 @@ public final class NexusAI extends JavaPlugin {
         return moderationService;
     }
 
+    private ModerationLog moderationLog() {
+        ModerationLog log = new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger());
+        log.secrets(this::loggingSecrets);
+        return log;
+    }
+
+    private Iterable<String> loggingSecrets() {
+        return pluginConfig == null ? List.of() : pluginConfig.configuredSecrets();
+    }
+
     private void startModeration() {
         ModerationSettings settings = pluginConfig.moderation();
         if (settings.enabled() && settings.provider().isEmpty() != settings.model().isEmpty()) {
@@ -630,7 +643,7 @@ public final class NexusAI extends JavaPlugin {
                 modelQueue,
                 openAiProvider,
                 httpExecutor,
-                new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger()),
+                moderationLog(),
                 new FoliaStaffNotifier(this),
                 getLogger()
         );
@@ -711,7 +724,7 @@ public final class NexusAI extends JavaPlugin {
                 AtomicFiles.installPrivate(target.toPath(), in);
             }
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create " + name, e);
+            LogRedaction.warning(getLogger(), "Could not create " + name, e, loggingSecrets());
         }
         if (target.isFile()) {
             return;
@@ -738,7 +751,7 @@ public final class NexusAI extends JavaPlugin {
         try {
             KnowledgeBase.ensureExample(knowledge.toPath());
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+            LogRedaction.warning(getLogger(), "Could not create the knowledge example file", e, loggingSecrets());
         }
     }
 
@@ -747,14 +760,15 @@ public final class NexusAI extends JavaPlugin {
         try {
             KnowledgeBase.ensureExample(new File(getDataFolder(), "knowledge").toPath());
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+            LogRedaction.warning(getLogger(), "Could not create the knowledge example file", e, loggingSecrets());
         }
         this.knowledgeBase = KnowledgeBase.load(
                 new File(getDataFolder(), "knowledge").toPath(),
                 pluginConfig.knowledgeMaxChars(),
                 pluginConfig.knowledgeMaxFileChars(),
                 warnings,
-                getLogger());
+                getLogger(),
+                loggingSecrets());
         for (String warning : warnings) {
             getLogger().warning(warning);
         }

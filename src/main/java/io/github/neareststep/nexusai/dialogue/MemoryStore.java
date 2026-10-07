@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.SecretMask;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
@@ -27,7 +28,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.logging.Level;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
@@ -46,6 +47,8 @@ public final class MemoryStore {
     private boolean saveBlockedLogged;
     /** Load and save take this in turn, so a save cannot snapshot a store that is still loading. */
     final ReentrantLock diskLock = new ReentrantLock();
+    /** Resolved API keys. A data-directory path in a save warning is masked with these. */
+    private volatile Supplier<Iterable<String>> secretSource = List::of;
     /** Runs with {@link #diskLock} held, before a load changes the store. Tests pause a load here. */
     static Runnable pauseDuringLoad;
 
@@ -140,6 +143,16 @@ public final class MemoryStore {
 
     public void load(File file, long nowMillis, long expiryMillis, Logger logger) {
         load(file, nowMillis, expiryMillis, logger, List.of());
+    }
+
+    /** Keys used to mask a path in a dialogue-memory.yml warning. Empty until the plugin wires config. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? List::of : secrets;
+    }
+
+    private Iterable<String> secrets() {
+        Iterable<String> values = secretSource.get();
+        return values == null ? List.of() : values;
     }
 
     /**
@@ -265,7 +278,7 @@ public final class MemoryStore {
             }
             return null;
         }
-        if (redactDocument(yaml, secrets) && rewrite(file, yaml, logger) && logger != null) {
+        if (redactDocument(yaml, secrets) && rewrite(file, yaml, logger, secrets) && logger != null) {
             logger.info("Masked API keys in dialogue-memory.yml");
         }
         return yaml;
@@ -347,7 +360,7 @@ public final class MemoryStore {
         return dirty;
     }
 
-    private static boolean rewrite(File file, YamlConfiguration yaml, Logger logger) {
+    private static boolean rewrite(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets) {
         File parent = file.getParentFile();
         File temporary = new File(parent == null ? new File(".") : parent,
                 file.getName() + "." + UUID.randomUUID() + ".tmp");
@@ -363,7 +376,7 @@ public final class MemoryStore {
             return true;
         } catch (IOException e) {
             if (logger != null) {
-                logger.log(Level.WARNING, "Failed to save dialogue-memory.yml", e);
+                LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
             }
             return false;
         } finally {
@@ -422,7 +435,7 @@ public final class MemoryStore {
                     }
                 } catch (IOException e) {
                     if (logger != null) {
-                        logger.log(Level.WARNING, "Failed to back up dialogue-memory.yml", e);
+                        LogRedaction.warning(logger, "Failed to back up dialogue-memory.yml", e, secrets());
                     }
                     return;
                 }
@@ -440,7 +453,7 @@ public final class MemoryStore {
             }
         } catch (IOException e) {
             if (logger != null) {
-                logger.log(Level.WARNING, "Failed to save dialogue-memory.yml", e);
+                LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
             }
         }
     }

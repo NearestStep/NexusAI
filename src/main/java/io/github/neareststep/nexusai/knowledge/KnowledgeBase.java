@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.knowledge;
 
+import io.github.neareststep.nexusai.config.LogRedaction;
+
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
@@ -76,6 +78,17 @@ public final class KnowledgeBase {
     }
 
     public static KnowledgeBase load(Path folder, int maxChars, int maxFileChars, List<String> warnings, Logger logger) {
+        return load(folder, maxChars, maxFileChars, warnings, logger, List.of());
+    }
+
+    public static KnowledgeBase load(
+            Path folder,
+            int maxChars,
+            int maxFileChars,
+            List<String> warnings,
+            Logger logger,
+            Iterable<String> secrets
+    ) {
         List<String> notes = warnings == null ? new ArrayList<>() : warnings;
         int fileCap = Math.max(1, maxFileChars);
         Map<String, String> loaded = new LinkedHashMap<>();
@@ -116,14 +129,14 @@ public final class KnowledgeBase {
                                     + "' is not valid UTF-8, re-save the file as UTF-8. The file was skipped.";
                             if (logger != null) {
                                 logger.warning(note);
-                                logger.log(Level.FINE, note, e);
+                                logger.log(Level.FINE, note, LogRedaction.redactThrowable(e, secrets));
                             } else {
                                 notes.add(note);
                             }
                         } else {
                             notes.add("Could not read knowledge file '" + fileName + "'.");
                             if (logger != null) {
-                                logger.log(Level.WARNING, "Could not read knowledge file " + fileName, e);
+                                LogRedaction.warning(logger, "Could not read knowledge file " + fileName, e, secrets);
                             }
                         }
                         continue;
@@ -140,7 +153,7 @@ public final class KnowledgeBase {
             } catch (IOException e) {
                 notes.add("Could not list the knowledge folder.");
                 if (logger != null) {
-                    logger.log(Level.WARNING, "Could not list the knowledge folder", e);
+                    LogRedaction.warning(logger, "Could not list the knowledge folder", e, secrets);
                 }
             }
         }
