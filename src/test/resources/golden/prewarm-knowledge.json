@@ -1,0 +1,1 @@
+{"model":"gpt-4o-mini","messages":[{"role":"system","content":"Be brief.\n\n----- KNOWLEDGE -----\n[lore]\n<!-- harbor note -->\nThe harbor is old.\n----- END KNOWLEDGE -----\n\nUse at most 4 lines. Each line must be at most 40 characters. Separate lines with a newline."},{"role":"user","content":"Name one landmark in the harbor."}],"max_tokens":64}
