@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -952,10 +953,63 @@ def self_check() -> int:
             body = response.read()
         if response.status != 200 or b"pong" not in body:
             raise SystemExit("default mock did not return pong")
+        if b'"usage"' in body:
+            raise SystemExit("default mock gained a usage key")
         if handle.count != 1:
             raise SystemExit(f"mock count {handle.count}")
     finally:
         handle.close()
+
+    modes = smoke.free_port()
+    with tempfile.TemporaryDirectory() as tmp:
+        journal = Path(tmp) / "mock-requests.jsonl"
+        modes_handle = smoke.start_mock(modes, requests_path=journal, usage="off")
+        try:
+            def post(path: str, headers: dict[str, str]) -> tuple[int, bytes]:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{modes}{path}",
+                    data=b'{"model":"smoke"}',
+                    headers={"Content-Type": "application/json", **headers},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        return response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    return error.code, error.read()
+
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Usage": "on"})
+            parsed = json.loads(body)
+            if status != 200 or parsed["usage"] != {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}:
+                raise SystemExit(f"usage=on {status} {body!r}")
+            status, body = post("/v1/chat/completions?usage=partial", {})
+            parsed = json.loads(body)
+            if status != 200 or parsed["usage"] != {"total_tokens": 12} or "prompt_tokens" in parsed["usage"]:
+                raise SystemExit(f"usage=partial {status} {body!r}")
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Usage": "cost"})
+            parsed = json.loads(body)
+            if status != 200 or parsed["usage"].get("cost") != 0.00012:
+                raise SystemExit(f"usage=cost {status} {body!r}")
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Usage": "off"})
+            if status != 200 or b"pong" not in body or b'"usage"' in body:
+                raise SystemExit(f"usage=off {status} {body!r}")
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Status": "429-once"})
+            if status != 429 or b"rate limit" not in body:
+                raise SystemExit(f"status=429-once first {status} {body!r}")
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Status": "429-once"})
+            if status != 200 or b"pong" not in body:
+                raise SystemExit(f"status=429-once second {status} {body!r}")
+            status, body = post("/v1/chat/completions?status=500", {})
+            if status != 500:
+                raise SystemExit(f"status=500 {status}")
+            status, body = post("/v1/chat/completions", {"X-Nexus-Mock-Status": "401"})
+            if status != 401:
+                raise SystemExit(f"status=401 {status}")
+            lines = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if len(lines) != 8 or "body" not in lines[0] or lines[0]["usage"] != "on":
+                raise SystemExit(f"mock journal {lines!r}")
+        finally:
+            modes_handle.close()
 
     server, nexus = jfr_share(
         'jdk.ExecutionSample {\n  sampledThread = "Server thread" (javaThreadId = 1)\n'

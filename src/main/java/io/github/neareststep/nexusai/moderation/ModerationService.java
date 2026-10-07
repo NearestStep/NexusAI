@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.moderation;
 
 import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.FormatPresets;
@@ -133,7 +135,7 @@ public final class ModerationService {
         String wrapped = PlayerInput.wrap(text);
         String reply;
         try {
-            reply = call(wrapped, choice.get());
+            reply = call(playerId, wrapped, choice.get());
         } catch (AiRequestException e) {
             logger.log(Level.FINE, "Chat moderation request failed: "
                     + SecretMask.redact(e.getMessage(), config.configuredSecrets()));
@@ -222,7 +224,7 @@ public final class ModerationService {
         return false;
     }
 
-    private String call(String wrapped, ModelQueue.Choice choice) {
+    private String call(UUID playerId, String wrapped, ModelQueue.Choice choice) {
         if (http == null) {
             throw new AiRequestException(
                     io.github.neareststep.nexusai.ai.AiErrorKind.OTHER, 0, "Moderation HTTP client is not ready", null);
@@ -244,7 +246,8 @@ public final class ModerationService {
                 true,
                 model
         ).withFormat(FormatPresets.SIMPLE);
-        return http.exchangeRaw(wrapped, overrides, provider.url(), firstKey(provider), model).text();
+        CallTrace trace = CallTrace.start(RequestOrigin.MODERATION, playerId, "", "");
+        return http.exchangeRaw(wrapped, overrides, provider.url(), firstKey(provider), model, trace).text();
     }
 
     private static String firstKey(ProviderSettings provider) {

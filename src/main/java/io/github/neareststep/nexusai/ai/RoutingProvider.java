@@ -103,13 +103,23 @@ public final class RoutingProvider implements AiProvider {
 
     @Override
     public CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
+        return answer(prompt, overrides, ignoreCooldown, null);
+    }
+
+    @Override
+    public CompletableFuture<ModelAnswer> answer(
+            String prompt,
+            GenerationOverrides overrides,
+            boolean ignoreCooldown,
+            CallTrace trace
+    ) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         CompletableFuture<ModelAnswer> result = new CompletableFuture<>();
         try {
             executor.execute(() -> {
                 try {
-                    route(prompt, effective, ignoreCooldown).whenComplete((value, error) -> {
+                    route(prompt, effective, ignoreCooldown, trace).whenComplete((value, error) -> {
                         if (error != null) {
                             result.completeExceptionally(error);
                         } else {
@@ -130,12 +140,17 @@ public final class RoutingProvider implements AiProvider {
      * @param probe {@code /nai test}. Skips temporary cooldown, still honors a daily cap,
      *              and does not mark a failure, skip a key, or lengthen a cooldown.
      */
-    private CompletableFuture<ModelAnswer> route(String prompt, GenerationOverrides overrides, boolean probe) {
+    private CompletableFuture<ModelAnswer> route(
+            String prompt,
+            GenerationOverrides overrides,
+            boolean probe,
+            CallTrace trace
+    ) {
         long now = clock.getAsLong();
         List<ModelQueue.Choice> choices = queue.selectable(now, probe);
         Attempt last = new Attempt();
         Set<Integer> attempted = new HashSet<>();
-        return walk(prompt, overrides, probe, choices, 0, attempted, last);
+        return walk(prompt, overrides, probe, choices, 0, attempted, last, trace);
     }
 
     private CompletableFuture<ModelAnswer> walk(
@@ -145,20 +160,22 @@ public final class RoutingProvider implements AiProvider {
             List<ModelQueue.Choice> choices,
             int index,
             Set<Integer> attempted,
-            Attempt last
+            Attempt last,
+            CallTrace trace
     ) {
         if (index >= choices.size()) {
-            return walkFallback(prompt, overrides, probe, choices, attempted, last);
+            return walkFallback(prompt, overrides, probe, choices, attempted, last, trace);
         }
         ModelQueue.Choice choice = choices.get(index);
         attempted.add(choice.index());
         String model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
-        return tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last, 0)
+        return tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last, 0, trace)
                 .thenCompose(answer -> {
                     if (answer != null) {
-                        return CompletableFuture.completedFuture(new ModelAnswer(answer.text(), answer.cacheTtl()));
+                        return CompletableFuture.completedFuture(
+                                toAnswer(answer, choice.provider(), model, last.httpAttempts, false));
                     }
-                    return walk(prompt, overrides, probe, choices, index + 1, attempted, last);
+                    return walk(prompt, overrides, probe, choices, index + 1, attempted, last, trace);
                 });
     }
 
@@ -168,7 +185,8 @@ public final class RoutingProvider implements AiProvider {
             boolean probe,
             List<ModelQueue.Choice> choices,
             Set<Integer> attempted,
-            Attempt last
+            Attempt last,
+            CallTrace trace
     ) {
         FallbackModel fallback = overrides.fallbackModel();
         if (fallback != null && fallback.configured()) {
@@ -184,10 +202,12 @@ public final class RoutingProvider implements AiProvider {
                         plan.queueIndex(),
                         plan.dedicated(),
                         last,
-                        0
+                        0,
+                        trace
                 ).thenCompose(answer -> {
                     if (answer != null) {
-                        return CompletableFuture.completedFuture(new ModelAnswer(answer.text(), answer.cacheTtl()));
+                        return CompletableFuture.completedFuture(
+                                toAnswer(answer, plan.provider(), plan.model(), last.httpAttempts, true));
                     }
                     return failed(probe, choices, fallback, last);
                 });
@@ -224,7 +244,8 @@ public final class RoutingProvider implements AiProvider {
             int queueIndex,
             boolean dedicatedFallback,
             Attempt last,
-            int keyAttempt
+            int keyAttempt,
+            CallTrace trace
     ) {
         ProviderSettings provider = config.provider(providerId);
         if (provider == null) {
@@ -266,7 +287,8 @@ public final class RoutingProvider implements AiProvider {
             if (!consumed) {
                 return CompletableFuture.completedFuture(null);
             }
-            return http.exchangeAsync(prompt, overrides, provider.url(), apiKey, model);
+            last.httpAttempts++;
+            return http.exchangeAsync(prompt, overrides, provider.url(), apiKey, model, trace);
         }).handle((ChatExchange exchange, Throwable error) -> afterCall(
                 prompt,
                 overrides,
@@ -281,8 +303,28 @@ public final class RoutingProvider implements AiProvider {
                 ring,
                 apiKey,
                 exchange,
-                error
+                error,
+                trace
         )).thenCompose(next -> next);
+    }
+
+    private static ModelAnswer toAnswer(
+            ChatExchange exchange,
+            String providerId,
+            String model,
+            int attempts,
+            boolean fallbackModelUsed
+    ) {
+        return new ModelAnswer(
+                exchange.text(),
+                exchange.cacheTtl(),
+                providerId,
+                model,
+                exchange.usage(),
+                exchange.finishReason(),
+                attempts,
+                fallbackModelUsed,
+                exchange.httpNanos());
     }
 
     private CompletableFuture<ChatExchange> afterCall(
@@ -299,7 +341,8 @@ public final class RoutingProvider implements AiProvider {
             KeyRing ring,
             String key,
             ChatExchange exchange,
-            Throwable error
+            Throwable error,
+            CallTrace trace
     ) {
         if (error == null) {
             if (exchange == null) {
@@ -358,7 +401,8 @@ public final class RoutingProvider implements AiProvider {
                 ? keyAttempt + 1 < attempts
                 : ring.hasAvailable(now));
         if (typed.kind() == AiErrorKind.BAD_KEY && anotherKey) {
-            return tryModel(prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, keyAttempt + 1);
+            return tryModel(
+                    prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, keyAttempt + 1, trace);
         }
         if (!probe) {
             fail(queueIndex, dedicatedFallback, providerId, model, typed);
@@ -391,6 +435,7 @@ public final class RoutingProvider implements AiProvider {
 
     private static final class Attempt {
         private AiRequestException error;
+        private int httpAttempts;
         private final java.util.LinkedHashSet<String> pausedProviders = new java.util.LinkedHashSet<>();
     }
 

@@ -1,6 +1,9 @@
 package io.github.neareststep.nexusai.command;
 
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.api.RequestOrigin;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.context.ContextService;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -10,12 +13,30 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NaiCommandTest {
+
+    @Test
+    void testTraceNamesThePlayerAndTheNotice() {
+        UUID player = UUID.fromString("11111111-1111-1111-1111-111111111111");
+        CallTrace named = NaiCommand.testTrace(player, GenerationOverrides.none().withNoticeId("rules"));
+        assertEquals(RequestOrigin.TEST, named.origin());
+        assertEquals("nexusai", named.consumer());
+        assertEquals(player, named.playerId());
+        assertEquals("rules", named.promptId());
+        assertEquals("", named.label());
+        assertTrue(named.startedNanos() > 0L);
+        CallTrace console = NaiCommand.testTrace(null, GenerationOverrides.none());
+        assertNull(console.playerId());
+        assertEquals("", console.promptId());
+    }
 
     @Test
     void typedTestTextIsSanitizedAndWrapped() {

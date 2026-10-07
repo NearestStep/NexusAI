@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
@@ -400,11 +401,13 @@ public final class DialogueRouter {
     ) {
         boolean toolsOffered = call.tools() != null && !call.tools().isEmpty();
         if (toolsOffered && !sent.result().toolNames().isEmpty() && !toolsDropped) {
-            String shown = sanitizeAlongsideTools(current, call, sent.result().content(), key, sent.result().finishReason());
+            String shown = sanitizeAlongsideTools(
+                    current, call, sent.result().content(), key, sent.result().finishReason(), sent.result().usage());
             noteSuccess(admissionKey, keepPause);
             return new DialogueEngine.ModelReply(shown, sent.result().toolNames(), false);
         }
-        String text = safeText(current, call, sent.result().content(), key, sent.result().finishReason());
+        String text = safeText(
+                current, call, sent.result().content(), key, sent.result().finishReason(), sent.result().usage());
         if (LengthCutoff.isLength(sent.result().finishReason())) {
             LengthTrimNotices.note(logger, talkNotice(call));
         }
@@ -417,12 +420,13 @@ public final class DialogueRouter {
             DialogueEngine.ModelCall call,
             String content,
             String key,
-            String finishReason
+            String finishReason,
+            ResponseUsage usage
     ) {
         if (content == null || content.isBlank()) {
             return content == null ? "" : content;
         }
-        return safeText(current, call, content, key, finishReason);
+        return safeText(current, call, content, key, finishReason, usage);
     }
 
     private boolean pauseFallbackEligible(
@@ -545,7 +549,7 @@ public final class DialogueRouter {
                     budget.maxCompletionTokens(),
                     budget.reasoningEffort(),
                     current.getReadTimeout()
-            ));
+            ), call.trace());
             return new SendOnce(result, false);
         } catch (AiRequestException error) {
             if (error.unsupportedTools() && tools != null && !tools.isEmpty()) {
@@ -560,9 +564,10 @@ public final class DialogueRouter {
             DialogueEngine.ModelCall call,
             String raw,
             String apiKey,
-            String finishReason
+            String finishReason,
+            ResponseUsage usage
     ) {
-        return transport.finishText(raw, call.wrappedUser(), call.formatId(), apiKey, finishReason);
+        return transport.finishText(raw, call.wrappedUser(), call.formatId(), apiKey, finishReason, usage);
     }
 
     /**

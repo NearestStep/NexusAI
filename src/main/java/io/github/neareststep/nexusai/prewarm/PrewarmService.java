@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.prewarm;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -201,9 +203,11 @@ public final class PrewarmService {
         if (httpClient.isAdmissionBlocked(prepared.text())) {
             return;
         }
+        String promptId = prepared.overrides().noticeId();
+        CallTrace trace = CallTrace.start(RequestOrigin.PREWARM, null, promptId == null ? "" : promptId, "");
         CompletionSupport.onComplete(
                 httpClient.requestAsync(
-                        prepared.text(), null, prepared.overrides(), prepared.ttl(), prepared.knowledgeHash()),
+                        prepared.text(), null, prepared.overrides(), prepared.ttl(), prepared.knowledgeHash(), trace),
                 logger,
                 "Prewarm request failed",
                 (ignored, error) -> {

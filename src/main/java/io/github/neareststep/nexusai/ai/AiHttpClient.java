@@ -90,6 +90,20 @@ public final class AiHttpClient {
             Duration cacheTtl,
             String knowledgeHash
     ) {
+        return requestAsync(prompt, playerId, overrides, cacheTtl, knowledgeHash, null);
+    }
+
+    /**
+     * @param trace entrance that asked for this completion, or null for a caller that has none
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl,
+            String knowledgeHash,
+            CallTrace trace
+    ) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String key = cacheKey(
@@ -101,7 +115,7 @@ public final class AiHttpClient {
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
         }
-        return startShared(key, prompt, prompt, playerId, false, true, effective, cacheTtl);
+        return startShared(key, prompt, prompt, playerId, false, true, effective, cacheTtl, trace);
     }
 
     /**
@@ -124,9 +138,24 @@ public final class AiHttpClient {
             String admissionKey,
             GenerationOverrides overrides
     ) {
+        return generateFreshAsync(prompt, admissionKey, overrides, null);
+    }
+
+    /**
+     * Pool refills are the only production caller. A null trace is recorded as {@code POOL}.
+     */
+    public CompletableFuture<String> generateFreshAsync(
+            String prompt,
+            String admissionKey,
+            GenerationOverrides overrides,
+            CallTrace trace
+    ) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(admissionKey, "admissionKey");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        CallTrace call = trace == null
+                ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.POOL, null, "", "")
+                : trace;
         if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
@@ -137,7 +166,7 @@ public final class AiHttpClient {
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
         CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false, call);
         return created;
     }
 
@@ -152,7 +181,17 @@ public final class AiHttpClient {
     }
 
     public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides) {
+        return testAsync(prompt, overrides, null);
+    }
+
+    /**
+     * {@code /nai test} is the only production caller. A null trace is recorded as {@code TEST}.
+     */
+    public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides, CallTrace trace) {
         Objects.requireNonNull(prompt, "prompt");
+        CallTrace call = trace == null
+                ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.TEST, null, "", "")
+                : trace;
         if (!config.canSendChatRequests()) {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
@@ -164,7 +203,7 @@ public final class AiHttpClient {
         long failureEpoch = gate.failureEpoch(prompt);
         CompletableFuture<String> created = new CompletableFuture<>();
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true);
+        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true, call);
         return created;
     }
 
@@ -223,7 +262,8 @@ public final class AiHttpClient {
             boolean bypassBackoffAndPause,
             boolean writeCache,
             GenerationOverrides overrides,
-            Duration cacheTtl
+            Duration cacheTtl,
+            CallTrace trace
     ) {
         CompletableFuture<String> existing = inFlight.get(cacheKey);
         if (existing != null) {
@@ -245,7 +285,7 @@ public final class AiHttpClient {
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, cacheTtl, true, false);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, cacheTtl, true, false, trace);
         return created;
     }
 
@@ -260,20 +300,20 @@ public final class AiHttpClient {
             GenerationOverrides overrides,
             Duration cacheTtl,
             boolean clearPause,
-            boolean ignoreCooldown
+            boolean ignoreCooldown,
+            CallTrace trace
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         CompletableFuture<ModelAnswer> upstream;
         try {
-            upstream = provider.answer(prompt, effective, ignoreCooldown);
+            upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
         } catch (RuntimeException e) {
             finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
             return;
         }
         upstream.whenComplete((answer, error) -> {
             try {
-                String value = answer == null ? null : answer.text();
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache,
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
                         effectiveCacheTtl(cacheTtl, answer), clearPause);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
@@ -300,12 +340,13 @@ public final class AiHttpClient {
             long pauseStamp,
             long failureEpoch,
             CompletableFuture<String> created,
-            String value,
+            ModelAnswer answer,
             Throwable error,
             boolean writeCache,
             Duration cacheTtl,
             boolean clearPause
     ) {
+        String value = answer == null ? null : answer.text();
         try {
             if (error == null && PlayerInput.emptiedByMarkup(value, config.allowMarkup())) {
                 error = new AiRequestException(AiErrorKind.MARKUP_ONLY, 0, PlayerInput.MARKUP_ONLY, null);
@@ -317,10 +358,12 @@ public final class AiHttpClient {
             }
             if (error == null && value != null && !value.isBlank()) {
                 if (writeCache && cacheKey != null) {
+                    String providerId = answer == null ? "" : answer.providerId();
+                    String model = answer == null ? "" : answer.model();
                     if (cacheTtl != null) {
-                        cache.put(cacheKey, value, cacheTtl);
+                        cache.put(cacheKey, value, providerId, model, cacheTtl);
                     } else {
-                        cache.put(cacheKey, value);
+                        cache.put(cacheKey, value, providerId, model);
                     }
                 }
                 gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);

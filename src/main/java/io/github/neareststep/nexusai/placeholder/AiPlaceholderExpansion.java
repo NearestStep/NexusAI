@@ -2,8 +2,10 @@ package io.github.neareststep.nexusai.placeholder;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
@@ -209,13 +211,15 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             KnowledgeComposer.Prepared prepared
     ) {
         UUID playerId = player != null ? player.getUniqueId() : null;
+        CallTrace trace = placeholderTrace(playerId, resolved == null ? null : resolved.id());
         CompletionSupport.onComplete(
                 httpClient.requestAsync(
                         promptText,
                         playerId,
                         prepared.overrides().withNoticeId(noticeId(resolved, raw)),
                         resolved.ttl(),
-                        prepared.cacheToken()),
+                        prepared.cacheToken(),
+                        trace),
                 plugin.getLogger(),
                 "Background AI generation failed",
                 (ignored, error) -> {
@@ -223,6 +227,14 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                         plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
                     }
                 });
+    }
+
+    /**
+     * A cached placeholder. {@code promptId} is the named-prompt id, or empty for a literal
+     * argument. The rendered text is not the id.
+     */
+    static CallTrace placeholderTrace(UUID playerId, String promptId) {
+        return CallTrace.start(RequestOrigin.PLACEHOLDER, playerId, promptId == null ? "" : promptId, "");
     }
 
     /**

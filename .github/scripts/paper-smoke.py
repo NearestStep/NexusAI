@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -150,19 +151,71 @@ class MockHandle:
             self.server = None
 
 
+def _mock_choice(headers, path: str, name: str, fallback: str | None) -> str | None:
+    """Per-request header or query overrides the value passed to ``start_mock``."""
+    header_name = {"usage": "X-Nexus-Mock-Usage", "status": "X-Nexus-Mock-Status"}[name]
+    raw = headers.get(header_name)
+    if raw:
+        return raw.strip().lower()
+    query = parse_qs(urlsplit(path).query)
+    values = query.get(name)
+    if values and values[0].strip():
+        return values[0].strip().lower()
+    if fallback:
+        return fallback.strip().lower()
+    return None
+
+
+def _usage_object(mode: str | None) -> dict | None:
+    """``off`` and an unset mode keep the historical body, which has no ``usage`` key."""
+    if mode in (None, "", "off"):
+        return None
+    if mode == "partial":
+        return {"total_tokens": 12}
+    if mode == "cost":
+        return {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10, "cost": 0.00012}
+    if mode == "on":
+        return {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
+    return None
+
+
+def _completion_body(usage_mode: str | None) -> bytes:
+    payload = {
+        "id": "smoke",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "pong"},
+            "finish_reason": "stop",
+        }],
+    }
+    usage = _usage_object(usage_mode)
+    if usage is not None:
+        payload["usage"] = usage
+    return json.dumps(payload).encode("utf-8")
+
+
 def start_mock(
     port: int,
     latency_ms: int = 0,
     requests_path: Path | None = None,
     fail_every: int = 0,
+    usage: str | None = None,
+    status_mode: str | None = None,
 ) -> MockHandle:
-    """OpenAI-compatible mock. Defaults match the smoke boot: instant HTTP 200, body discarded.
+    """OpenAI-compatible mock. Defaults match the smoke boot: instant HTTP 200, body ``pong``.
 
     Load runs pass ``latency_ms``, ``requests_path`` (JSONL of request bodies), and
     ``fail_every`` (HTTP 429 on every Nth request).
+
+    ``usage`` is ``on``, ``off``, ``partial``, or ``cost``. ``status_mode`` is
+    ``429-once``, ``500``, or ``401``. A request may override either with the header
+    ``X-Nexus-Mock-Usage`` / ``X-Nexus-Mock-Status`` or the query ``usage`` / ``status``.
+    A status override wins over ``fail_every``. The default response has no ``usage`` key.
     """
     handle = MockHandle()
-    quiet = latency_ms > 0 or requests_path is not None or fail_every > 0
+    handle._status_once = False
+    quiet = latency_ms > 0 or requests_path is not None or fail_every > 0 or usage is not None or status_mode is not None
     if requests_path is not None:
         requests_path.parent.mkdir(parents=True, exist_ok=True)
         requests_path.write_text("", encoding="utf-8")
@@ -178,21 +231,30 @@ def start_mock(
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length) if length else b""
             number = handle.add()
-            status = 429 if fail_every > 0 and number % fail_every == 0 else 200
+            usage_mode = _mock_choice(self.headers, self.path, "usage", usage)
+            forced = _mock_choice(self.headers, self.path, "status", status_mode)
+            status = 200
+            if forced == "429-once":
+                with handle._lock:
+                    if not handle._status_once:
+                        handle._status_once = True
+                        status = 429
+            elif forced == "500":
+                status = 500
+            elif forced == "401":
+                status = 401
+            elif fail_every > 0 and number % fail_every == 0:
+                status = 429
             if latency_ms > 0:
                 time.sleep(latency_ms / 1000.0)
             if status == 429:
                 body = b'{"error":{"message":"rate limit","type":"rate_limit"}}'
+            elif status == 500:
+                body = b'{"error":{"message":"server error","type":"server_error"}}'
+            elif status == 401:
+                body = b'{"error":{"message":"unauthorized","type":"invalid_api_key"}}'
             else:
-                body = json.dumps({
-                    "id": "smoke",
-                    "object": "chat.completion",
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "pong"},
-                        "finish_reason": "stop",
-                    }],
-                }).encode("utf-8")
+                body = _completion_body(usage_mode)
             try:
                 self.send_response(status)
                 if status == 429:
@@ -211,6 +273,8 @@ def start_mock(
                     "status": status,
                     "path": self.path,
                     "body": text,
+                    "usage": usage_mode or "off",
+                    "mockStatus": forced or "",
                 }, ensure_ascii=False)
                 with handle._lock:
                     with requests_path.open("a", encoding="utf-8") as handle_out:

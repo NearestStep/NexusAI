@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.CallTrace;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.HttpGate;
@@ -71,6 +73,10 @@ public final class DialogueTransport {
     }
 
     public Result send(Request request) {
+        return send(request, null);
+    }
+
+    public Result send(Request request, CallTrace trace) {
         Objects.requireNonNull(request, "request");
         String root = request.baseUrl() == null || request.baseUrl().isBlank() ? config().getBaseUrl() : request.baseUrl();
         URI uri = io.github.neareststep.nexusai.ai.ChatEndpoints.chatCompletions(root);
@@ -95,9 +101,12 @@ public final class DialogueTransport {
                 builder.header("Authorization", "Bearer " + request.apiKey());
             }
             HttpRequest httpRequest = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
+            CallTrace.delivered(trace);
+            long started = System.nanoTime();
             HttpResponse<String> response = gate().schedule(
                     () -> httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
             ).join();
+            long httpNanos = Math.max(0L, System.nanoTime() - started);
             String body = response.body() == null ? "" : response.body();
             Map<String, List<String>> headers = response.headers().map();
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -129,13 +138,21 @@ public final class DialogueTransport {
             // colour codes or markup are removed is classified later, in finishText, and does not
             // cool the row.
             if ((parsed.content() == null || parsed.content().isBlank()) && parsed.toolNames().isEmpty()) {
-                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
+                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null)
+                        .withUsage(parsed.usage());
             }
+            ResponseUsage usage = parsed.usage().reported()
+                    ? parsed.usage()
+                    : ResponseUsage.estimate(
+                            DialogueProtocol.promptChars(request.system(), request.messages()),
+                            ResponseUsage.chars(parsed.content()));
             return new Result(
                     parsed.content() == null ? "" : parsed.content(),
                     parsed.toolNames(),
                     headers,
-                    parsed.finishReason()
+                    parsed.finishReason(),
+                    usage,
+                    httpNanos
             );
         } catch (AiRequestException e) {
             throw e;
@@ -173,6 +190,17 @@ public final class DialogueTransport {
      * returned text, so dialogue history matches what the player saw.
      */
     public String finishText(String raw, String wrappedUser, String formatId, String apiKey, String finishReason) {
+        return finishText(raw, wrappedUser, formatId, apiKey, finishReason, ResponseUsage.none());
+    }
+
+    public String finishText(
+            String raw,
+            String wrappedUser,
+            String formatId,
+            String apiKey,
+            String finishReason,
+            ResponseUsage usage
+    ) {
         PluginConfig current = config();
         boolean allowMarkup = current.allowMarkup();
         String source = LengthCutoff.isLength(finishReason) ? LengthCutoff.trim(raw, allowMarkup) : raw;
@@ -187,16 +215,16 @@ public final class DialogueTransport {
         formatted = SecretMask.redact(formatted, secrets(apiKey));
         if (raw != null && !raw.isBlank() && PlayerInput.stripSectionSigns(raw, allowMarkup).isBlank()) {
             if (PlayerInput.emptiedByMarkup(raw, allowMarkup)) {
-                throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
+                throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null).withUsage(usage);
             }
-            throw new AiRequestException(AiErrorKind.EMPTY_REPLY, 200, PlayerInput.EMPTY_REPLY, null);
+            throw new AiRequestException(AiErrorKind.EMPTY_REPLY, 200, PlayerInput.EMPTY_REPLY, null).withUsage(usage);
         }
         String reason = PlayerInput.rejectionReason(raw, wrappedUser);
         if (reason == null) {
             reason = PlayerInput.rejectionReason(formatted, wrappedUser);
         }
         if (reason != null) {
-            throw new AiRequestException(AiErrorKind.REJECTED, 200, reason, null);
+            throw new AiRequestException(AiErrorKind.REJECTED, 200, reason, null).withUsage(usage);
         }
         return formatted;
     }
@@ -249,6 +277,25 @@ public final class DialogueTransport {
     ) {
     }
 
-    public record Result(String content, List<String> toolNames, Map<String, List<String>> headers, String finishReason) {
+    public record Result(
+            String content,
+            List<String> toolNames,
+            Map<String, List<String>> headers,
+            String finishReason,
+            ResponseUsage usage,
+            long httpNanos
+    ) {
+        public Result(String content, List<String> toolNames, Map<String, List<String>> headers, String finishReason) {
+            this(content, toolNames, headers, finishReason, ResponseUsage.none(), 0L);
+        }
+
+        public Result {
+            if (usage == null) {
+                usage = ResponseUsage.none();
+            }
+            if (httpNanos < 0L) {
+                httpNanos = 0L;
+            }
+        }
     }
 }

@@ -3,7 +3,9 @@ package io.github.neareststep.nexusai.command;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiErrors;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.context.ContextBlock;
@@ -41,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.stream.Stream;
 
 /**
@@ -469,9 +472,19 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         deliverTest(sender, started, prompt, overrides);
     }
 
+    /**
+     * {@code /nai test}. {@code promptId} is the named-prompt id, or the test text when the
+     * argument is not a named prompt. A console sender has no player.
+     */
+    static CallTrace testTrace(UUID playerId, GenerationOverrides overrides) {
+        String promptId = overrides == null || overrides.noticeId() == null ? "" : overrides.noticeId();
+        return CallTrace.start(RequestOrigin.TEST, playerId, promptId, "");
+    }
+
     private void deliverTest(CommandSender sender, long started, String requestPrompt, GenerationOverrides requestOverrides) {
+        UUID playerId = sender instanceof Player player ? player.getUniqueId() : null;
         CompletionSupport.onComplete(
-                plugin.getAiHttpClient().testAsync(requestPrompt, requestOverrides),
+                plugin.getAiHttpClient().testAsync(requestPrompt, requestOverrides, testTrace(playerId, requestOverrides)),
                 plugin.getLogger(),
                 "Failed to deliver /nai test result",
                 (answer, error) -> SenderTasks.run(plugin, sender, () -> {

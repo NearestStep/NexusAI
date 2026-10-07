@@ -40,4 +40,18 @@ public interface AiProvider {
     default CompletableFuture<ModelAnswer> answer(String prompt, GenerationOverrides overrides, boolean ignoreCooldown) {
         return complete(prompt, overrides, ignoreCooldown).thenApply(ModelAnswer::text);
     }
+
+    /**
+     * Same call as {@link #answer(String, GenerationOverrides, boolean)}.
+     * {@code trace} rides along for metadata. Providers that do not override this method
+     * keep their three-argument {@code answer} and drop the trace.
+     */
+    default CompletableFuture<ModelAnswer> answer(
+            String prompt,
+            GenerationOverrides overrides,
+            boolean ignoreCooldown,
+            CallTrace trace
+    ) {
+        return answer(prompt, overrides, ignoreCooldown);
+    }
 }

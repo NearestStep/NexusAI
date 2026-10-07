@@ -15,10 +15,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * TTL-bounded response cache backed by Caffeine.
  * A put may carry its own TTL; otherwise the cache default is used.
+ * Each entry stores the reply text and, when known, the provider and model that produced it.
+ * A put that only passes the text leaves those two fields empty.
  */
 public final class AiCache {
 
-    private final Cache<String, String> cache;
+    private final Cache<String, CachedAnswer> cache;
     private final ConcurrentHashMap<String, Long> writtenAtMillis = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ttlNanosByKey = new ConcurrentHashMap<>();
     private final long defaultTtlNanos;
@@ -33,19 +35,19 @@ public final class AiCache {
         this.allowMarkup = allowMarkup;
         this.defaultTtlNanos = Math.max(1L, ttl.toNanos());
         this.cache = Caffeine.newBuilder()
-                .expireAfter(new Expiry<String, String>() {
+                .expireAfter(new Expiry<String, CachedAnswer>() {
                     @Override
-                    public long expireAfterCreate(String key, String value, long currentTime) {
+                    public long expireAfterCreate(String key, CachedAnswer value, long currentTime) {
                         return ttlNanosFor(key);
                     }
 
                     @Override
-                    public long expireAfterUpdate(String key, String value, long currentTime, long currentDuration) {
+                    public long expireAfterUpdate(String key, CachedAnswer value, long currentTime, long currentDuration) {
                         return ttlNanosFor(key);
                     }
 
                     @Override
-                    public long expireAfterRead(String key, String value, long currentTime, long currentDuration) {
+                    public long expireAfterRead(String key, CachedAnswer value, long currentTime, long currentDuration) {
                         return currentDuration;
                     }
                 })
@@ -60,30 +62,50 @@ public final class AiCache {
     }
 
     public Optional<String> get(String key) {
-        String value = cache.getIfPresent(key);
+        return lookup(key).map(CachedAnswer::text);
+    }
+
+    /**
+     * The cached reply, including the provider and model stored with it.
+     * A put that did not name them, and a text fallback that was never a model reply, yield empty strings.
+     * The text is cleaned the same way as {@link #get(String)}.
+     */
+    public Optional<CachedAnswer> lookup(String key) {
+        CachedAnswer value = cache.getIfPresent(key);
         if (value == null) {
             return Optional.empty();
         }
-        String cleaned = PlayerInput.stripSectionSigns(value, allowMarkup).trim();
-        return cleaned.isEmpty() ? Optional.empty() : Optional.of(cleaned);
+        String cleaned = PlayerInput.stripSectionSigns(value.text(), allowMarkup).trim();
+        if (cleaned.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new CachedAnswer(cleaned, value.providerId(), value.model()));
     }
 
     public void put(String key, String value) {
+        put(key, value, "", "");
+    }
+
+    public void put(String key, String value, String providerId, String model) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         ttlNanosByKey.remove(key);
-        write(key, value);
+        write(key, new CachedAnswer(value, providerId, model));
     }
 
     public void put(String key, String value, Duration ttl) {
+        put(key, value, "", "", ttl);
+    }
+
+    public void put(String key, String value, String providerId, String model, Duration ttl) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         Objects.requireNonNull(ttl, "ttl");
         ttlNanosByKey.put(key, Math.max(1L, ttl.toNanos()));
-        write(key, value);
+        write(key, new CachedAnswer(value, providerId, model));
     }
 
-    private void write(String key, String value) {
+    private void write(String key, CachedAnswer value) {
         cache.put(key, value);
         writtenAtMillis.put(key, System.currentTimeMillis());
     }
@@ -130,5 +152,16 @@ public final class AiCache {
     private long ttlNanosFor(String key) {
         Long custom = ttlNanosByKey.get(key);
         return custom == null ? defaultTtlNanos : custom;
+    }
+
+    /**
+     * One cached reply. {@code providerId} and {@code model} are empty when the writer did not know them.
+     */
+    public record CachedAnswer(String text, String providerId, String model) {
+        public CachedAnswer {
+            text = text == null ? "" : text;
+            providerId = providerId == null ? "" : providerId;
+            model = model == null ? "" : model;
+        }
     }
 }

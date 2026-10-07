@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.CallTrace;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
@@ -205,6 +207,7 @@ public final class DialogueEngine {
         trimWindow(messages, request.profile().memoryTurns(request.settings().memoryTurns()), request.settings().memoryMaxChars());
         List<CharacterAction> tools = offeredTools(request);
         String system = systemFor(request);
+        CallTrace trace = CallTrace.start(RequestOrigin.TALK, request.playerId(), characterId(request), "");
         ModelReply first;
         try {
             first = model.complete(new ModelCall(
@@ -214,7 +217,8 @@ public final class DialogueEngine {
                     noticed(request),
                     request.formatId(),
                     request.playerId(),
-                    wrapped
+                    wrapped,
+                    trace
             ));
         } catch (RuntimeException e) {
             return failure(request, e);
@@ -234,7 +238,8 @@ public final class DialogueEngine {
                         noticed(request),
                         request.formatId(),
                         request.playerId(),
-                        wrapped
+                        wrapped,
+                        trace
                 ));
                 spoken = second.text();
             } catch (RuntimeException e) {
@@ -309,6 +314,13 @@ public final class DialogueEngine {
     /**
      * Length-trim notices key on the persona, not the rendered character sheet.
      */
+    private static String characterId(TalkRequest request) {
+        if (request == null || request.characterId() == null) {
+            return "";
+        }
+        return request.characterId().trim();
+    }
+
     private static GenerationOverrides noticed(TalkRequest request) {
         String persona = request.characterId();
         if (persona == null || persona.isBlank()) {
@@ -337,7 +349,8 @@ public final class DialogueEngine {
                     noticed(request),
                     request.formatId(),
                     request.playerId(),
-                    ""
+                    "",
+                    CallTrace.start(RequestOrigin.TALK_GREETING, request.playerId(), characterId(request), "")
             ));
         } catch (RuntimeException e) {
             return request.fallback();
@@ -567,7 +580,8 @@ public final class DialogueEngine {
             String wrappedUser,
             CallKind kind,
             String pinProvider,
-            String pinModel
+            String pinModel,
+            CallTrace trace
     ) {
         public ModelCall(
                 String system,
@@ -578,13 +592,45 @@ public final class DialogueEngine {
                 UUID playerId,
                 String wrappedUser
         ) {
-            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "");
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "", null);
+        }
+
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser,
+                CallTrace trace
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "", trace);
+        }
+
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser,
+                CallKind kind,
+                String pinProvider,
+                String pinModel
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, kind, pinProvider, pinModel, null);
         }
 
         public ModelCall {
             kind = kind == null ? CallKind.DIALOGUE : kind;
             pinProvider = pinProvider == null ? "" : pinProvider;
             pinModel = pinModel == null ? "" : pinModel;
+            if (trace == null) {
+                RequestOrigin origin = kind == CallKind.SUMMARY ? RequestOrigin.SUMMARY : RequestOrigin.TALK;
+                trace = CallTrace.start(origin, playerId, "", "");
+            }
         }
 
         public boolean summaryPinned() {

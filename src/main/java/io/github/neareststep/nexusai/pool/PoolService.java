@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CallTrace;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -206,7 +208,9 @@ public final class PoolService {
             }
             String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
             GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
-            CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides);
+            CallTrace trace = CallTrace.start(
+                    RequestOrigin.POOL, null, configuredPrompt == null ? "" : configuredPrompt, "");
+            CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides, trace);
             if (!job.isDone()) {
                 int left = remaining - 1;
                 job.whenComplete((answer, error) -> {

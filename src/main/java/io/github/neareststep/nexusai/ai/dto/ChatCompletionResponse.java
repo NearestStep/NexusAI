@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 
 import java.util.List;
 
@@ -11,6 +12,7 @@ import java.util.List;
 public final class ChatCompletionResponse {
 
     private List<Choice> choices;
+    private ResponseUsage usage = ResponseUsage.none();
 
     public List<Choice> getChoices() {
         return choices;
@@ -18,6 +20,20 @@ public final class ChatCompletionResponse {
 
     public void setChoices(List<Choice> choices) {
         this.choices = choices;
+    }
+
+    /**
+     * Provider {@code usage}, or {@link ResponseUsage#none()} when the field was absent.
+     * An estimate is not applied here.
+     */
+    @JsonIgnore
+    public ResponseUsage usage() {
+        return usage == null ? ResponseUsage.none() : usage;
+    }
+
+    @JsonProperty("usage")
+    public void setUsage(JsonNode node) {
+        this.usage = UsageJson.read(node);
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

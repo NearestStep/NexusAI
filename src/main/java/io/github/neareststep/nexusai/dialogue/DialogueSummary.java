@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.SecretMask;
 
@@ -149,6 +151,7 @@ public final class DialogueSummary {
                 pinned,
                 pinned ? settings.summaryModel() : null
         );
+        String characterId = job.characterId() == null ? "" : job.characterId();
         return new DialogueEngine.ModelCall(
                 SYSTEM_PROMPT,
                 List.of(new DialogueProtocol.MemoryLine("user", wrapped)),
@@ -159,7 +162,8 @@ public final class DialogueSummary {
                 wrapped,
                 DialogueEngine.CallKind.SUMMARY,
                 settings.summaryProvider(),
-                settings.summaryModel()
+                settings.summaryModel(),
+                CallTrace.start(RequestOrigin.SUMMARY, job.playerId(), characterId, "")
         );
     }
 
