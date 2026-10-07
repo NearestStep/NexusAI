@@ -107,6 +107,7 @@ model-queue:
   - provider: openai
     model: gpt-4o-mini
     # daily-request-limit: 1000
+    # daily-token-limit: 300000
   # - provider: groq
   #   model: llama-3.3-70b-versatile
   #   daily-request-limit: 500
@@ -391,6 +392,27 @@ plugin-api:
   max-template-chars: 8000
   # Longest value of one variable. 10..20000.
   max-var-chars: 1000
+
+# Token accounting and daily quotas. Usage is always counted in token-usage.yml.
+# Limits below apply only when enabled is true. 0 = no limit. Days reset at local midnight.
+quotas:
+  enabled: false
+  # When a provider sends no usage: estimate (characters / 4, marked as estimated) or ignore (tokens = 0).
+  # The estimate is rough and low for Cyrillic and CJK. ignore counts the request and stores zero tokens.
+  missing-usage: estimate
+  server-tokens-per-day: 0
+  # Players without a quota group.
+  player-tokens-per-day: 0
+  # Permission nexusai.quota.<name>. The most generous matching group wins.
+  # requests-per-day here replaces limits.player-requests-per-day for that player.
+  groups: {}
+  # Plugins that call the Java API, by plugin name. default applies to each other plugin separately.
+  consumers:
+    default:
+      tokens-per-day: 0
+      requests-per-day: 0
+  # How often token-usage.yml is written. 1..300.
+  save-interval-seconds: 10
 
 # WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:

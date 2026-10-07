@@ -53,6 +53,7 @@ public final class DialogueService {
     private final MemoryStore memory;
     private final DialogueMemoryPersistence memoryFiles;
     private final DialogueEngine engine;
+    private final DialogueRouter router;
     private final SummaryStats summaryStats;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
     /** Spelling of the character id that opened the current session. Later lines reuse it. */
@@ -89,7 +90,7 @@ public final class DialogueService {
                     io.github.neareststep.nexusai.ai.HttpPool pool = plugin.getHttpPool();
                     return pool == null ? io.github.neareststep.nexusai.ai.HttpGate.unlimited() : pool.gate();
                 });
-        DialogueRouter router = new DialogueRouter(
+        this.router = new DialogueRouter(
                 ignored -> plugin.getPluginConfig(),
                 ignored -> plugin.getModelQueue(),
                 this::ring,
@@ -188,6 +189,11 @@ public final class DialogueService {
      * is loaded before the next save. The read runs off this thread. A file that could not be copied
      * aside stays in place.
      */
+    /** Attaches token accounting. The router survives reload, so this can be called again. */
+    public void tokenAccounting(io.github.neareststep.nexusai.budget.TokenAccounting accounting) {
+        router.tokenAccounting(accounting);
+    }
+
     public void onReload() {
         resetSummaryStats();
         memoryFiles.onReload();

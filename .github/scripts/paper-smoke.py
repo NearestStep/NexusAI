@@ -271,16 +271,8 @@ def start_mock(
                 body = b'{"error":{"message":"unauthorized","type":"invalid_api_key"}}'
             else:
                 body = _completion_body(usage_mode)
-            try:
-                self.send_response(status)
-                if status == 429:
-                    self.send_header("Retry-After", "1")
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError, TimeoutError):
-                return
+            # The journal is visible before the response bytes, so a client that
+            # reads it as soon as the status returns cannot miss the last line.
             if requests_path is not None:
                 text = raw.decode("utf-8", errors="replace")
                 line = json.dumps({
@@ -295,6 +287,16 @@ def start_mock(
                 with handle._lock:
                     with requests_path.open("a", encoding="utf-8") as handle_out:
                         handle_out.write(line + "\n")
+            try:
+                self.send_response(status)
+                if status == 429:
+                    self.send_header("Retry-After", "1")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
 
         def log_message(self, fmt: str, *args) -> None:
             if not quiet:
@@ -455,6 +457,8 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
         code = process.wait(timeout=90)
         if code != 0:
             raise RuntimeError(f"server stop exited {code}")
+        if check_api:
+            verify_token_usage(work)
         print(f"SMOKE OK {version} build {paper['id']}")
         return 0
     finally:
@@ -492,6 +496,21 @@ def _api_model_line(text: str) -> bool:
         ):
             return True
     return False
+
+
+def verify_token_usage(work: Path) -> None:
+    """After a generate() against the mock, disable must have written token-usage.yml."""
+    path = work / "plugins" / "NexusAI" / "token-usage.yml"
+    if not path.is_file():
+        raise RuntimeError("token-usage.yml was not written")
+    text = path.read_text(encoding="utf-8")
+    if "format: 1" not in text:
+        raise RuntimeError("token-usage.yml is missing format 1")
+    if "sk-smoke" in text:
+        raise RuntimeError("token-usage.yml contains the smoke API key")
+    leftover = list(path.parent.glob("token-usage.yml.*.tmp"))
+    if leftover:
+        raise RuntimeError("token-usage.yml temp file was left behind: " + leftover[0].name)
 
 
 def strip_colors(text: str) -> str:

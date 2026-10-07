@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai.dto;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.neareststep.nexusai.ai.ResponseUsage;
 
 /**
@@ -9,7 +10,33 @@ import io.github.neareststep.nexusai.ai.ResponseUsage;
  */
 public final class UsageJson {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private UsageJson() {
+    }
+
+    /**
+     * {@code usage} inside a JSON document. HTML, non-JSON, and a missing object are
+     * {@link ResponseUsage#none()}. An empty object is a reported zero count.
+     */
+    public static ResponseUsage fromDocument(String body) {
+        if (body == null || body.isBlank()) {
+            return ResponseUsage.none();
+        }
+        String head = body.length() > 64 ? body.substring(0, 64) : body;
+        String probe = head.stripLeading().toLowerCase(java.util.Locale.ROOT);
+        if (probe.startsWith("<")) {
+            return ResponseUsage.none();
+        }
+        try {
+            JsonNode tree = MAPPER.readTree(body);
+            if (tree == null || !tree.isObject()) {
+                return ResponseUsage.none();
+            }
+            return read(tree.get("usage"));
+        } catch (Exception ignored) {
+            return ResponseUsage.none();
+        }
     }
 
     public static ResponseUsage read(JsonNode usage) {

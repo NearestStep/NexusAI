@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.budget.MissingUsage;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
@@ -112,6 +113,9 @@ public final class PluginConfig {
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
     private final List<String> pluginApiWarnings = new ArrayList<>();
+    private MissingUsage missingUsage = MissingUsage.ESTIMATE;
+    private int tokenSaveIntervalSeconds = 10;
+    private final List<String> quotaWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -124,6 +128,7 @@ public final class PluginConfig {
         shortKeyWarnings.clear();
         httpLimitWarnings.clear();
         pluginApiWarnings.clear();
+        quotaWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -218,7 +223,26 @@ public final class PluginConfig {
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
         readHttpLimits(config);
         readPluginApi(config);
+        readQuotas(config);
         noteShortKeys();
+    }
+
+    private void readQuotas(FileConfiguration config) {
+        String raw = config.getString("quotas.missing-usage", "estimate");
+        MissingUsage parsed = MissingUsage.parse(raw);
+        if (parsed == null) {
+            this.missingUsage = MissingUsage.ESTIMATE;
+            quotaWarnings.add("Unknown quotas.missing-usage '" + raw + "'. Using estimate.");
+        } else {
+            this.missingUsage = parsed;
+        }
+        int interval = config.getInt("quotas.save-interval-seconds", 10);
+        int clamped = interval < 1 ? 1 : Math.min(interval, 300);
+        if (clamped != interval) {
+            quotaWarnings.add("quotas.save-interval-seconds is " + interval
+                    + ". It must be from 1 to 300. Using " + clamped + ".");
+        }
+        this.tokenSaveIntervalSeconds = clamped;
     }
 
     private void readPluginApi(FileConfiguration config) {
@@ -1153,6 +1177,20 @@ public final class PluginConfig {
 
     public List<String> pluginApiWarnings() {
         return List.copyOf(pluginApiWarnings);
+    }
+
+    /** {@code quotas.missing-usage}. Missing or unknown means {@link MissingUsage#ESTIMATE}. */
+    public MissingUsage missingUsage() {
+        return missingUsage == null ? MissingUsage.ESTIMATE : missingUsage;
+    }
+
+    /** {@code quotas.save-interval-seconds}, clamped to 1..300. */
+    public int tokenSaveIntervalSeconds() {
+        return tokenSaveIntervalSeconds;
+    }
+
+    public List<String> quotaWarnings() {
+        return List.copyOf(quotaWarnings);
     }
 
     /**

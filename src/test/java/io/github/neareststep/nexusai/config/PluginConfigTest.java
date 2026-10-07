@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.budget.MissingUsage;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
@@ -431,6 +432,46 @@ class PluginConfigTest {
                 "plugin-api.max-template-chars is 100001. It must be from 100 to 100000. Using 100000.",
                 "plugin-api.max-var-chars is 20001. It must be from 10 to 20000. Using 20000."),
                 clampedHigh.pluginApiWarnings());
+    }
+
+    @Test
+    void missingUsageDefaultsToEstimateAndRejectsUnknownValues() {
+        PluginConfig defaults = new PluginConfig(baseYaml());
+        assertEquals(MissingUsage.ESTIMATE, defaults.missingUsage());
+        assertEquals(10, defaults.tokenSaveIntervalSeconds());
+        assertTrue(defaults.quotaWarnings().isEmpty());
+
+        YamlConfiguration ignore = baseYaml();
+        ignore.set("quotas.missing-usage", "ignore");
+        ignore.set("quotas.save-interval-seconds", 30);
+        PluginConfig ignored = new PluginConfig(ignore);
+        assertEquals(MissingUsage.IGNORE, ignored.missingUsage());
+        assertEquals(30, ignored.tokenSaveIntervalSeconds());
+        assertTrue(ignored.quotaWarnings().isEmpty());
+
+        YamlConfiguration unknown = baseYaml();
+        unknown.set("quotas.missing-usage", "guess");
+        unknown.set("quotas.save-interval-seconds", 0);
+        PluginConfig bad = new PluginConfig(unknown);
+        assertEquals(MissingUsage.ESTIMATE, bad.missingUsage());
+        assertEquals(1, bad.tokenSaveIntervalSeconds());
+        assertEquals(List.of(
+                "Unknown quotas.missing-usage 'guess'. Using estimate.",
+                "quotas.save-interval-seconds is 0. It must be from 1 to 300. Using 1."),
+                bad.quotaWarnings());
+
+        YamlConfiguration high = baseYaml();
+        high.set("quotas.save-interval-seconds", 301);
+        PluginConfig clamped = new PluginConfig(high);
+        assertEquals(300, clamped.tokenSaveIntervalSeconds());
+        assertEquals(List.of(
+                "quotas.save-interval-seconds is 301. It must be from 1 to 300. Using 300."),
+                clamped.quotaWarnings());
+
+        clamped.reload(baseYaml());
+        assertTrue(clamped.quotaWarnings().isEmpty());
+        assertEquals(MissingUsage.ESTIMATE, clamped.missingUsage());
+        assertEquals(10, clamped.tokenSaveIntervalSeconds());
     }
 
     @Test

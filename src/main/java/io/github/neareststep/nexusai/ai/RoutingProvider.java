@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -35,6 +36,7 @@ public final class RoutingProvider implements AiProvider {
     private final LongSupplier clock;
     private final HttpGate gate;
     private final Map<String, KeyRing> rings = new ConcurrentHashMap<>();
+    private volatile TokenAccounting accounting = TokenAccounting.none();
 
     public RoutingProvider(
             PluginConfig config,
@@ -84,6 +86,11 @@ public final class RoutingProvider implements AiProvider {
         this.logger = Objects.requireNonNull(logger, "logger");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.gate = gate == null ? HttpGate.unlimited() : gate;
+    }
+
+    /** Counts HTTP attempts. Unset until the plugin attaches the ledger; tests may leave it unset. */
+    public void tokenAccounting(TokenAccounting accounting) {
+        this.accounting = accounting == null ? TokenAccounting.none() : accounting;
     }
 
     @Override
@@ -348,6 +355,7 @@ public final class RoutingProvider implements AiProvider {
             if (exchange == null) {
                 return CompletableFuture.completedFuture(null);
             }
+            accounting.record(exchange.usage(), trace, providerId, queueIndex, dedicatedFallback, queue, model);
             if (!probe) {
                 if (dedicatedFallback) {
                     queue.observeFallback(providerId, model, exchange.headers(), clock.getAsLong());
@@ -361,6 +369,7 @@ public final class RoutingProvider implements AiProvider {
             return CompletableFuture.failedFuture(HttpPool.queueFull(error));
         }
         AiRequestException typed = asAi(error);
+        accounting.record(typed.usage(), trace, providerId, queueIndex, dedicatedFallback, queue, model);
         if (typed.kind().pausesProvider()) {
             last.pausedProviders.add(providerId);
             for (String paused : last.pausedProviders) {

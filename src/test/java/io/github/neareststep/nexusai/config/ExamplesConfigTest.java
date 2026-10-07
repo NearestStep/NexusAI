@@ -30,7 +30,7 @@ class ExamplesConfigTest {
             "config-version", "locale", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "limits", "pool", "prewarm", "moderation", "fallback",
-            "dialogue", "actions", "context", "plugin-api", "sanitize", "http");
+            "dialogue", "actions", "context", "plugin-api", "quotas", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
             "provider", "model", "base-url", "key", "system-prompt", "temperature", "max-tokens",
@@ -82,6 +82,12 @@ class ExamplesConfigTest {
 
     private static final Set<String> PLUGIN_API = Set.of(
             "enabled", "max-template-chars", "max-var-chars");
+
+    private static final Set<String> QUOTAS = Set.of(
+            "enabled", "missing-usage", "server-tokens-per-day", "player-tokens-per-day",
+            "groups", "consumers", "save-interval-seconds");
+
+    private static final Set<String> QUOTA_LIMIT = Set.of("tokens-per-day", "requests-per-day");
 
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
@@ -289,6 +295,15 @@ class ExamplesConfigTest {
         }
         if ("plugin-api".equals(parent)) {
             return PLUGIN_API.contains(key);
+        }
+        if ("quotas".equals(parent)) {
+            return QUOTAS.contains(key);
+        }
+        if ("quotas.groups".equals(parent) || "quotas.consumers".equals(parent)) {
+            return true;
+        }
+        if (parent.startsWith("quotas.groups.") || parent.startsWith("quotas.consumers.")) {
+            return QUOTA_LIMIT.contains(key);
         }
         if ("http".equals(parent)) {
             return HTTP.contains(key);

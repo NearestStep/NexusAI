@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionRequest;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionResponse;
+import io.github.neareststep.nexusai.ai.dto.UsageJson;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
@@ -296,7 +297,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                         parsedUri,
                         retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null)),
                         headers
-                );
+                ).withUsage(UsageJson.fromDocument(responseBody));
             }
             if (htmlBody) {
                 throw new AiRequestException(

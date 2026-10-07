@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.ai;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.github.neareststep.nexusai.ai.dto.UsageJson;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.dialogue.DialogueProtocol;
 import io.github.neareststep.nexusai.dialogue.DialogueTransport;
@@ -40,6 +41,23 @@ class UsageParsingTest {
         assertEquals(3, estimate.totalTokens());
         assertTrue(estimate.estimated());
         assertFalse(estimate.reported());
+    }
+
+    @Test
+    void errorBodyUsageIsReportedAndABodyWithoutUsageIsEmpty() {
+        ResponseUsage usage = UsageJson.fromDocument(
+                "{\"error\":{\"message\":\"no\"},\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}");
+        assertTrue(usage.reported());
+        assertEquals(4, usage.promptTokens());
+        assertEquals(1, usage.completionTokens());
+        assertEquals(5, usage.totalTokens());
+        ResponseUsage html = UsageJson.fromDocument("<html>no</html>");
+        assertFalse(html.reported());
+        assertFalse(html.estimated());
+        ResponseUsage missing = UsageJson.fromDocument("{\"error\":{\"message\":\"no\"}}");
+        assertFalse(missing.reported());
+        assertFalse(missing.estimated());
+        assertEquals(0, missing.totalTokens());
     }
 
     @Test

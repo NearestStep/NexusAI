@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -39,6 +40,7 @@ public final class DialogueRouter {
     private final Admission admission;
     private final Logger logger;
     private final LongSupplier clock;
+    private volatile TokenAccounting accounting = TokenAccounting.none();
 
     public DialogueRouter(
             Function<String, PluginConfig> config,
@@ -56,6 +58,11 @@ public final class DialogueRouter {
         this.admission = Objects.requireNonNull(admission, "admission");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    /** Counts dialogue HTTP attempts, including a rejected or empty reply the player never sees. */
+    public void tokenAccounting(TokenAccounting accounting) {
+        this.accounting = accounting == null ? TokenAccounting.none() : accounting;
     }
 
     public DialogueEngine.ModelReply route(DialogueEngine.ModelCall call) {
@@ -137,11 +144,11 @@ public final class DialogueRouter {
                     break;
                 }
                 try {
-                    SendOnce sent = send(current, call, provider.url(), key, model, call.tools());
+                    SendOnce sent = send(current, call, provider.url(), key, model, call.tools(), choice.provider(), choice.index(), false);
                     toolsDropped = false;
                     if (sent.unsupportedTools()) {
                         toolsDropped = true;
-                        sent = send(current, call, provider.url(), key, model, List.of());
+                        sent = send(current, call, provider.url(), key, model, List.of(), choice.provider(), choice.index(), false);
                     }
                     if (sent.result() == null) {
                         throw new AiRequestException(AiErrorKind.OTHER, 0, "Provider does not support tools", null);
@@ -311,9 +318,13 @@ public final class DialogueRouter {
                 break;
             }
             try {
-                SendOnce sent = send(current, call, provider.url(), key, model, call.tools());
+                SendOnce sent = send(
+                        current, call, provider.url(), key, model, call.tools(),
+                        plan.provider(), plan.queueIndex(), plan.dedicated());
                 if (sent.unsupportedTools()) {
-                    sent = send(current, call, provider.url(), key, model, List.of());
+                    sent = send(
+                            current, call, provider.url(), key, model, List.of(),
+                            plan.provider(), plan.queueIndex(), plan.dedicated());
                 }
                 if (sent.result() == null) {
                     break;
@@ -524,7 +535,10 @@ public final class DialogueRouter {
             String baseUrl,
             String apiKey,
             String model,
-            List<CharacterAction> tools
+            List<CharacterAction> tools,
+            String providerId,
+            int queueIndex,
+            boolean dedicatedFallback
     ) {
         GenerationOverrides overrides = call.overrides() == null ? GenerationOverrides.none() : call.overrides();
         DialogueProtocol.TokenBudget budget = DialogueProtocol.tokens(
@@ -550,8 +564,12 @@ public final class DialogueRouter {
                     budget.reasoningEffort(),
                     current.getReadTimeout()
             ), call.trace());
+            accounting.record(
+                    result.usage(), call.trace(), providerId, queueIndex, dedicatedFallback, queue.apply(""), model);
             return new SendOnce(result, false);
         } catch (AiRequestException error) {
+            accounting.record(
+                    error.usage(), call.trace(), providerId, queueIndex, dedicatedFallback, queue.apply(""), model);
             if (error.unsupportedTools() && tools != null && !tools.isEmpty()) {
                 return new SendOnce(null, true);
             }

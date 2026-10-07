@@ -631,6 +631,44 @@ class ConfigMigrationTest {
         assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
     }
 
+    @Test
+    void quotaKeysAreAppendedOnce() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-quota-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("quota-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("quotas.missing-usage"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("quotas.save-interval-seconds"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("quotas.enabled"), outcome.addedKeys().toString());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("missing-usage:", -1).length - 1, written);
+        assertEquals(1, written.split("save-interval-seconds:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(2, yaml.getInt("config-version"));
+        assertFalse(yaml.getBoolean("quotas.enabled"));
+        assertEquals("estimate", yaml.getString("quotas.missing-usage"));
+        assertEquals(0, yaml.getInt("quotas.server-tokens-per-day"));
+        assertEquals(0, yaml.getInt("quotas.player-tokens-per-day"));
+        assertEquals(10, yaml.getInt("quotas.save-interval-seconds"));
+        assertEquals(0, yaml.getInt("quotas.consumers.default.tokens-per-day"));
+        assertEquals(0, yaml.getInt("quotas.consumers.default.requests-per-day"));
+
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

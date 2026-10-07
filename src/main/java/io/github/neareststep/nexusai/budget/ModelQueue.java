@@ -13,6 +13,9 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.regex.Pattern;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -33,6 +36,8 @@ import java.util.logging.Logger;
 public final class ModelQueue {
 
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final Pattern STALE_TEMP = Pattern.compile(
+            "^usage\\.yml\\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.tmp$");
 
     private final List<Slot> slots;
     private final Map<String, Slot> fallbackSlots = new LinkedHashMap<>();
@@ -54,6 +59,10 @@ public final class ModelQueue {
      */
     private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
+    /** When set, {@link #save()} writes on this executor instead of the caller. Tests leave it empty. */
+    private volatile Executor saveExecutor;
+    /** After reload or shutdown, queued writes from this instance must not replace the new file. */
+    private volatile boolean closed;
     /** Resolved API keys. A data-directory path in a usage.yml warning is masked with these. */
     private volatile Supplier<Iterable<String>> secretSource = List::of;
     private LocalDate day;
@@ -160,7 +169,31 @@ public final class ModelQueue {
             providerCounts.putIfAbsent(entry.provider(), new AtomicInteger());
         }
         this.slots = List.copyOf(loaded);
+        sweepTemps();
         load();
+    }
+
+    /** Storage id written to {@code usage.yml} for a queue row, or empty when {@code index} is not a row. */
+    public String rowStorageId(int index) {
+        if (index < 0 || index >= slots.size()) {
+            return "";
+        }
+        return slots.get(index).storageId();
+    }
+
+    /** Id of a dedicated fallback slot, {@code provider|model}. */
+    public static String fallbackStorageId(String provider, String model) {
+        String left = provider == null ? "" : provider;
+        String right = model == null ? "" : model;
+        return left + "|" + right;
+    }
+
+    /**
+     * Request-path saves run here so the caller does not touch the disk.
+     * A null executor keeps the historical synchronous save used by tests.
+     */
+    public void saveExecutor(Executor executor) {
+        this.saveExecutor = executor;
     }
 
     public int size() {
@@ -649,55 +682,121 @@ public final class ModelQueue {
         );
     }
 
-    public synchronized void save() {
+    public void save() {
+        if (closed || usageFile == null) {
+            return;
+        }
+        YamlConfiguration yaml = capture();
+        Executor executor = saveExecutor;
+        if (executor == null) {
+            write(yaml, false);
+            return;
+        }
+        executor.execute(() -> write(yaml, false));
+    }
+
+    /**
+     * Writes the current counters and ignores later saves from this instance.
+     * Reload and shutdown call this so a queued save cannot replace the next file.
+     */
+    public void flushAndClose() {
         if (usageFile == null) {
+            closed = true;
+            return;
+        }
+        write(capture(), true);
+    }
+
+    private synchronized YamlConfiguration capture() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("config-version", ConfigVersions.CURRENT);
+        yaml.set("day", day.toString());
+        for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
+            yaml.set("providers." + entry.getKey(), entry.getValue().get());
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Slot slot : slots) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", slot.storageId());
+            row.put("provider", slot.provider);
+            row.put("model", slot.model);
+            row.put("requests", slot.requests.get());
+            row.put("rejected", slot.rejected.get());
+            rows.add(row);
+        }
+        yaml.set("entries", rows);
+        yaml.set("moderation.checks", moderationChecks);
+        yaml.set("moderation.flags", moderationFlags);
+        if (!fallbackSlots.isEmpty()) {
+            List<Map<String, Object>> fallbackRows = new ArrayList<>();
+            for (Slot slot : fallbackSlots.values()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", slot.storageId());
+                row.put("provider", slot.provider);
+                row.put("model", slot.model);
+                row.put("requests", slot.requests.get());
+                row.put("rejected", slot.rejected.get());
+                fallbackRows.add(row);
+            }
+            yaml.set("fallback", fallbackRows);
+        }
+        return yaml;
+    }
+
+    private void write(YamlConfiguration yaml, boolean closeAfter) {
+        if (usageFile == null || yaml == null) {
+            if (closeAfter) {
+                closed = true;
+            }
             return;
         }
         synchronized (ioLock) {
+            if (closed) {
+                return;
+            }
+            File temporary = null;
             try {
-                YamlConfiguration yaml = new YamlConfiguration();
-                yaml.set("config-version", ConfigVersions.CURRENT);
-                yaml.set("day", day.toString());
-                for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
-                    yaml.set("providers." + entry.getKey(), entry.getValue().get());
-                }
-                List<Map<String, Object>> rows = new ArrayList<>();
-                for (Slot slot : slots) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("id", slot.storageId());
-                    row.put("provider", slot.provider);
-                    row.put("model", slot.model);
-                    row.put("requests", slot.requests.get());
-                    row.put("rejected", slot.rejected.get());
-                    rows.add(row);
-                }
-                yaml.set("entries", rows);
-                yaml.set("moderation.checks", moderationChecks);
-                yaml.set("moderation.flags", moderationFlags);
-                if (!fallbackSlots.isEmpty()) {
-                    List<Map<String, Object>> fallbackRows = new ArrayList<>();
-                    for (Slot slot : fallbackSlots.values()) {
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        row.put("id", slot.storageId());
-                        row.put("provider", slot.provider);
-                        row.put("model", slot.model);
-                        row.put("requests", slot.requests.get());
-                        row.put("rejected", slot.rejected.get());
-                        fallbackRows.add(row);
-                    }
-                    yaml.set("fallback", fallbackRows);
-                }
                 File parent = usageFile.getParentFile();
-                if (parent != null) {
-                    parent.mkdirs();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IOException("Could not create " + parent.getName());
                 }
-                if (!usageFile.isFile()) {
-                    AtomicFiles.createPrivate(usageFile.toPath());
-                }
-                AtomicFiles.preserving(usageFile.toPath(), () -> yaml.save(usageFile));
+                File directory = parent == null ? new File(".") : parent;
+                temporary = new File(directory, usageFile.getName() + "." + UUID.randomUUID() + ".tmp");
+                AtomicFiles.createPrivate(temporary.toPath());
+                yaml.save(temporary);
+                AtomicFiles.durableReplace(temporary.toPath(), usageFile.toPath());
             } catch (IOException e) {
                 Iterable<String> known = secretSource.get();
                 LogRedaction.warning(logger, "Failed to save usage counters", e, known == null ? List.of() : known);
+            } finally {
+                if (temporary != null && temporary.isFile() && !temporary.equals(usageFile)) {
+                    temporary.delete();
+                }
+                if (closeAfter) {
+                    closed = true;
+                }
+            }
+        }
+    }
+
+    private void sweepTemps() {
+        if (usageFile == null) {
+            return;
+        }
+        File parent = usageFile.getParentFile();
+        if (parent == null || !parent.isDirectory()) {
+            return;
+        }
+        File[] children = parent.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            if (!child.isFile() || !STALE_TEMP.matcher(child.getName()).matches()) {
+                continue;
+            }
+            if (!child.delete()) {
+                logger.warning("Could not remove stale temp file " + child.getName());
             }
         }
     }

@@ -11,6 +11,7 @@ import io.github.neareststep.nexusai.ai.AnswerFormatter;
 import io.github.neareststep.nexusai.ai.FormatEnforcer;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.ai.dto.UsageJson;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
 
@@ -130,7 +131,7 @@ public final class DialogueTransport {
                         retryAfter(response.headers().firstValue("Retry-After").orElse(null)),
                         headers,
                         false
-                );
+                ).withUsage(UsageJson.fromDocument(body));
             }
             DialogueProtocol.ParsedCompletion parsed = DialogueProtocol.parse(body);
             // Missing, null, or whitespace-only content is a transport error, not an empty reply.

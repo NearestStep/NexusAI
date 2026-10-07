@@ -6,6 +6,7 @@ import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FormatPresets;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.ModerationSettings;
@@ -41,6 +42,7 @@ public final class ModerationService {
     private final StaffNotifier notifier;
     private final Logger logger;
     private final LongSupplier clock;
+    private volatile TokenAccounting accounting = TokenAccounting.none();
 
     public ModerationService(
             ModerationSettings settings,
@@ -76,6 +78,11 @@ public final class ModerationService {
         this.notifier = notifier == null ? (player, message, category, reason) -> { } : notifier;
         this.logger = logger == null ? Logger.getLogger("nexusai.moderation") : logger;
         this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    /** Counts a moderation HTTP attempt. The player slice is not used for this origin. */
+    public void tokenAccounting(TokenAccounting accounting) {
+        this.accounting = accounting == null ? TokenAccounting.none() : accounting;
     }
 
     public boolean enabled() {
@@ -247,7 +254,16 @@ public final class ModerationService {
                 model
         ).withFormat(FormatPresets.SIMPLE);
         CallTrace trace = CallTrace.start(RequestOrigin.MODERATION, playerId, "", "");
-        return http.exchangeRaw(wrapped, overrides, provider.url(), firstKey(provider), model, trace).text();
+        boolean dedicated = choice.index() < 0;
+        try {
+            io.github.neareststep.nexusai.ai.ChatExchange exchange = http.exchangeRaw(
+                    wrapped, overrides, provider.url(), firstKey(provider), model, trace);
+            accounting.record(exchange.usage(), trace, providerId, choice.index(), dedicated, queue, model);
+            return exchange.text();
+        } catch (AiRequestException error) {
+            accounting.record(error.usage(), trace, providerId, choice.index(), dedicated, queue, model);
+            throw error;
+        }
     }
 
     private static String firstKey(ProviderSettings provider) {
