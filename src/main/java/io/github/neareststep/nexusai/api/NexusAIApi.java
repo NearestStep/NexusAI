@@ -2,45 +2,57 @@ package io.github.neareststep.nexusai.api;
 
 import io.github.neareststep.nexusai.context.ContextRegistry;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
+import io.github.neareststep.nexusai.generate.GenerationService;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.ServicesManager;
+import org.jetbrains.annotations.ApiStatus;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * API for NPC plugins. A blank {@code message} opens a session and completes with the greeting.
- * Any other message is one reply and does not capture later chat.
+ * API for other plugins. {@link #talk} is the NPC path. {@link #generate} is one asynchronous
+ * completion with metadata. Context providers share Bukkit's {@link ServicesManager}.
+ * {@link #registerContextProvider} is a wrapper over that registry. There is no second registry.
+ * {@code API_VERSION} 1 was 1.0.x. {@code API_VERSION} 2 was 1.1.x.
  * <p>
- * Do not join the returned future on a server region thread. An action command is scheduled back
- * onto that thread, so joining there can stall the call until the action times out.
- * Placeholders never call this API, and this API is the only path that can run character actions.
- * <p>
- * Context providers share Bukkit's {@link ServicesManager}. {@link #registerContextProvider} is a
- * wrapper over that registry. There is no second registry. {@code API_VERSION} 1 was 1.0.x.
+ * Do not join a returned future on a server region thread. An action command from {@code talk}
+ * is scheduled back onto that thread, so joining there can stall the call until the action times
+ * out. {@code generate} completes on a NexusAI thread; a callback that edits the world has to
+ * hop to the player scheduler or the global region scheduler.
  */
 public final class NexusAIApi {
 
-    public static final int API_VERSION = 2;
+    public static final int API_VERSION = 3;
 
     private static volatile DialogueService service;
     private static volatile ContextRegistry contexts;
+    private static volatile GenerationService generation;
 
     private NexusAIApi() {
     }
 
+    /** Installed by NexusAI. Not part of the plugin contract. */
+    @ApiStatus.Internal
     public static void bind(DialogueService dialogueService) {
         service = dialogueService;
     }
 
     /** Installed by NexusAI. Not part of the provider contract. */
+    @ApiStatus.Internal
     public static void bindContextRegistry(ContextRegistry registry) {
         contexts = registry;
+    }
+
+    /** Installed by NexusAI. Not part of the plugin contract. */
+    @ApiStatus.Internal
+    public static void bindGeneration(GenerationService generationService) {
+        generation = generationService;
     }
 
     /**
@@ -92,5 +104,55 @@ public final class NexusAIApi {
             return CompletableFuture.failedFuture(new IllegalArgumentException("player and id are required"));
         }
         return current.talk(player, id, message);
+    }
+
+    /**
+     * True when NexusAI is enabled, requests are not held after a config error, and
+     * {@code plugin-api.enabled} is true.
+     * <p>
+     * Call from any thread. This does not block and does not check that an API key is set.
+     * A true result can still make {@link #generate} finish with {@link NexusErrorKind#NOT_CONFIGURED}
+     * when no provider can send. On Folia this method does not read region state.
+     */
+    public static boolean isAvailable() {
+        GenerationService current = generation;
+        return current != null && current.available();
+    }
+
+    /**
+     * One asynchronous generation. Call from any thread, including the main thread and a Folia
+     * region thread. The call itself only checks the arguments and schedules work.
+     * <p>
+     * The future completes on a NexusAI thread ({@code nexusai-http-*} or, if that pool is not
+     * accepting work, {@code nexusai-scheduler}) and always completes with a
+     * {@link GenerationResult}. On failure {@code success()} is false and {@code text()} is the
+     * fallback. The future completes exceptionally only when NexusAI is not enabled, with
+     * {@link IllegalStateException} {@code "NexusAI is not enabled"}, the same way {@link #talk}
+     * does. That one failure may complete on the calling thread.
+     * <p>
+     * Do not join the future on the main thread or a region thread. To edit the world, hop back:
+     * <pre>{@code
+     * NexusAIApi.generate(plugin, GenerationRequest.prompt("quests:intro")
+     *                 .player(player)
+     *                 .var("quest", questName)
+     *                 .label("quest-intro")
+     *                 .build())
+     *         .thenAccept(result -> player.getScheduler().run(plugin, task -> {
+     *             player.sendMessage(result.text());
+     *             if (!result.success()) {
+     *                 plugin.getLogger().fine("AI failed: " + result.error().map(GenerationError::kind).orElse(null));
+     *             }
+     *         }, null));
+     * }</pre>
+     */
+    public static CompletableFuture<GenerationResult> generate(Plugin owner, GenerationRequest request) {
+        if (owner == null || request == null) {
+            throw new IllegalArgumentException("owner and request are required");
+        }
+        GenerationService current = generation;
+        if (current == null || !current.accepting()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("NexusAI is not enabled"));
+        }
+        return current.generate(owner, request);
     }
 }

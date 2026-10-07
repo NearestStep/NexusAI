@@ -8,8 +8,8 @@ import java.util.function.Consumer;
 
 /**
  * One generation, from the entrance that accepted it through to the transport that sends it.
- * Token accounting and events read this later. The consumer is {@code nexusai} until a plugin
- * calls the Java API.
+ * Token accounting and events read this later. The consumer is the plugin name for
+ * {@link RequestOrigin#API} and {@code nexusai} for every other origin.
  */
 public record CallTrace(
         long requestId,
@@ -38,10 +38,18 @@ public record CallTrace(
      * A new id and a start time of {@link System#nanoTime()}. The consumer is {@code nexusai}.
      */
     public static CallTrace start(RequestOrigin origin, UUID playerId, String promptId, String label) {
+        return start(origin, "nexusai", playerId, promptId, label);
+    }
+
+    /**
+     * A new id and a start time of {@link System#nanoTime()}.
+     * A blank {@code consumer} is stored as {@code nexusai}.
+     */
+    public static CallTrace start(RequestOrigin origin, String consumer, UUID playerId, String promptId, String label) {
         return new CallTrace(
                 IDS.incrementAndGet(),
                 origin,
-                "nexusai",
+                consumer,
                 playerId,
                 promptId,
                 label,

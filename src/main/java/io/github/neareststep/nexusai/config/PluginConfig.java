@@ -108,6 +108,10 @@ public final class PluginConfig {
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
     private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
+    private boolean pluginApiEnabled = true;
+    private int pluginApiMaxTemplateChars = 8000;
+    private int pluginApiMaxVarChars = 1000;
+    private final List<String> pluginApiWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -119,6 +123,7 @@ public final class PluginConfig {
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
         httpLimitWarnings.clear();
+        pluginApiWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -212,7 +217,23 @@ public final class PluginConfig {
         this.moderation = ModerationSettings.load(config);
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
         readHttpLimits(config);
+        readPluginApi(config);
         noteShortKeys();
+    }
+
+    private void readPluginApi(FileConfiguration config) {
+        this.pluginApiEnabled = config.getBoolean("plugin-api.enabled", true);
+        this.pluginApiMaxTemplateChars = clampPluginApi(config, "plugin-api.max-template-chars", 8000, 100, 100_000);
+        this.pluginApiMaxVarChars = clampPluginApi(config, "plugin-api.max-var-chars", 1000, 10, 20_000);
+    }
+
+    private int clampPluginApi(FileConfiguration config, String key, int fallback, int min, int max) {
+        int value = config.getInt(key, fallback);
+        int clamped = clamp(value, min, max);
+        if (clamped != value) {
+            pluginApiWarnings.add(key + " is " + value + ". It must be from " + min + " to " + max + ". Using " + clamped + ".");
+        }
+        return clamped;
     }
 
     private void readHttpLimits(FileConfiguration config) {
@@ -1113,6 +1134,25 @@ public final class PluginConfig {
      */
     public List<String> httpLimitWarnings() {
         return List.copyOf(httpLimitWarnings);
+    }
+
+    /** {@code plugin-api.enabled}. Missing means true. */
+    public boolean pluginApiEnabled() {
+        return pluginApiEnabled;
+    }
+
+    /** {@code plugin-api.max-template-chars}, clamped to 100..100000. */
+    public int pluginApiMaxTemplateChars() {
+        return pluginApiMaxTemplateChars;
+    }
+
+    /** {@code plugin-api.max-var-chars}, clamped to 10..20000. */
+    public int pluginApiMaxVarChars() {
+        return pluginApiMaxVarChars;
+    }
+
+    public List<String> pluginApiWarnings() {
+        return List.copyOf(pluginApiWarnings);
     }
 
     /**

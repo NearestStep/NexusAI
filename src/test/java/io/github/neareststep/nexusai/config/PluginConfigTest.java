@@ -401,6 +401,39 @@ class PluginConfigTest {
     }
 
     @Test
+    void pluginApiLimitsClampAndWarn() {
+        PluginConfig defaults = new PluginConfig(baseYaml());
+        assertTrue(defaults.pluginApiEnabled());
+        assertEquals(8000, defaults.pluginApiMaxTemplateChars());
+        assertEquals(1000, defaults.pluginApiMaxVarChars());
+        assertTrue(defaults.pluginApiWarnings().isEmpty());
+
+        YamlConfiguration low = baseYaml();
+        low.set("plugin-api.enabled", false);
+        low.set("plugin-api.max-template-chars", 5);
+        low.set("plugin-api.max-var-chars", 9);
+        PluginConfig clampedLow = new PluginConfig(low);
+        assertFalse(clampedLow.pluginApiEnabled());
+        assertEquals(100, clampedLow.pluginApiMaxTemplateChars());
+        assertEquals(10, clampedLow.pluginApiMaxVarChars());
+        assertEquals(List.of(
+                "plugin-api.max-template-chars is 5. It must be from 100 to 100000. Using 100.",
+                "plugin-api.max-var-chars is 9. It must be from 10 to 20000. Using 10."),
+                clampedLow.pluginApiWarnings());
+
+        YamlConfiguration high = baseYaml();
+        high.set("plugin-api.max-template-chars", 100001);
+        high.set("plugin-api.max-var-chars", 20001);
+        PluginConfig clampedHigh = new PluginConfig(high);
+        assertEquals(100000, clampedHigh.pluginApiMaxTemplateChars());
+        assertEquals(20000, clampedHigh.pluginApiMaxVarChars());
+        assertEquals(List.of(
+                "plugin-api.max-template-chars is 100001. It must be from 100 to 100000. Using 100000.",
+                "plugin-api.max-var-chars is 20001. It must be from 10 to 20000. Using 20000."),
+                clampedHigh.pluginApiWarnings());
+    }
+
+    @Test
     void allowMarkupDefaultsOffAndCanBeEnabled() {
         assertFalse(new PluginConfig(baseYaml()).allowMarkup());
         YamlConfiguration enabled = baseYaml();

@@ -383,6 +383,15 @@ context:
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
 
+# Java API for other plugins (NexusAIApi.generate and generateJson).
+# API calls spend limits.* like placeholders, and the quotas below when quotas.enabled is true.
+plugin-api:
+  enabled: true
+  # Longest inline template a plugin may send. 100..100000.
+  max-template-chars: 8000
+  # Longest value of one variable. 10..20000.
+  max-var-chars: 1000
+
 # WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:
   allow-markup: false

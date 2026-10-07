@@ -7,7 +7,7 @@ package io.github.neareststep.nexusai.api;
  * {@code default} branch.
  */
 public enum RequestOrigin {
-    /** {@code NexusAIApi.generate} or {@code generateJson}. No caller uses this until that API exists. */
+    /** {@code NexusAIApi.generate}. */
     API,
     /** {@code %ainexus_cached_*%}. */
     PLACEHOLDER,

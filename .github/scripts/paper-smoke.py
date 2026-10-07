@@ -37,6 +37,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", default=os.environ.get("MC_VERSION", ""))
     parser.add_argument("--plugins-dir", default=os.environ.get("PLUGIN_DIR", "dist"))
+    parser.add_argument("--driver-dir", default=os.environ.get("DRIVER_DIR", ""))
     parser.add_argument("--timeout", type=int, default=360, help="seconds to wait for Done")
     args = parser.parse_args()
     if not args.version:
@@ -56,16 +57,31 @@ def main() -> int:
         paper = download_paper(args.version, work / "paper.jar")
         download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
+        check_api = False
+        if args.driver_dir.strip():
+            driver = find_driver(Path(args.driver_dir))
+            shutil.copy2(driver, work / "plugins" / driver.name)
+            print(f"load driver {driver.name}")
+            check_api = True
         mock_port = free_port()
         start_mock(mock_port)
         write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout)
+        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
+
+
+def find_driver(directory: Path) -> Path:
+    if directory.is_file() and directory.name.endswith(".jar"):
+        return directory
+    jars = sorted(directory.glob("NexusAI-LoadDriver.jar"))
+    if len(jars) != 1:
+        raise RuntimeError(f"expected NexusAI-LoadDriver.jar in {directory}, found {[p.name for p in jars]}")
+    return jars[0]
 
 
 def find_plugin(directory: Path) -> Path:
@@ -361,7 +377,7 @@ def write_server(
     (work / "server.properties").write_text("\n".join(lines), encoding="utf-8")
 
 
-def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, timeout: int) -> int:
+def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, timeout: int, check_api: bool = False) -> int:
     log_chunks: list[str] = []
 
     def reader(pipe) -> None:
@@ -422,6 +438,13 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
             raise RuntimeError(" /nai status did not report PlaceholderAPI as yes")
         if f"127.0.0.1:{mock_port}/v1" not in visible:
             raise RuntimeError(" /nai status did not show the mock base URL")
+        if check_api:
+            if "NexusAI-LoadDriver enabled." not in text:
+                raise RuntimeError("LoadDriver did not enable")
+            queued = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "naiload api template 1"))
+            print("--- naiload api ---")
+            print(queued)
+            wait_api_result(process, log_chunks, min(timeout, 90))
 
         # 26.2 closes the RCON socket as soon as stop begins, before the response
         # packet is finished. The command still reached the server.
@@ -438,6 +461,37 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+def wait_api_result(process, chunks: list[str], timeout: int) -> None:
+    """Poll until one generate() result is a model reply and every call has finished."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"server exited during api smoke with code {process.returncode}")
+        text = "".join(chunks)
+        if "API_DONE" in text and _api_model_line(text):
+            print("api smoke saw MODEL pong")
+            return
+        time.sleep(0.5)
+    raise RuntimeError("timed out waiting for API_DONE and a MODEL pong result")
+
+
+def _api_model_line(text: str) -> bool:
+    for line in text.splitlines():
+        if "API_RESULT" not in line:
+            continue
+        if (
+            "success=true" in line
+            and "source=MODEL" in line
+            and "text=pong" in line
+            and "provider=openai" in line
+            and "model=smoke-model" in line
+            and "finish=stop" in line
+            and "attempts=1" in line
+        ):
+            return True
+    return False
 
 
 def strip_colors(text: str) -> str:

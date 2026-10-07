@@ -60,10 +60,15 @@ jobs:
         with:
           name: NexusAI
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: NexusAI-LoadDriver
+          path: driver
       - name: Boot stable Paper and run /nai status
         env:
           MC_VERSION: ${{ matrix.mc }}
           PLUGIN_DIR: dist
+          DRIVER_DIR: driver
         run: python3 .github/scripts/paper-smoke.py
 
   load:

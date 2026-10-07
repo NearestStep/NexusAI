@@ -47,7 +47,7 @@ class ContextRegistryTest {
         NexusAIApi.bindContextRegistry(registry);
         try {
             assertEquals(List.of("economy", "rank"), NexusAIApi.contextProviderIds());
-            assertEquals(2, NexusAIApi.API_VERSION);
+            assertEquals(3, NexusAIApi.API_VERSION);
             registry.remove(economy);
             assertEquals(List.of("rank"), NexusAIApi.contextProviderIds());
             registry.remove("RankBridge", "rank");

@@ -159,6 +159,46 @@ public final class GenerationOverrides {
         );
     }
 
+    /** Sets temperature, including a negative value that omits the field on the wire. */
+    public GenerationOverrides withTemperature(double value) {
+        return new GenerationOverrides(
+                systemPromptSet,
+                systemPrompt,
+                true,
+                value,
+                maxTokensSet,
+                maxTokens,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel,
+                noticeId
+        );
+    }
+
+    /** Sets max tokens, including {@code 0} or a negative value that omits the field on the wire. */
+    public GenerationOverrides withMaxTokens(int value) {
+        return new GenerationOverrides(
+                systemPromptSet,
+                systemPrompt,
+                temperatureSet,
+                temperature,
+                true,
+                value,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel,
+                noticeId
+        );
+    }
+
     public GenerationOverrides withSystemPrompt(String system) {
         return new GenerationOverrides(
                 true,

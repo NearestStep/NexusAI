@@ -2,6 +2,7 @@
 
 ## [1.2.0]
 
+- Other plugins can call `NexusAIApi.generate`. The future finishes on a NexusAI thread with a `GenerationResult`: text, source, provider, model, token counts, finish reason, latency, and a `NexusErrorKind` when the model did not answer. A cached call shares one in-flight provider call with the placeholder of the same cache key. A named prompt shares its backoff key with that placeholder. `API_VERSION` is 3. `talk` and context providers are unchanged. `config.yml` gains `plugin-api.enabled`, `plugin-api.max-template-chars`, and `plugin-api.max-var-chars`. `config-version` stays 2.
 - A CamelCase token with a short abbreviation, such as `sk-NexusAIPluginForMinecraft2026` or `sk-OpenAIStyleKeyExample123`, is left as written. A DeepSeek key (`sk-` plus 32 hex digits), an OpenRouter key (`sk-or-v1-` plus 64 hex digits), a one-case Groq key (`gsk_` plus 52 letters or digits), and a lowercase Anthropic key (`sk-ant-api03-` or `sk-ant-admin01-` plus 93 characters ending in `aa`) are masked even when they are not configured. Any other all-lowercase or all-uppercase key is still masked only when it is configured. A `_` after a vendor key in a path is kept. An underscore inside a key stays inside the mask.
 - A failed save or load of `pool.yml`, `dialogue-memory.yml` (including its `.bak` copy), `usage.yml`, `moderation.log`, `actions.log`, or a knowledge file logs the exception class and a masked message at WARNING. The stack trace is logged at FINE, with the same masking. A data directory whose name contains a key does not print that key.
 

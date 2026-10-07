@@ -219,7 +219,8 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                         prepared.overrides().withNoticeId(noticeId(resolved, raw)),
                         resolved.ttl(),
                         prepared.cacheToken(),
-                        trace),
+                        trace,
+                        PlaceholderAdmission.key(resolved, promptText)),
                 plugin.getLogger(),
                 "Background AI generation failed",
                 (ignored, error) -> {

@@ -597,6 +597,40 @@ class ConfigMigrationTest {
         assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
     }
 
+    @Test
+    void pluginApiKeysAreAppendedOnce() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-plugin-api-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("plugin-api-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("plugin-api.enabled"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("plugin-api.max-template-chars"));
+        assertTrue(outcome.addedKeys().contains("plugin-api.max-var-chars"));
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("max-template-chars:", -1).length - 1, written);
+        assertEquals(1, written.split("max-var-chars:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(2, yaml.getInt("config-version"));
+        assertTrue(yaml.getBoolean("plugin-api.enabled"));
+        assertEquals(8000, yaml.getInt("plugin-api.max-template-chars"));
+        assertEquals(1000, yaml.getInt("plugin-api.max-var-chars"));
+
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

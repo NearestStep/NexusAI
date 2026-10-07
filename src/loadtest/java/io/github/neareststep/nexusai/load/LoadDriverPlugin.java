@@ -3,6 +3,8 @@ package io.github.neareststep.nexusai.load;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.api.GenerationRequest;
+import io.github.neareststep.nexusai.api.GenerationResult;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.context.ContextService;
 import me.clip.placeholderapi.PlaceholderAPI;
@@ -30,10 +32,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * RCON entry point {@code naiload <scenario> <rate> <seconds> <viewers>}.
+ * RCON entry points {@code naiload <scenario> <rate> <seconds> <viewers>} and
+ * {@code naiload api <prompt|template> <n>}.
  * The command returns immediately. MSPT, call time, and the HTTP pool are sampled on the
  * server thread. The report is {@code plugins/NexusAI-LoadDriver/report.json}.
  */
@@ -94,6 +98,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length > 0 && "api".equals(args[0])) {
+            return apiGenerate(sender, args);
+        }
         if (args.length != 4) {
             sender.sendMessage("usage: naiload <scenario> <rate> <seconds> <viewers>");
             return true;
@@ -141,6 +148,82 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         heartbeat = Bukkit.getScheduler().runTaskTimer(this, this::heartbeat, 1L, 1L);
         sender.sendMessage("naiload queued " + scenario + " for " + seconds + "s");
         return true;
+    }
+
+    /**
+     * {@code naiload api <prompt|template> <n>}. Each of the {@code n} calls is scheduled on the
+     * command thread and again on an async task. The command does not join the futures.
+     */
+    private boolean apiGenerate(CommandSender sender, String[] args) {
+        if (args.length != 3 || (!"prompt".equals(args[1]) && !"template".equals(args[1]))) {
+            sender.sendMessage("usage: naiload api <prompt|template> <n>");
+            return true;
+        }
+        int count;
+        try {
+            count = Integer.parseInt(args[2]);
+        } catch (NumberFormatException ex) {
+            sender.sendMessage("n must be an integer");
+            return true;
+        }
+        if (count < 1 || count > 100) {
+            sender.sendMessage("n must be from 1 to 100");
+            return true;
+        }
+        if (!NexusAIApi.isAvailable()) {
+            getLogger().info("API_FAIL");
+            sender.sendMessage("naiload api unavailable");
+            return true;
+        }
+        String mode = args[1];
+        AtomicInteger remaining = new AtomicInteger(count * 2);
+        for (int i = 0; i < count; i++) {
+            dispatchApi(mode, remaining);
+        }
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            for (int i = 0; i < count; i++) {
+                dispatchApi(mode, remaining);
+            }
+        });
+        sender.sendMessage("naiload api queued " + mode + " x" + count);
+        return true;
+    }
+
+    private void dispatchApi(String mode, AtomicInteger remaining) {
+        long started = System.nanoTime();
+        CompletableFuture<GenerationResult> future = NexusAIApi.generate(this, apiRequest(mode));
+        long elapsed = System.nanoTime() - started;
+        getLogger().info("API_CALL thread=" + Thread.currentThread().getName() + " nanos=" + elapsed);
+        future.whenComplete((result, error) -> {
+            logApiResult(result);
+            if (remaining.decrementAndGet() == 0) {
+                getLogger().info("API_DONE");
+            }
+        });
+    }
+
+    private static GenerationRequest apiRequest(String mode) {
+        if ("prompt".equals(mode)) {
+            return GenerationRequest.prompt("load_api").label("load-api").build();
+        }
+        return GenerationRequest.template("Reply with the single word pong.").label("load-api").build();
+    }
+
+    private void logApiResult(GenerationResult result) {
+        if (result == null) {
+            getLogger().info("API_RESULT success=false source=FALLBACK text= provider= model= finish= attempts=0 totalTokens=0 reported=false");
+            return;
+        }
+        String text = result.text().replace('\r', ' ').replace('\n', ' ');
+        getLogger().info("API_RESULT success=" + result.success()
+                + " source=" + result.source().name()
+                + " text=" + text
+                + " provider=" + result.providerId()
+                + " model=" + result.model()
+                + " finish=" + result.finishReason()
+                + " attempts=" + result.attempts()
+                + " totalTokens=" + result.usage().totalTokens()
+                + " reported=" + result.usage().reported());
     }
 
     @EventHandler

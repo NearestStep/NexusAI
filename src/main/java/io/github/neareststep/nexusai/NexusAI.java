@@ -32,6 +32,8 @@ import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.generate.GenerationRuntime;
+import io.github.neareststep.nexusai.generate.GenerationService;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
 import io.github.neareststep.nexusai.context.ContextRegistry;
 import io.github.neareststep.nexusai.context.ContextService;
@@ -97,6 +99,7 @@ public final class NexusAI extends JavaPlugin {
     private ContextSnapshots contextSnapshots;
     private ContextService contextService;
     private CachedContextCoordinator contextCoordinator;
+    private GenerationService generationService;
 
     @Override
     public void onEnable() {
@@ -129,6 +132,7 @@ public final class NexusAI extends JavaPlugin {
         logKeyFileWarnings();
         logQueueStrategy();
         logHttpLimitWarning();
+        logPluginApiWarnings();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -173,6 +177,11 @@ public final class NexusAI extends JavaPlugin {
             dialogueService = null;
         }
         stopRuntimeServices(true);
+        if (generationService != null) {
+            generationService.shutdown();
+            NexusAIApi.bindGeneration(null);
+            generationService = null;
+        }
         closeSharedHttpClient();
         shutdownExecutor(contextExecutor);
         shutdownExecutor(scheduler);
@@ -216,6 +225,7 @@ public final class NexusAI extends JavaPlugin {
         logKeyFileWarnings();
         logQueueStrategy();
         logHttpLimitWarning();
+        logPluginApiWarnings();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -268,6 +278,20 @@ public final class NexusAI extends JavaPlugin {
             dialogueService.onReload();
         }
         startModeration();
+        if (generationService == null) {
+            generationService = new GenerationService(this, httpExecutor, scheduler, getLogger());
+            NexusAIApi.bindGeneration(generationService);
+        }
+        generationService.publish(new GenerationRuntime(
+                pluginConfig,
+                aiCache,
+                gate,
+                diagnostics,
+                provider,
+                aiHttpClient,
+                promptCatalog,
+                knowledgeBase,
+                contextService));
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
@@ -405,6 +429,14 @@ public final class NexusAI extends JavaPlugin {
 
     private void logHttpLimitWarning() {
         for (String warning : pluginConfig.httpLimitWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
+    private void logPluginApiWarnings() {
+        for (String warning : pluginConfig.pluginApiWarnings()) {
             if (warning != null && !warning.isBlank()) {
                 getLogger().warning(warning);
             }
