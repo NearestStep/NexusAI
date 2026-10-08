@@ -667,6 +667,8 @@ def verify_knowledge(process, chunks: list[str], rcon_port: int, mock: MockHandl
             raise RuntimeError(f"knowledge body is missing {piece}")
     if "appeal" not in body.lower():
         raise RuntimeError("the appeal paragraph was not selected")
+    if "dock fee" in body.lower():
+        raise RuntimeError("the harbor paragraph was sent, so keyword selection did not run")
     print("KNOWLEDGE OK")
 
 

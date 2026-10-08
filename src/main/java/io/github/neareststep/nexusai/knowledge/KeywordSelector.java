@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.knowledge.KeywordSettings.OnNoMatch;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Logger;
@@ -251,16 +252,17 @@ public final class KeywordSelector {
     }
 
     private List<String> queryTokens(String query, List<String> extraKeywords) {
-        StringBuilder text = new StringBuilder(query == null ? "" : query);
+        LinkedHashSet<String> tokens = new LinkedHashSet<>(tokenizer.tokens(query));
         if (extraKeywords != null) {
             for (String keyword : extraKeywords) {
                 if (keyword == null || keyword.isBlank()) {
                     continue;
                 }
-                text.append('\n').append(keyword);
+                // Listed on the prompt on purpose, so a stop word stays after tokenization.
+                tokens.addAll(tokenizer.tokensKeepingStops(keyword));
             }
         }
-        return tokenizer.tokens(text.toString());
+        return List.copyOf(tokens);
     }
 
     private static List<String> orderedFiles(List<String> names) {

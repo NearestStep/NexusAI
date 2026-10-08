@@ -153,6 +153,20 @@ class KeywordSelectorTest {
     }
 
     @Test
+    void knowledgeKeywordStopWordIsStillQueried() {
+        String rules = """
+                <!-- keywords: the -->
+                rules stay in this paragraph
+                """;
+        KeywordSelector selector = selector(
+                Map.of("rules", rules), settings(6, 1200, 2, OnNoMatch.NONE), 6000);
+        KeywordSelector.Selection fromQuery = selector.select(List.of("rules"), "the rules", List.of());
+        assertEquals("", fromQuery.content());
+        KeywordSelector.Selection fromKeyword = selector.select(List.of("rules"), "zzzz", List.of("the rules"));
+        assertTrue(fromKeyword.content().contains("rules stay in this paragraph"), fromKeyword.content());
+    }
+
+    @Test
     void decimalPointIsNotASentenceEnd() {
         assertEquals("Version 1.2 is current.", KeywordSelector.limitParagraph("Version 1.2 is current. More text.", 24));
         assertEquals("Version", KeywordSelector.limitParagraph("Version 1.2 is current", 8));

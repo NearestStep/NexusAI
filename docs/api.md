@@ -47,7 +47,7 @@ Events are created only when that event's handler list has listeners. With none 
 
 ## Knowledge query
 
-`GenerationRequest.Builder.knowledgeQuery` is the text used to pick paragraphs when the effective mode is `keywords`. When it is omitted, the prompt text is used, before a context block is appended to the user message. `knowledge-keywords` on the named prompt are added. `Builder.knowledge` still replaces the file list. A template with no named prompt uses `knowledge.select` from `config.yml` and has no extra keywords. `full` ignores the query and sends the same block as before. `PromptDefinition.Builder.knowledgeSelect` and `knowledgeKeywords` set the same prompt keys for a prompt registered from code. `KnowledgeSelect` may gain values later. A `switch` should keep a `default` branch.
+`GenerationRequest.Builder.knowledgeQuery` is the text used to pick paragraphs when the effective mode is `keywords`. When it is omitted, the prompt text is used, before a context block is appended to the user message. `knowledge-keywords` on the named prompt are added after the same tokenization, and a stop word in that list is kept. `Builder.knowledge` still replaces the file list. A template with no named prompt uses `knowledge.select` from `config.yml` and has no extra keywords. `full` ignores the query and sends the same block as before. `PromptDefinition.Builder.knowledgeSelect` and `knowledgeKeywords` set the same prompt keys for a prompt registered from code. `KnowledgeSelect` may gain values later. A `switch` should keep a `default` branch.
 
 ## Event order
 
