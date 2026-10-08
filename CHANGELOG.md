@@ -14,7 +14,7 @@
 
 ### Clarifications to 1.1.2
 
-These notes correct the 1.1.2 wording. The 1.1.2 section above is unchanged.
+These notes correct the 1.1.2 wording. The [1.1.2] section below is unchanged.
 
 - `TurnMemory.load` clears the in-memory lines and replaces them with the lines from disk. `MemoryStore.loadForPersistence` does that for each character in the file, including lines said after the reload starts and before that character's load finishes. A character that is only in memory stays. The 1.1.2 sentence that disk lines replace lines said while persistence was off describes only part of that replacement.
 - A save is skipped while the first load has not finished (`memoryLoadedFromDisk` is false). If the quarantine copy cannot be written, later saves stay blocked until a new store, which means a restart. An error that finishes the load clears the loader, and a later reload can try again. A load that is still running is not started a second time. After 5 seconds, a skipped save logs once that saves of `dialogue-memory.yml` are paused.

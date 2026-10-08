@@ -61,7 +61,7 @@ The driver registers three context providers: `fast` (returns `coins ~12k`), `sl
 
 Config for the run: pool off, prewarm off, `limits.error-log-cooldown-seconds: 30`, `api.max-tokens: 256`. S3 uses the 1.0.x caps (30/min, 1000/day, 10 and 200 per player) and leaves quotas off. Every other scenario raises those four request caps to 100000 and reloads. S1-keywords turns `quotas.enabled` on with `consumers.default.tokens-per-day: 0`, so nothing is rejected. S6 turns quotas on with that consumer cap at 7200 and `missing-usage: estimate`. Prompt ids are `load_hit` (no context), `load_ctx` (`context: all`), `load_kw` (`knowledge: [rules]`, `knowledge-select: keywords`), and `harbor` (dialogue). Other prompts stay on full selection. `load_hit` and `load_ctx` share prompt text, so startup logs one warning that they share a cache entry. That line is outside the scenario windows. `plugins/NexusAI/knowledge/rules.md` is a short file the harness writes for `load_kw`.
 
-Keyword selection stays on the thread that already calls `KnowledgeComposer.prepare`. For a cached placeholder, including S1 and S1-keywords, that is the caller's thread. For `generate` it is a NexusAI thread inside the generation pipeline. It was left on that thread. No 1.2.0 load measurement showed it missing the MSPT budget. The 1.2.0 rows below are not recorded, so that miss was not measured.
+Keyword selection stays on the thread that already calls `KnowledgeComposer.prepare`. For a cached placeholder, including S1 and S1-keywords, that is the caller's thread. For `generate` it is a NexusAI thread inside the generation pipeline. It was left on that thread. No 1.2.0 load measurement showed it missing the MSPT budget. The Recorded run — 1.2.0 section below says not recorded, so that miss was not measured.
 
 `nexusai-context-*` threads are started at enable (`ContextService.newWorkerPool` calls `prestartAllCoreThreads`). Before that, a scenario that never called a provider saw zero context threads even though the pool size was 2. The HTTP pool already kept its four threads. The regression is `ContextServiceTest.workerPoolPrestartsTheConfiguredDaemonThreads`.
 
@@ -95,7 +95,7 @@ The JFR 2% line is a gate only when the recording has at least 200 Server-thread
 
 Not recorded.
 
-No finished Paper load of baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S6, or S-pool was stored for this snapshot. The machine used to write these notes did not already have a JDK 25 install, and the load job was not run. MSPT and latency are not estimated. The tables above this heading are 1.1.1 and 1.1.0. They are not 1.2.0 results. The full scenario list, the manual Folia check, the version bump, and the platform posts remain for the release candidate.
+No finished Paper load of baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S6, or S-pool was stored for this snapshot. The machine used to write these notes did not already have a JDK 25 install, and the load job was not run. MSPT and latency are not estimated. The tables under Recorded run — 1.1.1 and Recorded run — 1.1.0, below, are not 1.2.0 results. The full scenario list, the manual Folia check, the version bump, and the platform posts remain for the release candidate.
 
 ## Recorded run — 1.1.1
 
