@@ -3,8 +3,11 @@ package io.github.neareststep.nexusai.load;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.api.CacheMode;
 import io.github.neareststep.nexusai.api.GenerationRequest;
 import io.github.neareststep.nexusai.api.GenerationResult;
+import io.github.neareststep.nexusai.api.JsonGenerationResult;
+import io.github.neareststep.nexusai.api.JsonSchema;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.context.ContextService;
 import io.github.neareststep.nexusai.dialogue.ActionExecution;
@@ -40,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * RCON entry points {@code naiload <scenario> <rate> <seconds> <viewers>},
- * {@code naiload api <prompt|template> <n>}, and {@code naiload events}.
+ * {@code naiload api <prompt|template> <n>}, {@code naiload events}, and {@code naiload json}.
  * The command returns immediately. MSPT, call time, and the HTTP pool are sampled on the
  * server thread. The report is {@code plugins/NexusAI-LoadDriver/report.json}.
  */
@@ -106,6 +109,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         }
         if (args.length > 0 && "events".equals(args[0])) {
             return smokeEvents(sender);
+        }
+        if (args.length > 0 && "json".equals(args[0])) {
+            return smokeJson(sender);
         }
         if (args.length != 4) {
             sender.sendMessage("usage: naiload <scenario> <rate> <seconds> <viewers>");
@@ -229,6 +235,49 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             getLogger().info("ACTION_DONE result=" + (result == null ? "null" : result));
         });
         sender.sendMessage("naiload events queued");
+        return true;
+    }
+
+    /**
+     * {@code naiload json}. One {@code generateJson} call. The command does not join the future.
+     */
+    private boolean smokeJson(CommandSender sender) {
+        if (!NexusAIApi.isAvailable()) {
+            getLogger().info("NEXUSAI_JSON success=false mode= error=unavailable");
+            sender.sendMessage("naiload json unavailable");
+            return true;
+        }
+        JsonSchema schema;
+        try {
+            schema = JsonSchema.parse("""
+                    {"type":"object","additionalProperties":false,
+                     "required":["title","goal","reward"],
+                     "properties":{
+                       "title":{"type":"string","maxLength":40},
+                       "goal":{"type":"string","maxLength":200},
+                       "reward":{"type":"integer","minimum":1,"maximum":1000}}}
+                    """);
+        } catch (RuntimeException ex) {
+            getLogger().info("NEXUSAI_JSON success=false mode= error=schema");
+            sender.sendMessage("naiload json schema");
+            return true;
+        }
+        CompletableFuture<JsonGenerationResult> future = NexusAIApi.generateJson(
+                this,
+                GenerationRequest.template("Invent a short fetch quest for a village blacksmith.")
+                        .cacheMode(CacheMode.FRESH)
+                        .label("load-json")
+                        .build(),
+                schema);
+        future.whenComplete((result, error) -> {
+            if (error != null || result == null) {
+                String name = error == null ? "null" : error.getClass().getSimpleName();
+                getLogger().info("NEXUSAI_JSON success=false mode= error=" + name);
+                return;
+            }
+            getLogger().info("NEXUSAI_JSON success=" + result.success() + " mode=" + result.mode().name());
+        });
+        sender.sendMessage("naiload json queued");
         return true;
     }
 

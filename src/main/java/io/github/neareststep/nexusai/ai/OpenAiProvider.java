@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.ai.dto.UsageJson;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -101,8 +102,11 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
 
     public static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        boolean json = StructuredOutputSupport.isJson(effective);
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
-        String instruction = config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
+        String instruction = json
+                ? StructuredOutputSupport.instruction(effective)
+                : config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
         if (instruction != null && !instruction.isBlank()) {
             system = system == null ? instruction : system + "\n\n" + instruction;
         }
@@ -111,7 +115,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             system = null;
         }
         Double temperature = effective.temperature(config.getTemperature());
-        Integer maxTokens = effective.maxTokens(config.getMaxTokens());
+        Integer maxTokens = json
+                ? jsonMaxTokens(effective)
+                : effective.maxTokens(config.getMaxTokens());
         String model = effective.model(config.getModel());
         Integer maxCompletionTokens = null;
         String reasoningEffort = null;
@@ -133,7 +139,23 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             messages.add(new ChatCompletionRequest.Message("system", system));
         }
         messages.add(new ChatCompletionRequest.Message("user", prompt));
-        return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
+        if (json) {
+            messages.addAll(StructuredOutputSupport.extraMessages(effective));
+        }
+        Object responseFormat = json ? StructuredOutputSupport.responseFormat(effective) : null;
+        return new ChatCompletionRequest(
+                model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort, responseFormat);
+    }
+
+    /**
+     * JSON uses the request or prompt cap. When neither is set the cap is 1024, not {@code api.max-tokens}.
+     * Zero and negative values still omit the field.
+     */
+    private static Integer jsonMaxTokens(GenerationOverrides effective) {
+        if (effective.maxTokensSpecified()) {
+            return effective.maxTokens(null);
+        }
+        return StructuredOutputSupport.DEFAULT_MAX_TOKENS;
     }
 
     /**
@@ -223,6 +245,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         if (model != null && !model.isBlank()) {
             effective = effective.withModel(model);
         }
+        final boolean keepFilters = filterAnswer && !StructuredOutputSupport.isJson(effective);
         String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
         URI parsedUri = ChatEndpoints.chatCompletions(root);
         logger.log(Level.FINE, "POST {0}", parsedUri);
@@ -255,7 +278,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (error != null) {
                 throw toAi(unwrap(error), parsedUri, apiKey);
             }
-            return readExchange(response, parsedUri, prompt, apiKey, callOverrides, filterAnswer, callModel, promptChars, httpNanos);
+            return readExchange(response, parsedUri, prompt, apiKey, callOverrides, keepFilters, callModel, promptChars, httpNanos);
         });
     }
 

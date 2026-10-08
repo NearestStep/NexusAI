@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class GenerationOverrides {
 
     private static final GenerationOverrides NONE = new GenerationOverrides(
-            false, null, false, null, false, null, false, null, false, null, false, null, null, null);
+            false, null, false, null, false, null, false, null, false, null, false, null, null, null, null);
 
     private final boolean systemPromptSet;
     private final String systemPrompt;
@@ -28,6 +28,10 @@ public final class GenerationOverrides {
      * Stable id for a length-trim notice. Not a generation parameter and not sent to the model.
      */
     private final String noticeId;
+    /**
+     * JSON call state. Not a generation parameter, not part of {@link #isEmpty()}, and not sent as text.
+     */
+    private final Object structured;
 
     private GenerationOverrides(
             boolean systemPromptSet,
@@ -43,7 +47,8 @@ public final class GenerationOverrides {
             boolean fallbackSet,
             String fallbackProvider,
             String fallbackModel,
-            String noticeId
+            String noticeId,
+            Object structured
     ) {
         this.systemPromptSet = systemPromptSet;
         this.systemPrompt = systemPrompt;
@@ -59,6 +64,7 @@ public final class GenerationOverrides {
         this.fallbackProvider = fallbackProvider;
         this.fallbackModel = fallbackModel;
         this.noticeId = noticeId;
+        this.structured = structured;
     }
 
     public static GenerationOverrides none() {
@@ -103,6 +109,7 @@ public final class GenerationOverrides {
                 false,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -133,7 +140,8 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -155,7 +163,8 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -175,7 +184,8 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -195,7 +205,8 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -214,7 +225,8 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -240,7 +252,8 @@ public final class GenerationOverrides {
                 true,
                 parsed.provider(),
                 parsed.model(),
-                noticeId
+                noticeId,
+                structured
         );
     }
 
@@ -266,8 +279,43 @@ public final class GenerationOverrides {
                 fallbackSet,
                 fallbackProvider,
                 fallbackModel,
-                id
+                id,
+                structured
         );
+    }
+
+    /** Attaches JSON call state. The same instance is returned when {@code structured} is already stored. */
+    public GenerationOverrides withStructured(Object structured) {
+        if (structured == this.structured) {
+            return this;
+        }
+        return new GenerationOverrides(
+                systemPromptSet,
+                systemPrompt,
+                temperatureSet,
+                temperature,
+                maxTokensSet,
+                maxTokens,
+                modelSet,
+                model,
+                formatSet,
+                format,
+                fallbackSet,
+                fallbackProvider,
+                fallbackModel,
+                noticeId,
+                structured
+        );
+    }
+
+    /** JSON call state, or {@code null} when this call is ordinary text. */
+    public Object structured() {
+        return structured;
+    }
+
+    /** True when the request or the prompt set {@code max_tokens}, including a value that omits the field. */
+    public boolean maxTokensSpecified() {
+        return maxTokensSet;
     }
 
     /**
@@ -303,10 +351,18 @@ public final class GenerationOverrides {
             return this;
         }
         if (onTop.isEmpty()) {
-            return onTop.noticeId == null ? this : withNoticeId(onTop.noticeId);
+            GenerationOverrides kept = onTop.noticeId == null ? this : withNoticeId(onTop.noticeId);
+            if (onTop.structured != null && onTop.structured != kept.structured) {
+                return kept.withStructured(onTop.structured);
+            }
+            return kept;
         }
         if (isEmpty()) {
-            return noticeId == null || onTop.noticeId != null ? onTop : onTop.withNoticeId(noticeId);
+            GenerationOverrides kept = noticeId == null || onTop.noticeId != null ? onTop : onTop.withNoticeId(noticeId);
+            if (structured != null && kept.structured == null) {
+                return kept.withStructured(structured);
+            }
+            return kept;
         }
         return new GenerationOverrides(
                 onTop.systemPromptSet || systemPromptSet,
@@ -322,7 +378,8 @@ public final class GenerationOverrides {
                 onTop.fallbackSet || fallbackSet,
                 onTop.fallbackSet ? onTop.fallbackProvider : fallbackProvider,
                 onTop.fallbackSet ? onTop.fallbackModel : fallbackModel,
-                onTop.noticeId != null ? onTop.noticeId : noticeId
+                onTop.noticeId != null ? onTop.noticeId : noticeId,
+                onTop.structured != null ? onTop.structured : structured
         );
     }
 
@@ -384,13 +441,15 @@ public final class GenerationOverrides {
                 && Objects.equals(format, that.format)
                 && Objects.equals(fallbackProvider, that.fallbackProvider)
                 && Objects.equals(fallbackModel, that.fallbackModel)
-                && Objects.equals(noticeId, that.noticeId);
+                && Objects.equals(noticeId, that.noticeId)
+                && Objects.equals(structured, that.structured);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(
                 systemPromptSet, systemPrompt, temperatureSet, temperature, maxTokensSet, maxTokens,
-                modelSet, model, formatSet, format, fallbackSet, fallbackProvider, fallbackModel, noticeId);
+                modelSet, model, formatSet, format, fallbackSet, fallbackProvider, fallbackModel, noticeId,
+                structured);
     }
 }

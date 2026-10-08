@@ -12,6 +12,7 @@ import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.event.GenerationEvents;
 import io.github.neareststep.nexusai.event.PreCancelled;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 
 import java.util.HashSet;
 import java.util.List;
@@ -196,7 +197,7 @@ public final class RoutingProvider implements AiProvider {
                 .thenCompose(answer -> {
                     if (answer != null) {
                         return CompletableFuture.completedFuture(
-                                toAnswer(answer, choice.provider(), model, last.httpAttempts, false));
+                                toAnswer(answer, choice.provider(), model, last.httpAttempts, false, overrides));
                     }
                     return walk(prompt, overrides, probe, choices, index + 1, attempted, last, trace);
                 });
@@ -231,7 +232,7 @@ public final class RoutingProvider implements AiProvider {
                 ).thenCompose(answer -> {
                     if (answer != null) {
                         return CompletableFuture.completedFuture(
-                                toAnswer(answer, plan.provider(), plan.model(), last.httpAttempts, true));
+                                toAnswer(answer, plan.provider(), plan.model(), last.httpAttempts, true, overrides));
                     }
                     return failed(probe, choices, fallback, last);
                 });
@@ -304,7 +305,10 @@ public final class RoutingProvider implements AiProvider {
             return CompletableFuture.completedFuture(null);
         }
         String apiKey = key;
-        QuotaPolicy.Decision rowDecision = reserveRow(prompt, overrides, providerId, model, queueIndex, dedicatedFallback);
+        GenerationOverrides call = StructuredOutputSupport.prepare(
+                overrides, providerId, model, provider.structuredOutput());
+        StructuredOutputSupport.noteRow(call, queueIndex, dedicatedFallback);
+        QuotaPolicy.Decision rowDecision = reserveRow(prompt, call, providerId, model, queueIndex, dedicatedFallback);
         if (rowDecision != null && !rowDecision.allowed()) {
             return CompletableFuture.completedFuture(null);
         }
@@ -318,10 +322,11 @@ public final class RoutingProvider implements AiProvider {
                     return CompletableFuture.completedFuture(null);
                 }
                 last.httpAttempts++;
-                return http.exchangeAsync(prompt, overrides, provider.url(), apiKey, model, trace);
+                StructuredOutputSupport.noteAttempt(call);
+                return http.exchangeAsync(prompt, call, provider.url(), apiKey, model, trace);
             }).handle((ChatExchange exchange, Throwable error) -> afterCall(
                     prompt,
-                    overrides,
+                    call,
                     probe,
                     providerId,
                     model,
@@ -380,8 +385,12 @@ public final class RoutingProvider implements AiProvider {
             String providerId,
             String model,
             int attempts,
-            boolean fallbackModelUsed
+            boolean fallbackModelUsed,
+            GenerationOverrides overrides
     ) {
+        String mode = StructuredOutputSupport.isJson(overrides)
+                ? StructuredOutputSupport.active(overrides).name()
+                : "";
         return new ModelAnswer(
                 exchange.text(),
                 exchange.cacheTtl(),
@@ -391,7 +400,8 @@ public final class RoutingProvider implements AiProvider {
                 exchange.finishReason(),
                 attempts,
                 fallbackModelUsed,
-                exchange.httpNanos());
+                exchange.httpNanos(),
+                mode);
     }
 
     private CompletableFuture<ChatExchange> afterCall(
@@ -480,6 +490,13 @@ public final class RoutingProvider implements AiProvider {
             return tryModel(
                     prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, keyAttempt + 1, moreAfter, trace);
         }
+        if (StructuredOutputSupport.downgrade(overrides, providerId, model, typed, logger)) {
+            noteProviderError(trace, providerId, model, typed, true);
+            releaseRow(rowDecision);
+            rowDecision = null;
+            return tryModel(
+                    prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, 0, moreAfter, trace);
+        }
         noteProviderError(trace, providerId, model, typed, moreAfter);
         if (!probe) {
             fail(queueIndex, dedicatedFallback, providerId, model, typed);
@@ -488,6 +505,66 @@ public final class RoutingProvider implements AiProvider {
         } finally {
             releaseRow(rowDecision);
         }
+    }
+
+    /**
+     * One more HTTP call on the same provider and model. Does not fire Pre again.
+     * Used for the single JSON repair. A provider error on this call is not a second repair.
+     */
+    public CompletableFuture<ModelAnswer> repeat(
+            String prompt,
+            GenerationOverrides overrides,
+            String providerId,
+            String model,
+            CallTrace trace
+    ) {
+        Objects.requireNonNull(prompt, "prompt");
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        CompletableFuture<ModelAnswer> result = new CompletableFuture<>();
+        try {
+            executor.execute(() -> {
+                Attempt last = new Attempt();
+                int noted = StructuredOutputSupport.rowIndex(effective);
+                boolean notedDedicated = StructuredOutputSupport.dedicatedRow(effective);
+                int index = noted;
+                boolean dedicated = notedDedicated;
+                if (noted < 0 && !notedDedicated) {
+                    index = queue.indexOf(providerId, model);
+                    dedicated = index < 0;
+                }
+                final boolean sameRowDedicated = dedicated;
+                final int sameRowIndex = Math.max(index, 0);
+                tryModel(
+                        prompt,
+                        effective,
+                        false,
+                        providerId,
+                        model,
+                        sameRowIndex,
+                        sameRowDedicated,
+                        last,
+                        0,
+                        false,
+                        trace
+                ).whenComplete((exchange, error) -> {
+                    if (error != null) {
+                        result.completeExceptionally(error);
+                        return;
+                    }
+                    if (exchange == null) {
+                        Throwable cause = last.error != null
+                                ? last.error
+                                : new AiRequestException(AiErrorKind.OTHER, 0, "JSON repair was not sent", null);
+                        result.completeExceptionally(cause);
+                        return;
+                    }
+                    result.complete(toAnswer(exchange, providerId, model, last.httpAttempts, sameRowDedicated, effective));
+                });
+            });
+        } catch (RejectedExecutionException rejected) {
+            result.completeExceptionally(HttpPool.queueFull(rejected));
+        }
+        return result;
     }
 
     private static AiRequestException asAi(Throwable error) {

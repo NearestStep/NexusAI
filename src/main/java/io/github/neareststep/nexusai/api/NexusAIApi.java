@@ -159,6 +159,75 @@ public final class NexusAIApi {
     }
 
     /**
+     * Like {@link #generate}, but the model must answer with one JSON object that matches {@code schema}.
+     * Call from any thread. The future completes on a NexusAI thread, the same way {@link #generate} does.
+     * It completes exceptionally only when NexusAI is not enabled.
+     * <p>
+     * Do not join the future on the main thread or a region thread. On Folia, hop to the global region
+     * scheduler before creating a world object. Values in {@link JsonGenerationResult#asMap()} came from
+     * a model. Check them again before using one in a command, a name, or a path.
+     * <p>
+     * {@code request.format()} is ignored. A cached call and an in-flight join do not call the model again.
+     * <pre>{@code
+     * JsonSchema schema = JsonSchema.parse("""
+     *         {"type":"object","additionalProperties":false,
+     *          "required":["title","goal","reward"],
+     *          "properties":{
+     *            "title":{"type":"string","maxLength":40},
+     *            "goal":{"type":"string","maxLength":200},
+     *            "reward":{"type":"integer","minimum":1,"maximum":1000}}}
+     *         """);
+     * NexusAIApi.generateJson(plugin, GenerationRequest.template(
+     *                 "Invent a short fetch quest for a village blacksmith.")
+     *                 .cacheMode(CacheMode.FRESH)
+     *                 .build(), schema)
+     *         .thenAccept(result -> {
+     *             if (!result.success()) {
+     *                 return;
+     *             }
+     *             Map<String, Object> quest = result.asMap().orElseThrow();
+     *             long reward = (Long) quest.get("reward");
+     *             Bukkit.getGlobalRegionScheduler().run(plugin, task -> createQuest(quest, reward));
+     *         });
+     * }</pre>
+     *
+     * @throws IllegalArgumentException when {@code owner}, {@code request}, or {@code schema} is null
+     */
+    public static CompletableFuture<JsonGenerationResult> generateJson(
+            Plugin owner,
+            GenerationRequest request,
+            JsonSchema schema
+    ) {
+        if (owner == null || request == null || schema == null) {
+            throw new IllegalArgumentException("owner, request, and schema are required");
+        }
+        GenerationService current = generation;
+        if (current == null || !current.accepting()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("NexusAI is not enabled"));
+        }
+        return current.generateJson(owner, request, schema);
+    }
+
+    /**
+     * Like {@link #generateJson(Plugin, GenerationRequest, JsonSchema)}, using the {@link JsonSchema}
+     * stored on the registered prompt ({@code request.promptId()}). A prompt with no schema completes
+     * with {@link NexusErrorKind#INVALID_REQUEST} and does not call the model. An admin override in
+     * {@code prompts.yml} can replace the prompt text. It cannot replace the schema.
+     *
+     * @throws IllegalArgumentException when {@code owner} or {@code request} is null
+     */
+    public static CompletableFuture<JsonGenerationResult> generateJson(Plugin owner, GenerationRequest request) {
+        if (owner == null || request == null) {
+            throw new IllegalArgumentException("owner and request are required");
+        }
+        GenerationService current = generation;
+        if (current == null || !current.accepting()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("NexusAI is not enabled"));
+        }
+        return current.generateJson(owner, request);
+    }
+
+    /**
      * Registers {@code namespace:localId} for {@code owner}. The namespace is {@code owner}'s name
      * in lower case, with every character outside {@code [a-z0-9_-]} replaced by {@code _}.
      * {@code localId} matches {@code [a-z0-9_-]{1,64}}.

@@ -22,6 +22,7 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.moderation.ChatModerationListener;
@@ -147,6 +148,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
         logQuotaWarnings();
@@ -233,6 +235,7 @@ public final class NexusAI extends JavaPlugin {
         messageService.reload(pluginConfig.getLocale());
         getUnpooledGenerateLog().reset();
         LengthTrimNotices.reset();
+        StructuredOutputSupport.clear();
 
         stopRuntimeServices(true);
         if (httpPool != null) {
@@ -245,6 +248,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
         logQuotaWarnings();
@@ -619,6 +623,12 @@ public final class NexusAI extends JavaPlugin {
     private void logQueueStrategy() {
         String warning = pluginConfig.modelQueueStrategyWarning();
         if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void logStructuredOutput() {
+        for (String warning : pluginConfig.structuredOutputWarnings()) {
             getLogger().warning(warning);
         }
     }

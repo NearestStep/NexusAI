@@ -118,8 +118,15 @@ public final class PromptDefinition {
     }
 
     /**
+     * Code schema stored for {@link NexusAIApi#generateJson(org.bukkit.plugin.Plugin, GenerationRequest)}.
+     * {@code prompts.yml} does not replace this value. Only a {@link JsonSchema} is sent.
+     */
+    public JsonSchema jsonSchema() {
+        return schema instanceof JsonSchema parsed ? parsed : null;
+    }
+
+    /**
      * Code schema. {@code prompts.yml} does not replace this value.
-     * {@code generateJson} will read it. Until that method exists the object is stored and is not sent.
      */
     @ApiStatus.Internal
     public Object schema() {
@@ -245,6 +252,18 @@ public final class PromptDefinition {
                 }
             }
             this.knowledge = names;
+            return this;
+        }
+
+        /**
+         * Schema for {@link NexusAIApi#generateJson(org.bukkit.plugin.Plugin, GenerationRequest)}.
+         * An admin override in {@code prompts.yml} does not replace it.
+         */
+        public Builder jsonSchema(JsonSchema schema) {
+            if (schema == null) {
+                throw new IllegalArgumentException("schema is required");
+            }
+            this.schema = schema;
             return this;
         }
 

@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.ai.ReasoningModels;
 import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 
 /**
  * Reservation size from section 5.4: prompt characters / 4, plus {@code max_tokens}.
@@ -34,14 +35,22 @@ public final class QuotaEstimates {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String system = effective.systemPrompt(config == null ? null : config.getSystemPrompt());
         String instruction = "";
-        if (config != null) {
-            var preset = config.presetFor(effective.formatOr(config.defaultFormatId()));
-            if (preset != null && preset.instruction() != null) {
-                instruction = preset.instruction();
+        Integer maxTokens;
+        if (StructuredOutputSupport.isJson(effective)) {
+            instruction = StructuredOutputSupport.instruction(effective);
+            maxTokens = effective.maxTokensSpecified()
+                    ? effective.maxTokens(null)
+                    : StructuredOutputSupport.DEFAULT_MAX_TOKENS;
+        } else {
+            if (config != null) {
+                var preset = config.presetFor(effective.formatOr(config.defaultFormatId()));
+                if (preset != null && preset.instruction() != null) {
+                    instruction = preset.instruction();
+                }
             }
+            maxTokens = effective.maxTokens(config == null ? null : config.getMaxTokens());
         }
         int chars = ResponseUsage.chars(prompt) + ResponseUsage.chars(system) + ResponseUsage.chars(instruction);
-        Integer maxTokens = effective.maxTokens(config == null ? null : config.getMaxTokens());
         String resolved = model;
         if (resolved == null || resolved.isBlank()) {
             resolved = effective.model(config == null ? "" : config.getModel());

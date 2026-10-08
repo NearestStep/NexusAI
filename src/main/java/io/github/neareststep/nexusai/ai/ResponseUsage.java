@@ -69,6 +69,30 @@ public record ResponseUsage(
         return text.codePointCount(0, text.length());
     }
 
+    /**
+     * Sums two attempts. A missing side is ignored. {@code reported} wins over {@code estimated}.
+     * Cost is kept when either side sent one, and added when both did.
+     */
+    public ResponseUsage plus(ResponseUsage other) {
+        if (other == null) {
+            return this;
+        }
+        int prompt = saturatingAdd(promptTokens, other.promptTokens);
+        int completion = saturatingAdd(completionTokens, other.completionTokens);
+        int total = saturatingAdd(totalTokens, other.totalTokens);
+        boolean anyReported = reported || other.reported;
+        boolean anyEstimated = estimated || other.estimated;
+        OptionalDouble summed;
+        if (cost.isPresent() && other.cost.isPresent()) {
+            summed = OptionalDouble.of(cost.getAsDouble() + other.cost.getAsDouble());
+        } else if (cost.isPresent()) {
+            summed = cost;
+        } else {
+            summed = other.cost;
+        }
+        return new ResponseUsage(prompt, completion, total, anyReported, anyEstimated, summed);
+    }
+
     /** {@code ceil(characters / 4)}, never negative. */
     public static int tokensFromChars(int characters) {
         if (characters <= 0) {
