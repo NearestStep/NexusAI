@@ -6,11 +6,12 @@ then BETA, then ALPHA, and the channel is printed. PlaceholderAPI 2.12.3
 and a local mock OpenAI-compatible endpoint are installed either way.
 No real API key is used.
 
-While plugin.yml sets folia-supported to false, Folia smoke only checks
+When plugin.yml sets folia-supported to false, Folia smoke only checks
 that the server reaches Done, stops cleanly, and that Folia refused to
 load NexusAI. Status, /nai test, /nai usage, the named context prompt,
-and probe events run when folia-supported is true or when --folia-checks
-full is set.
+probe events, the absent refusal line, and the strict log filter run
+when folia-supported is true or when --folia-checks full is set. A check
+that cannot run fails the script.
 """
 
 from __future__ import annotations
@@ -64,6 +65,8 @@ _LOG_PREFIXES = (
 _THROWABLE_LINE = re.compile(
     r"(?<![\w$])(?:[\w$]+\.)*[\w$]*(?:Exception|Error|Throwable)(?=\s*:|$)"
 )
+# Locale command.test-ok after colour codes are removed. Loose fragments are not enough.
+_MOCK_ANSWER = re.compile(r"Answer \(\d+ ms\): pong")
 
 
 def main() -> int:
@@ -1212,7 +1215,10 @@ def boot_folia(
             raise RuntimeError("thread or region error during shutdown:\n" + "\n".join(thread_hits))
         if mode == "startup":
             report_folia_startup(text, announce=False)
-        print(f"FOLIA SMOKE OK {version} build {chosen['id']} channel {chosen['channel']}", flush=True)
+        print(
+            f"FOLIA SMOKE OK {version} build {chosen['id']} channel {chosen['channel']} {mode}",
+            flush=True,
+        )
         return 0
     finally:
         if process.poll() is None:
@@ -1346,16 +1352,9 @@ def thread_region_problems(text: str) -> list[str]:
 def run_folia_full_checks(process, chunks, rcon_port: int, mock_port: int, mock: MockHandle, timeout: int) -> None:
     """Status, tests, usage, context prompt, and probe events. Not used while support is off."""
     text = "".join(chunks)
-    assert_no_folia_refusal(text)
-    if "NexusAI enabled." not in text:
-        raise RuntimeError("NexusAI did not log that it enabled")
     if f"127.0.0.1:{mock_port}/v1" not in text:
         raise RuntimeError("startup log does not show the mock base URL")
-    if "ERROR]: [NexusAI]" in text or "ERROR]: [NexusAI] " in text:
-        raise RuntimeError("NexusAI logged an error while enabling")
-    hits = thread_region_problems(text)
-    if hits:
-        raise RuntimeError("\n".join(hits))
+    require_folia_full_log(text, "before commands")
 
     verify_folia_status(rcon_port, mock_port)
     verify_folia_usage(process, chunks, rcon_port, timeout)
@@ -1363,14 +1362,44 @@ def run_folia_full_checks(process, chunks, rcon_port: int, mock_port: int, mock:
     verify_knowledge(process, chunks, rcon_port, mock, timeout)
     verify_folia_context_prompt(process, chunks, rcon_port, mock, timeout)
     verify_folia_probe_events(process, chunks, timeout)
+    require_folia_full_log("".join(chunks), "after commands")
 
-    text = "".join(chunks)
-    assert_no_folia_refusal(text)
-    hits = thread_region_problems(text)
-    if hits:
-        raise RuntimeError("\n".join(hits))
-    if "ERROR]: [NexusAI]" in text:
-        raise RuntimeError("NexusAI logged an error during Folia checks")
+
+def require_folia_full_log(text: str, when: str) -> None:
+    """Refusal must be absent. ERROR, SEVERE, and throwable lines must be absent too."""
+    problems, exempted = assess_folia_full(text)
+    print(f"FOLIA EXEMPT LINES: {exempted}", flush=True)
+    if expected_refusal_lines(text):
+        raise RuntimeError("Folia refused a plugin while NexusAI is enabled")
+    print("FOLIA REFUSAL ABSENT", flush=True)
+    if problems:
+        raise RuntimeError(f"folia full checks failed {when}:\n" + "\n".join(problems))
+
+
+def assess_folia_full(text: str) -> tuple[list[str], int]:
+    """Full-mode log gate. The startup refusal is a failure here, not an exemption."""
+    problems: list[str] = []
+    refusals = expected_refusal_lines(text)
+    if refusals:
+        problems.append("Folia refused a plugin: " + refusals[0].strip())
+    if "NexusAI enabled." not in text:
+        problems.append("NexusAI did not log that it enabled")
+    if "NexusAI-LoadDriver enabled." in text:
+        problems.append("load driver must not run on Folia")
+    problems.extend(thread_region_problems(text))
+    unexpected, exempted = unexpected_log_problems(text)
+    problems.extend(unexpected)
+    if len(problems) > 20:
+        problems = problems[:20] + [f"... and {len(problems) - 20} more"]
+    return problems, exempted
+
+
+def is_mock_answer_line(text: str) -> bool:
+    return _MOCK_ANSWER.search(strip_colors(text)) is not None
+
+
+def mock_answer_count(text: str) -> int:
+    return len(_MOCK_ANSWER.findall(strip_colors(text)))
 
 
 def assert_no_folia_refusal(text: str) -> None:
@@ -1417,16 +1446,20 @@ def verify_folia_default_test(process, chunks, rcon_port: int, mock: MockHandle,
     reply = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai test"))
     print("--- /nai test ---")
     print(reply)
-    if "Sending a test request" not in reply and "pong" not in reply and "Answer" not in reply:
-        raise RuntimeError("/nai test did not start")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during /nai test with code {process.returncode}")
-        if len(mock.bodies()) > before:
+        combined = reply + "\n" + "".join(chunks)
+        answered = is_mock_answer_line(combined)
+        reached = len(mock.bodies()) > before
+        if answered and reached:
+            print("FOLIA TEST OK", flush=True)
             return
+        if "Test failed" in combined and not answered:
+            raise RuntimeError("/nai test failed")
         time.sleep(0.2)
-    raise RuntimeError("/nai test did not reach the mock")
+    raise RuntimeError("/nai test did not log the mock answer line")
 
 
 def verify_folia_context_prompt(process, chunks, rcon_port: int, mock: MockHandle, timeout: int) -> None:
@@ -1436,23 +1469,28 @@ def verify_folia_context_prompt(process, chunks, rcon_port: int, mock: MockHandl
     The test plugin logs NEXUSAI_CONTEXT when its provider runs for context_ping.
     """
     before = len(mock.bodies())
+    answers_before = mock_answer_count("".join(chunks))
     reply = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai test context_ping"))
     print("--- /nai test context_ping ---")
     print(reply)
-    if "Test failed" in reply:
-        raise RuntimeError("/nai test context_ping failed")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during context prompt with code {process.returncode}")
+        text = "".join(chunks)
+        combined = reply + "\n" + text
         saw_prompt = any("Reply with one word." in body for body in mock.bodies()[before:])
-        if saw_prompt and "NEXUSAI_CONTEXT " in "".join(chunks):
-            print("context provider observed")
+        answered = mock_answer_count(combined) > answers_before
+        if "Test failed" in combined and not answered:
+            raise RuntimeError("/nai test context_ping failed")
+        if saw_prompt and "NEXUSAI_CONTEXT " in text and answered:
+            print("context provider observed", flush=True)
             return
         time.sleep(0.2)
     raise RuntimeError(
         "named prompt context provider was not observed: "
-        "expected mock text 'Reply with one word.' and a test-plugin log line NEXUSAI_CONTEXT"
+        "expected mock text 'Reply with one word.', the mock answer line, "
+        "and a test-plugin log line NEXUSAI_CONTEXT"
     )
 
 
@@ -1462,14 +1500,19 @@ def verify_folia_probe_events(process, chunks, timeout: int) -> None:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during probe checks with code {process.returncode}")
         text = "".join(chunks)
+        if "NexusAI-LoadDriver enabled." in text:
+            raise RuntimeError("load driver must not run on Folia")
         if "nexusai-events-probe enabled." not in text:
             time.sleep(0.2)
             continue
-        pre_index, pre_id, post_index, _appearance = _paired_phase(text, "TEST", "nexusai", "NO_SUCH", "no")
+        pre_index, pre_id, post_index, _appearance = _paired_phase(text, "TEST", "nexusai", "NO_SUCH", "absent")
         if pre_index is not None and post_index is not None and pre_index < post_index:
-            print(f"probe events saw TEST requestId={pre_id}")
+            print(f"PROBE EVENTS OK requestId={pre_id}", flush=True)
             return
         time.sleep(0.2)
+    text = "".join(chunks)
+    if "nexusai-events-probe enabled." not in text:
+        raise RuntimeError("events probe did not enable")
     raise RuntimeError("events probe did not log TEST pre then post")
 
 
@@ -1594,6 +1637,39 @@ def _smoke_self_check() -> None:
         pass
     else:
         raise RuntimeError("full checks accepted a refusal line")
+
+    _need(is_mock_answer_line("Answer (12 ms): pong"), "real answer line was rejected")
+    _need(
+        is_mock_answer_line("[NexusAI] Answer (3 ms): pong"),
+        "prefixed answer line was rejected",
+    )
+    for loose in ("Sending a test request...", "pong", "Answer", "Answer: pong"):
+        _need(not is_mock_answer_line(loose), f"loose /nai test line was accepted: {loose}")
+    _need(mock_answer_count("Answer (1 ms): pong\nAnswer (2 ms): pong") == 2, "answer count")
+    success = "FOLIA SMOKE OK {version} build {chosen['id']} channel {chosen['channel']} {mode}"
+    _need(success in source, "full-mode success line is missing")
+    _need("FOLIA REFUSAL ABSENT" in source, "refusal-absent check is missing")
+    _need("FOLIA TEST OK" in source, "strict test success line is missing")
+    _need("PROBE EVENTS OK" in source, "probe success line is missing")
+
+    clean = "\n".join([
+        "[01:00:00] [Server thread/INFO]: Done (1.0s)! For help, type \"help\"",
+        "[01:00:01] [Server thread/INFO]: NexusAI enabled.",
+        "[01:00:02 ERROR]: " + EXEMPT_LOG_MESSAGE,
+    ])
+    clean_problems, clean_exempt = assess_folia_full(clean)
+    _need(not clean_problems and clean_exempt == 1, f"clean full log was flagged: {clean_problems} {clean_exempt}")
+    enabled_refusal = sample + "\n[01:00:05] [Server thread/INFO]: NexusAI enabled."
+    refused_problems, _refused_exempt = assess_folia_full(enabled_refusal)
+    _need(any("refused" in item for item in refused_problems), f"full mode accepted a refusal: {refused_problems}")
+    driver_log = clean + "\n[01:00:03] [Server thread/INFO]: NexusAI-LoadDriver enabled."
+    driver_problems, _driver_exempt = assess_folia_full(driver_log)
+    _need(any("load driver" in item for item in driver_problems), f"load driver was allowed: {driver_problems}")
+    broken_full = clean + "\n[01:00:03] [Server thread/ERROR]: Thread failed main thread check: entity"
+    broken_problems, _broken_exempt = assess_folia_full(broken_full)
+    _need(any("thread/region" in item for item in broken_problems), f"full mode missed a thread error: {broken_problems}")
+    startup_refusals, startup_problems, _startup_exempt = assess_folia_startup(sample)
+    _need(len(startup_refusals) == 1 and not startup_problems, f"startup still requires the refusal: {startup_problems}")
 
     with tempfile.TemporaryDirectory() as tmp:
         jar_path = Path(tmp) / "NexusAI.jar"

@@ -1,15 +1,34 @@
 package io.github.neareststep.nexusai.placeholder;
 
+import io.github.neareststep.nexusai.context.RegionOwnership;
+import io.github.neareststep.nexusai.context.RegionPlayerFixture;
+import org.bukkit.entity.Player;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VarSubstitutorTest {
+
+    @AfterEach
+    void resetRegionOwnership() {
+        RegionOwnership.reset();
+    }
+
+    @Test
+    void percentTemplateOffRegionDoesNotReadThePlayer() {
+        AtomicBoolean touched = new AtomicBoolean();
+        RegionOwnership.install(player -> false);
+        Player player = RegionPlayerFixture.throwing(touched);
+        assertEquals("", VarSubstitutor.resolve(player, "%player_health%"));
+        assertFalse(touched.get());
+    }
 
     @Test
     void applyReplacesBraceTokensWithLiteralVars() {

@@ -6,7 +6,11 @@ import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.context.RegionOwnership;
+import io.github.neareststep.nexusai.context.RegionPlayerFixture;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
@@ -14,6 +18,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -22,6 +27,35 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NaiCommandTest {
+
+    @AfterEach
+    void resetRegionOwnership() {
+        RegionOwnership.reset();
+    }
+
+    @Test
+    void testDefersAndSkipsTheWorldWhenTheRegionIsNotOwned() {
+        AtomicBoolean touched = new AtomicBoolean();
+        RegionOwnership.install(player -> false);
+        Player player = RegionPlayerFixture.throwing(touched);
+        assertTrue(NaiCommand.deferTestToOwner(player));
+        assertEquals("", NaiCommand.testContextWorld(player));
+        assertFalse(touched.get());
+    }
+
+    @Test
+    void testReadsTheWorldWhenTheRegionIsOwned() {
+        RegionOwnership.install(player -> true);
+        Player player = RegionPlayerFixture.named("Steve", "lobby");
+        assertFalse(NaiCommand.deferTestToOwner(player));
+        assertEquals("lobby", NaiCommand.testContextWorld(player));
+    }
+
+    @Test
+    void consoleTestIsNotDeferred() {
+        assertFalse(NaiCommand.deferTestToOwner(null));
+        assertEquals("", NaiCommand.testContextWorld(null));
+    }
 
     @Test
     void testTraceNamesThePlayerAndTheNotice() {

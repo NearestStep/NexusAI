@@ -334,7 +334,7 @@ Other plugins can listen for generation, character actions, and moderation flags
 
 One real model call fires `NexusPreGenerateEvent`, then zero or more `NexusProviderErrorEvent`, then exactly one of `NexusPostGenerateEvent` or `NexusGenerateFailEvent`. A cache hit, an in-flight join, and a pooled answer do not fire those events. Moderation does not fire them either. A placeholder, `/nai talk` (including a greeting), a pool refill, prewarm, `/nai test`, and a dialogue summary that is refused by a limit, a quota, or a pause fires neither Pre nor Fail. Fail without Pre is allowed only for an API call, and an API call fires Fail for every failure, including one that never reached HTTP. Pre is after admission and before the first HTTP attempt. Post carries the cleaned text and is fired before that text is written to the cache or the future is completed. Cancelling Pre skips HTTP, releases the quota reservation, and completes as `CANCELLED`.
 
-Those four events, plus `NexusProviderErrorEvent` and `NexusModerationFlagEvent`, are asynchronous. They run on a `nexusai-http-*` thread or an `HttpClient` thread, never on a region thread. A handler that blocks holds that worker. `NexusActionEvent` is synchronous on the thread that is about to run the command. On Paper that thread is the main thread, so a listener sees `Bukkit.isPrimaryThread()` as true. A player action on Folia must also see `Bukkit.isOwnedByCurrentRegion(player)`. That Folia check is required in the later Folia smoke (PR9b). `NexusProviderErrorEvent` also fires for a failed moderation HTTP attempt. `NexusModerationFlagEvent` fires after the moderation log line and before the staff notice.
+Those four events, plus `NexusProviderErrorEvent` and `NexusModerationFlagEvent`, are asynchronous. They run on a `nexusai-http-*` thread or an `HttpClient` thread, never on a region thread. A handler that blocks holds that worker. `NexusActionEvent` is synchronous on the thread that is about to run the command. On Paper that thread is the main thread, so a listener sees `Bukkit.isPrimaryThread()` as true. A player action on Folia must also see `Bukkit.isOwnedByCurrentRegion(player)`. Folia smoke checks that ownership. `NexusProviderErrorEvent` also fires for a failed moderation HTTP attempt. `NexusModerationFlagEvent` fires after the moderation log line and before the staff notice.
 
 The order, the threads, and a listener example are in [docs/api.md](docs/api.md). Handlers must be fast. A call slower than 50 ms logs one warning per event class per five minutes, with the listener plugin names.
 
@@ -572,7 +572,7 @@ shop_tip:
 
 Register with Bukkit's services manager (`softdepend: [NexusAI]`, compile against the NexusAI jar). `NexusAIApi.registerContextProvider` is the same registry. `ServicePriority` does not set the order. Order is `priority()` (lower first), then `id()`. The id matches `[a-z0-9_]{1,32}`. A duplicate id keeps the first plugin and logs one warning. An invalid id is ignored. Disabling the owner plugin removes its provider from `/nai status` without `/nai reload`. The registry itself survives reload.
 
-`provide()` runs on `nexusai-context-N` (2 daemon threads, queue of 256). It is never called on the main thread. Return a future immediately. If the call is still running when its timeout expires, NexusAI interrupts that thread. A provider that blocks, including one that sleeps, should stop when it is interrupted. The timed-out value is skipped. A full queue skips the provider. Each provider is limited to `min(provider.timeout(), context.max-provider-timeout-millis)` (default ceiling 200 ms, provider default 100 ms). The whole collect is limited to `context.total-timeout-millis` (300 ms). A timeout or an exception skips that provider. The collect does not fail the request. After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is suspended for `context.suspend-seconds` (60) and `/nai status` shows `suspended until`. `ContextRequest` has no `Player`. Read Bukkit state on the main thread (event or sync timer) into your own map, and return that map from `provide()`.
+`provide()` runs on `nexusai-context-N` (2 daemon threads, queue of 256). It is never called on the main thread on Paper or on a region thread on Folia. Return a future immediately. If the call is still running when its timeout expires, NexusAI interrupts that thread. A provider that blocks, including one that sleeps, should stop when it is interrupted. The timed-out value is skipped. A full queue skips the provider. Each provider is limited to `min(provider.timeout(), context.max-provider-timeout-millis)` (default ceiling 200 ms, provider default 100 ms). The whole collect is limited to `context.total-timeout-millis` (300 ms). A timeout or an exception skips that provider. The collect does not fail the request. After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is suspended for `context.suspend-seconds` (60) and `/nai status` shows `suspended until`. `ContextRequest` has no `Player`. Read Bukkit state on the main thread on Paper, or on the region owner's thread on Folia, into your own map, and return that map from `provide()`.
 
 Each value is untrusted. NexusAI always removes `§`, legacy `&` codes, hex, MiniMessage, and JSON click/hover components, even when `sanitize.allow-markup` is true. Newlines become spaces. The line is cut to `context.max-chars-per-provider` on a code point, then `…`. Lines are `id: value`, highest priority first. Lines that do not fit in `context.max-chars` are dropped whole, from the end. The block is wrapped in `§§§ PLAYER INPUT §§§` … `§§§ END §§§`, so the player-input guard is sent. For `cached_`, the block is appended to the user prompt (`Player context:` plus the wrapped block) and is part of the cache key. For `/nai talk`, it is inserted in the character system after the sheet and after a stored dialogue summary, and still before the format instruction. Values are not logged.
 
@@ -597,6 +597,7 @@ package io.github.neareststep.nexusai.context;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.api.NexusContextProvider;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -612,14 +613,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Example context provider. A sync timer on the main thread reads online balances into a map.
- * {@link #provide} only returns that map and does not touch Bukkit.
+ * Example context provider. A global-region timer reads online balances into a map.
+ * On Paper that timer is the main thread. On Folia each balance is read on the region
+ * owner's thread. {@link #provide} only returns that map and does not touch Bukkit.
  * Vault is optional: {@code Economy#getBalance} is called by reflection when the plugin is installed.
  * Compile this class against the NexusAI jar ({@code compileOnly}). Register with {@code softdepend: [NexusAI]}.
  */
 public final class ExampleBalanceProvider implements NexusContextProvider, Listener {
 
     private final ConcurrentHashMap<UUID, String> balances = new ConcurrentHashMap<>();
+    private Plugin owner;
+    private ScheduledTask refreshTask;
 
     @Override
     public String id() {
@@ -645,14 +649,18 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     public void register(Plugin plugin) {
+        this.owner = plugin;
         Bukkit.getServicesManager().register(NexusContextProvider.class, this, plugin, ServicePriority.Normal);
         Bukkit.getPluginManager().registerEvents(this, plugin);
-        Bukkit.getScheduler().runTaskTimer(plugin, this::refresh, 100L, 100L);
+        this.refreshTask = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, task -> refresh(), 100L, 100L);
     }
 
     public void shutdown(Plugin plugin) {
         Bukkit.getServicesManager().unregister(NexusContextProvider.class, this);
-        Bukkit.getScheduler().cancelTasks(plugin);
+        if (refreshTask != null) {
+            refreshTask.cancel();
+            refreshTask = null;
+        }
     }
 
     @EventHandler
@@ -671,9 +679,16 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     private void refresh() {
+        Plugin plugin = owner;
+        if (plugin == null) {
+            return;
+        }
         Object economy = economy();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            remember(player.getUniqueId(), balance(economy, player));
+            if (player == null) {
+                continue;
+            }
+            player.getScheduler().run(plugin, task -> remember(player.getUniqueId(), balance(economy, player)), null);
         }
     }
 

@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.moderation;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -38,12 +39,23 @@ public final class FoliaStaffNotifier implements StaffNotifier {
 
     private void deliver(String text) {
         for (Player online : Bukkit.getOnlinePlayers()) {
-            if (online == null || !online.isOnline() || !online.hasPermission("nexusai.moderation.notify")) {
+            if (online == null) {
                 continue;
             }
-            online.getScheduler().run(plugin, task -> online.sendMessage(text), () ->
+            if (RegionOwnership.owned(online)) {
+                notifyIfStaff(online, text);
+                continue;
+            }
+            online.getScheduler().run(plugin, task -> notifyIfStaff(online, text), () ->
                     plugin.getLogger().fine("Skipped a moderation notice because the staff member left"));
         }
+    }
+
+    private static void notifyIfStaff(Player online, String text) {
+        if (online == null || !online.isOnline() || !online.hasPermission("nexusai.moderation.notify")) {
+            return;
+        }
+        online.sendMessage(text);
     }
 
     static String safe(String value, int maxCodePoints) {

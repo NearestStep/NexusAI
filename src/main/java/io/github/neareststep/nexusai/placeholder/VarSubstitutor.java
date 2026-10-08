@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.placeholder;
 
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import me.clip.placeholderapi.PlaceholderAPI;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -53,6 +54,9 @@ public final class VarSubstitutor {
             return template;
         }
         if (player == null) {
+            return "";
+        }
+        if (!RegionOwnership.owned(player)) {
             return "";
         }
         if (Bukkit.getPluginManager() == null

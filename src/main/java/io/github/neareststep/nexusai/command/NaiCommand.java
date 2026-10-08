@@ -20,6 +20,7 @@ import io.github.neareststep.nexusai.config.QueueStrategy;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
@@ -490,7 +491,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleTest(CommandSender sender, MessageService messages, String[] args) {
-        if (sender instanceof Player player && !ownsRegion(player)) {
+        if (sender instanceof Player player && deferTestToOwner(player)) {
             player.getScheduler().run(plugin, scheduled -> handleTest(sender, plugin.getMessageService(), args), () ->
                     plugin.getLogger().fine("Skipped /nai test because the player is no longer valid"));
             return;
@@ -541,8 +542,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                     && namedPrompt.context().active()
                     && plugin.getPluginConfig().contextSettings().enabled()
                     && plugin.getContextService() != null) {
-                org.bukkit.Location location = player.getLocation();
-                String world = location.getWorld() == null ? "" : location.getWorld().getName();
+                String world = testContextWorld(player);
                 ContextRequest request = new ContextRequest(
                         player.getUniqueId(),
                         player.getName(),
@@ -692,14 +692,43 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         return PlayerInput.wrap(raw);
     }
 
+    /**
+     * A player command that does not already own the player is moved to that player's region.
+     * Console senders are not players, so they are not deferred.
+     */
+    static boolean deferTestToOwner(Player player) {
+        return player != null && !ownsRegion(player);
+    }
+
+    /**
+     * World hint for a player {@code /nai test}. Empty when this thread does not own the player.
+     */
+    static String testContextWorld(Player player) {
+        if (player == null || !ownsRegion(player)) {
+            return "";
+        }
+        try {
+            org.bukkit.Location location = player.getLocation();
+            if (location == null || location.getWorld() == null || location.getWorld().getName() == null) {
+                return "";
+            }
+            return location.getWorld().getName();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     private static boolean ownsRegion(Player player) {
+        if (RegionOwnership.installed()) {
+            return RegionOwnership.owned(player);
+        }
         try {
             if (Bukkit.getServer() == null) {
                 return true;
             }
             return Bukkit.isOwnedByCurrentRegion(player);
         } catch (Throwable ignored) {
-            return true;
+            return false;
         }
     }
 

@@ -125,7 +125,7 @@ Each new request starts at the next available row, then walks the circle. A row 
 A prompt with no `context:` key is unchanged. To attach a short line (balance, rank, quest):
 
 1. `softdepend: [NexusAI]` in your `plugin.yml`. Compile against the NexusAI jar (`compileOnly`). There is no separate API jar.
-2. Implement `io.github.neareststep.nexusai.api.NexusContextProvider`. `id()` matches `[a-z0-9_]{1,32}`. `provide(ContextRequest)` is called on `nexusai-context-N`, never on the main thread. Return a future immediately. `ContextRequest` has no `Player`. Read Bukkit state on the main thread into your own map, and return that map from `provide()`.
+2. Implement `io.github.neareststep.nexusai.api.NexusContextProvider`. `id()` matches `[a-z0-9_]{1,32}`. `provide(ContextRequest)` is called on `nexusai-context-N`, never on the main thread on Paper or on a region thread on Folia. Return a future immediately. `ContextRequest` has no `Player`. Read Bukkit state on the main thread on Paper, or on the region owner's thread on Folia, into your own map, and return that map from `provide()`.
 3. Register in `onEnable`:
 
 ```java

@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.moderation;
 
 import io.github.neareststep.nexusai.NexusAI;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -32,12 +33,23 @@ public final class ChatModerationListener implements Listener {
         if (player == null) {
             return;
         }
-        service.submit(
-                player.getUniqueId(),
-                player.getName(),
-                plain(event.message()),
-                player.hasPermission("nexusai.moderation.bypass")
-        );
+        java.util.UUID playerId = player.getUniqueId();
+        String text = plain(event.message());
+        if (RegionOwnership.owned(player)) {
+            submit(service, player, playerId, text);
+            return;
+        }
+        player.getScheduler().run(plugin, task -> {
+            if (!player.isOnline()) {
+                return;
+            }
+            submit(service, player, playerId, text);
+        }, () -> plugin.getLogger().fine("Skipped chat moderation because the player left"));
+    }
+
+    private static void submit(ModerationService service, Player player, java.util.UUID playerId, String text) {
+        String name = player.getName();
+        service.submit(playerId, name == null ? "" : name, text, player.hasPermission("nexusai.moderation.bypass"));
     }
 
     static String plain(Component component) {
