@@ -72,12 +72,13 @@ def main() -> int:
             print(f"events probe {probe.name}")
             check_api = True
         mock_port = free_port()
-        start_mock(mock_port)
+        mock = start_mock(mock_port)
         write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_knowledge_fixture(work / "plugins" / "NexusAI")
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api)
+        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, mock)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
@@ -168,6 +169,8 @@ class MockHandle:
         self._lock = threading.Lock()
         self._json_invalid_once = False
         self._json_length_once = False
+        self._last_body = ""
+        self._knowledge_body = ""
         self.server: ThreadingHTTPServer | None = None
 
     def add(self) -> int:
@@ -179,6 +182,18 @@ class MockHandle:
     def count(self) -> int:
         with self._lock:
             return self._count
+
+    def note_body(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", errors="replace")
+        with self._lock:
+            self._last_body = text
+            if "----- KNOWLEDGE -----" in text:
+                self._knowledge_body = text
+
+    @property
+    def knowledge_body(self) -> str:
+        with self._lock:
+            return self._knowledge_body or self._last_body
 
     def close(self) -> None:
         if self.server is not None:
@@ -325,6 +340,7 @@ def start_mock(
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length) if length else b""
             number = handle.add()
+            handle.note_body(raw)
             usage_mode = _mock_choice(self.headers, self.path, "usage", usage)
             forced = _mock_choice(self.headers, self.path, "status", status_mode)
             json_mode = _mock_choice(self.headers, self.path, "json", None)
@@ -480,6 +496,41 @@ def write_server(
     (work / "server.properties").write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_knowledge_fixture(folder: Path) -> None:
+    """A keywords prompt and a small rules file. /nai test must select the appeal paragraph."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "prompts.yml").write_text(
+        "\n".join([
+            "config-version: 1",
+            "rules_help:",
+            '  prompt: "Answer the player question about server rules."',
+            "  knowledge:",
+            "    - rules",
+            "  knowledge-select: keywords",
+            "  knowledge-keywords:",
+            "    - appeal",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    knowledge = folder / "knowledge"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    (knowledge / "rules.md").write_text(
+        "\n".join([
+            "# Harbor",
+            "",
+            "Ships pay the dock fee before they unload.",
+            "",
+            "# Appeals",
+            "",
+            "<!-- keywords: grief, steal -->",
+            "Write to staff to file an appeal after a ban.",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
 def boot(
     work: Path,
     version: str,
@@ -488,6 +539,7 @@ def boot(
     mock_port: int,
     timeout: int,
     check_api: bool = False,
+    mock: MockHandle | None = None,
 ) -> int:
     log_chunks: list[str] = []
 
@@ -567,6 +619,10 @@ def boot(
             verify_event_order("".join(log_chunks))
             verify_json(process, log_chunks, rcon_port, min(timeout, 90))
 
+        if mock is None:
+            raise RuntimeError("knowledge smoke has no mock endpoint")
+        verify_knowledge(process, log_chunks, rcon_port, mock, min(timeout, 90))
+
         # 26.2 closes the RCON socket as soon as stop begins, before the response
         # packet is finished. The command still reached the server.
         try:
@@ -584,6 +640,36 @@ def boot(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+def verify_knowledge(process, chunks: list[str], rcon_port: int, mock: MockHandle, timeout: int) -> None:
+    """ /nai test on a keywords prompt. Prints KNOWLEDGE OK. A miss is a failure."""
+    reply = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai test rules_help"))
+    print("--- /nai test rules_help ---")
+    print(reply)
+    if "Knowledge:" not in reply or "rules#" not in reply or "(keywords)" not in reply:
+        raise RuntimeError("/nai test did not print the keyword selection")
+    deadline = time.time() + timeout
+    body = ""
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"server exited during knowledge smoke with code {process.returncode}")
+        body = mock.knowledge_body
+        if "----- KNOWLEDGE -----" in body and "appeal" in body.lower():
+            break
+        time.sleep(0.2)
+    else:
+        raise RuntimeError("keyword knowledge block was not sent to the mock")
+    if "<!--" in body:
+        raise RuntimeError("a knowledge HTML comment was sent to the model")
+    for piece in ("----- KNOWLEDGE -----", "[rules]", "# Appeals"):
+        if piece not in body:
+            raise RuntimeError(f"knowledge body is missing {piece}")
+    if "appeal" not in body.lower():
+        raise RuntimeError("the appeal paragraph was not selected")
+    if "dock fee" in body.lower():
+        raise RuntimeError("the harbor paragraph was sent, so keyword selection did not run")
+    print("KNOWLEDGE OK")
 
 
 def verify_json(process, chunks: list[str], rcon_port: int, timeout: int) -> None:

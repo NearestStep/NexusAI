@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Надсилаю тестовий запит..."
   test-ok: "{prefix}&aВідповідь &8({latency_ms} мс)&a: &f{answer}"
   test-fail: "{prefix}&cТест не вдався &8({latency_ms} мс)&c: &f{error}"
+  test-knowledge: "{prefix}&7Знання: &f{selection}"
   version: "{prefix}&fВерсія: &a{version}&7. Автор: &f{authors}"
   prompts-header: "{prefix}&eІменовані промпти &8({count})&e:"
   prompts-line: "&7- &f{id}"

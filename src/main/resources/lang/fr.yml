@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Envoi d'une requête de test..."
   test-ok: "{prefix}&aRéponse &8({latency_ms} ms)&a : &f{answer}"
   test-fail: "{prefix}&cTest échoué &8({latency_ms} ms)&c : &f{error}"
+  test-knowledge: "{prefix}&7Connaissances: &f{selection}"
   version: "{prefix}&fVersion : &a{version}&7. Auteur : &f{authors}"
   prompts-header: "{prefix}&ePrompts nommés &8({count})&e :"
   prompts-line: "&7- &f{id}"

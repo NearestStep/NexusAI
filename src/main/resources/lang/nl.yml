@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Testverzoek wordt verzonden..."
   test-ok: "{prefix}&aAntwoord &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cTest mislukt &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7Kennis: &f{selection}"
   version: "{prefix}&fVersie: &a{version}&7. Auteur: &f{authors}"
   prompts-header: "{prefix}&eBenoemde prompts &8({count})&e:"
   prompts-line: "&7- &f{id}"

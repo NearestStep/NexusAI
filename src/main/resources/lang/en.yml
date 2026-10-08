@@ -25,6 +25,7 @@ command:
   test-sending: "{prefix}&7Sending a test request..."
   test-ok: "{prefix}&aAnswer &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cTest failed &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7Knowledge: &f{selection}"
   version: "{prefix}&fVersion: &a{version}&7. Author: &f{authors}"
   prompts-header: "{prefix}&eNamed prompts &8({count})&e:"
   prompts-line: "&7- &f{id}"

@@ -23,7 +23,9 @@ import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.json.StructuredOutputSupport;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.moderation.ChatModerationListener;
 import io.github.neareststep.nexusai.moderation.FoliaStaffNotifier;
@@ -152,6 +154,7 @@ public final class NexusAI extends JavaPlugin {
         logHttpLimitWarning();
         logPluginApiWarnings();
         logQuotaWarnings();
+        logKnowledgeWarnings();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
                 + ", base-url: " + pluginConfig.getBaseUrl()
@@ -252,6 +255,7 @@ public final class NexusAI extends JavaPlugin {
         logHttpLimitWarning();
         logPluginApiWarnings();
         logQuotaWarnings();
+        logKnowledgeWarnings();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
@@ -499,6 +503,14 @@ public final class NexusAI extends JavaPlugin {
 
     private void logQuotaWarnings() {
         for (String warning : pluginConfig.quotaWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
+    private void logKnowledgeWarnings() {
+        for (String warning : pluginConfig.knowledgeWarnings()) {
             if (warning != null && !warning.isBlank()) {
                 getLogger().warning(warning);
             }
@@ -867,6 +879,7 @@ public final class NexusAI extends JavaPlugin {
                 }
             }
         }
+        noteKnowledgeModes();
         List<String> poolPrompts = new ArrayList<>();
         for (PoolEntry entry : pluginConfig.getPoolEntries()) {
             poolPrompts.add(entry.prompt());
@@ -947,11 +960,47 @@ public final class NexusAI extends JavaPlugin {
                 new File(getDataFolder(), "knowledge").toPath(),
                 pluginConfig.knowledgeMaxChars(),
                 pluginConfig.knowledgeMaxFileChars(),
+                pluginConfig.keywordSettings(),
+                false,
                 warnings,
                 getLogger(),
                 loggingSecrets());
         for (String warning : warnings) {
             getLogger().warning(warning);
+        }
+    }
+
+    /**
+     * Full-mode truncation is warned only for files a full-mode prompt actually lists.
+     * Characters that list knowledge while selection is full get one info line: talk does not
+     * attach those files until {@code knowledge-select} is {@code keywords}.
+     */
+    private void noteKnowledgeModes() {
+        List<String> fullFiles = new ArrayList<>();
+        List<String> talkFull = new ArrayList<>();
+        for (String id : promptCatalog.ids()) {
+            NamedPrompt prompt = promptCatalog.find(id).orElse(null);
+            if (prompt == null || prompt.knowledge().isEmpty()) {
+                continue;
+            }
+            if (KnowledgeRequests.effective(prompt.knowledgeSelect(), pluginConfig.knowledgeSelect())
+                    != KnowledgeSelect.FULL) {
+                continue;
+            }
+            for (String name : prompt.knowledge()) {
+                if (!fullFiles.contains(name)) {
+                    fullFiles.add(name);
+                }
+            }
+            if (prompt.dialogue().defined() || !prompt.actions().isEmpty()) {
+                talkFull.add(id);
+            }
+        }
+        knowledgeBase.warnFullModeTruncation(fullFiles, getLogger());
+        if (!talkFull.isEmpty()) {
+            getLogger().info("Characters " + String.join(", ", talkFull)
+                    + " list knowledge while selection is full. /nai talk does not attach those files."
+                    + " Set knowledge-select: keywords to send matching paragraphs.");
         }
     }
 

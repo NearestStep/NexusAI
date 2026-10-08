@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7正在发送测试请求..."
   test-ok: "{prefix}&a回答 &8({latency_ms} ms)&a：&f{answer}"
   test-fail: "{prefix}&c测试失败 &8({latency_ms} ms)&c：&f{error}"
+  test-knowledge: "{prefix}&7知识: &f{selection}"
   version: "{prefix}&f版本：&a{version}&7。作者：&f{authors}"
   prompts-header: "{prefix}&e已命名提示词 &8({count})&e:"
   prompts-line: "&7- &f{id}"

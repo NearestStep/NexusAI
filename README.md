@@ -60,7 +60,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
 | `fallback-model` | `provider` and `model`. Leave either blank to disable it. A prompt may set its own pair. See [Providers, keys, and the model queue](#providers-keys-and-the-model-queue) |
-| `knowledge` | `max-chars` (one request) and `max-file-chars` (one file). Files are under `plugins/NexusAI/knowledge/`. See [Knowledge](#knowledge) |
+| `knowledge` | `max-chars` (one request), `max-file-chars` (one file in `full` mode), and `select` (`full` or `keywords`). Files are under `plugins/NexusAI/knowledge/`. See [Knowledge](#knowledge) |
 | `moderation` | Opt-in chat check. `enabled` (default **false**), `provider`, `model`, `max-checks-per-minute`, `player-cooldown-seconds`, `min-length`, `system-prompt`, `temperature`, `max-tokens`. See [Chat moderation](#chat-moderation) |
 | `dialogue` | `/nai talk` limits. `enabled` defaults to **true**. See [Dialogues](#dialogues) |
 | `actions` | Tool actions for dialogues. `enabled` defaults to **true**. `log` defaults to **true**. See [Actions](#actions) |
@@ -362,7 +362,19 @@ guide:
     - rules
 ```
 
-`lore.md` (or `lore.txt` when no `.md` is present) and `rules` are concatenated into the system message inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`, after the admin system prompt and before the format instruction. When the request contains wrapped player input, the player-input guard stays last. `knowledge.max-chars` in `config.yml` caps one request. `knowledge.max-file-chars` caps one file. Truncation logs one warning. An unknown name logs a warning when prompts are loaded. `/nai reload` reads the folder again. The cache key includes a hash of the injected text, so editing a file changes the cached answer. There is no vector search and no embeddings.
+`lore.md` (or `lore.txt` when no `.md` is present) and `rules` are concatenated into the system message inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`, after the admin system prompt and before the format instruction. When the request contains wrapped player input, the player-input guard stays last. `knowledge.max-chars` in `config.yml` caps one request. `knowledge.max-file-chars` caps one file in `full` mode. Truncation logs one warning, and in `full` mode that warning is only for a file a `full` prompt actually lists. An unknown name logs a warning when prompts are loaded. `/nai reload` reads the folder again and rebuilds the keyword index. The cache key includes a hash of the injected text, so a different selection is a different cached answer. There is no vector search and no embeddings.
+
+`knowledge.select` defaults to `full`, which is the behaviour above. `keywords` sends only paragraphs that match the request. A prompt may set `knowledge-select` (`full` or `keywords`) and `knowledge-keywords` (words always added to the query, including words that are also stop words). Those keys are optional and are not written into an existing `prompts.yml`.
+
+A paragraph is the text between blank lines. A line that starts with `#` is a section heading: it is not sent as its own paragraph, and its words count toward every paragraph in that section. `<!-- keywords: ban, mute -->` inside a paragraph, or in the blank-line block just before it, adds words for that paragraph. In `keywords` mode every `<!-- ... -->` comment is removed before the text is sent. In `full` mode the file is sent as written, including comments, so do not leave secrets in comments. A paragraph longer than `knowledge.keywords.max-paragraph-chars` is cut at a sentence end. The block is still capped by `knowledge.max-chars`.
+
+`knowledge.keywords.max-file-chars` caps a file only in `keywords` mode (default 200000). `on-no-match` is `none` (no block) or `first` (the first paragraph of each listed file). `min-matches` is how many query words a paragraph needs. `stop-words` adds words to the built-in English and Russian lists. Matching is exact, or a shared 5-character prefix for words of length 5 or more (`правила` / `правилам`, `teleport` / `teleporting`). There is no stemming dictionary. Chinese, Japanese, and Korean runs are matched as adjacent character pairs.
+
+`/nai talk` attaches that block only when the character's effective mode is `keywords`. It is placed after the summary and before the context block and the format instruction. The player-input guard stays last. The query is the current player line, the previous player line, and `knowledge-keywords`. A greeting uses only `knowledge-keywords`. A character that lists knowledge while the mode is `full` behaves as before, and one info line at load names those characters. Placeholders, the pool, prewarm, and `/nai test` use the resolved prompt text plus `knowledge-keywords`. `GenerationRequest.knowledgeQuery` replaces that prompt text for `generate` and `generateJson`. The context block is not part of the query.
+
+`/nai test` prints `command.test-knowledge` before the request when the prompt lists knowledge, for example `Knowledge: rules#3, faq#1 (keywords)` or `Knowledge: rules, faq (full)`.
+
+Break long files into paragraphs. One paragraph for the whole file is still one candidate, cut at `max-paragraph-chars`.
 
 ## Chat moderation
 

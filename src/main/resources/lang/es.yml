@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Enviando una solicitud de prueba..."
   test-ok: "{prefix}&aRespuesta &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cPrueba fallida &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7Conocimiento: &f{selection}"
   version: "{prefix}&fVersión: &a{version}&7. Autor: &f{authors}"
   prompts-header: "{prefix}&ePrompts con nombre &8({count})&e:"
   prompts-line: "&7- &f{id}"

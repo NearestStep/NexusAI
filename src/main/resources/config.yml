@@ -129,12 +129,29 @@ fallback-model:
 # A prompt lists file names without the extension: knowledge: [lore, rules]
 # The text is added to the system message after the admin system prompt and before the format instruction.
 # When the request contains wrapped player input, the player-input guard stays last.
-# max-chars is the cap for one request. max-file-chars is the cap for one file.
-# Longer text is truncated and one warning is logged. /nai reload reads the folder again.
+# max-chars is the cap for one request. max-file-chars is the cap for one file in full mode.
+# Longer text is truncated. In full mode that warning is logged only for files a full-mode prompt uses.
+# select: full sends whole files (the 1.1 behaviour). keywords sends only paragraphs that match the request.
+# There is no vector search and no embeddings.
+# /nai reload reads the folder again.
 # The example file is created once and is never overwritten.
 knowledge:
   max-chars: 6000
   max-file-chars: 4000
+  select: full
+  keywords:
+    # Paragraphs sent per request. 1..50.
+    max-paragraphs: 6
+    # A longer paragraph is cut at a sentence end. 100..10000.
+    max-paragraph-chars: 1200
+    # File cap in keywords mode. max-file-chars applies to full mode only. 1000..2000000.
+    max-file-chars: 200000
+    # Matching words needed for a paragraph. 1..10.
+    min-matches: 1
+    # When nothing matches: none (no knowledge block) or first (first paragraph of each listed file).
+    on-no-match: none
+    # Extra words to ignore, added to the built-in English and Russian lists.
+    stop-words: []
 
 # format: presets. Prompts inherit formats.default when they omit format.
 # A reply cut off by max_tokens keeps a sentence ending only past the halfway point.

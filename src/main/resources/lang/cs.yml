@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Odesílání testovacího požadavku..."
   test-ok: "{prefix}&aOdpověď &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cTest selhal &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7Znalosti: &f{selection}"
   version: "{prefix}&fVerze: &a{version}&7. Autor: &f{authors}"
   prompts-header: "{prefix}&ePojmenované prompty &8({count})&e:"
   prompts-line: "&7- &f{id}"

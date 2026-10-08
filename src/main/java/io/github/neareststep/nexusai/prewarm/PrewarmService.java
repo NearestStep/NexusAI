@@ -11,6 +11,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
@@ -182,7 +183,8 @@ public final class PrewarmService {
                 }
             }
             KnowledgeComposer.Prepared composed = KnowledgeComposer.prepare(
-                    overrides, config.getSystemPrompt(), knowledge, prompt.knowledge());
+                    overrides, config.getSystemPrompt(), knowledge, prompt.knowledge(),
+                    KnowledgeRequests.of(prompt, config.knowledgeSelect(), text));
             overrides = composed.overrides();
             knowledgeHash = composed.cacheToken();
             ttl = prompt.ttl();

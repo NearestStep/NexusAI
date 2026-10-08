@@ -33,6 +33,7 @@ class LocaleFilesTest {
             "command.test-sending",
             "command.test-ok",
             "command.test-fail",
+            "command.test-knowledge",
             "command.status-last-error",
             "command.status-provider-pause",
             "command.status-queue-strategy",

@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.budget.MissingUsage;
 import io.github.neareststep.nexusai.budget.QuotaSettings;
+import io.github.neareststep.nexusai.knowledge.KeywordSettings;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
@@ -100,6 +102,9 @@ public final class PluginConfig {
     private FallbackModel fallbackModel = FallbackModel.none();
     private int knowledgeMaxChars = 6000;
     private int knowledgeMaxFileChars = 4000;
+    private KnowledgeSelect knowledgeSelect = KnowledgeSelect.FULL;
+    private KeywordSettings keywordSettings = KeywordSettings.defaults();
+    private final List<String> knowledgeWarnings = new ArrayList<>();
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
     private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
@@ -141,6 +146,7 @@ public final class PluginConfig {
         httpLimitWarnings.clear();
         pluginApiWarnings.clear();
         quotaWarnings.clear();
+        knowledgeWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -228,6 +234,7 @@ public final class PluginConfig {
                 config.getString("fallback-model.model", ""));
         this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
         this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
+        readKnowledge(config);
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
@@ -337,6 +344,72 @@ public final class PluginConfig {
             return 0L;
         }
         return value;
+    }
+
+    private void readKnowledge(FileConfiguration config) {
+        String rawSelect = config.getString("knowledge.select", "full");
+        KnowledgeSelect parsed = parseKnowledgeSelect(rawSelect);
+        if (parsed == null) {
+            this.knowledgeSelect = KnowledgeSelect.FULL;
+            knowledgeWarnings.add("Unknown knowledge.select '" + rawSelect + "'. Using full.");
+        } else {
+            this.knowledgeSelect = parsed;
+        }
+        int maxParagraphs = clampKnowledge(config, "knowledge.keywords.max-paragraphs", 6, 1, 50);
+        int maxParagraphChars = clampKnowledge(config, "knowledge.keywords.max-paragraph-chars", 1200, 100, 10_000);
+        int maxFileChars = clampKnowledge(config, "knowledge.keywords.max-file-chars", 200_000, 1000, 2_000_000);
+        int minMatches = clampKnowledge(config, "knowledge.keywords.min-matches", 1, 1, 10);
+        String rawMatch = config.getString("knowledge.keywords.on-no-match", "none");
+        KeywordSettings.OnNoMatch onNoMatch = parseOnNoMatch(rawMatch);
+        if (onNoMatch == null) {
+            onNoMatch = KeywordSettings.OnNoMatch.NONE;
+            knowledgeWarnings.add("Unknown knowledge.keywords.on-no-match '" + rawMatch + "'. Using none.");
+        }
+        List<String> stops = new ArrayList<>();
+        for (String word : config.getStringList("knowledge.keywords.stop-words")) {
+            if (word != null && !word.isBlank()) {
+                stops.add(word.trim());
+            }
+        }
+        this.keywordSettings = new KeywordSettings(
+                maxParagraphs, maxParagraphChars, maxFileChars, minMatches, onNoMatch, stops);
+    }
+
+    private int clampKnowledge(FileConfiguration config, String key, int fallback, int min, int max) {
+        int value = config.getInt(key, fallback);
+        int clamped = clamp(value, min, max);
+        if (clamped != value) {
+            knowledgeWarnings.add(key + " is " + value + ". It must be from " + min + " to " + max + ". Using " + clamped + ".");
+        }
+        return clamped;
+    }
+
+    private static KnowledgeSelect parseKnowledgeSelect(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String normalized = raw.trim().toLowerCase(Locale.ROOT);
+        if ("full".equals(normalized)) {
+            return KnowledgeSelect.FULL;
+        }
+        if ("keywords".equals(normalized)) {
+            return KnowledgeSelect.KEYWORDS;
+        }
+        return null;
+    }
+
+    private static KeywordSettings.OnNoMatch parseOnNoMatch(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String normalized = raw.trim().toLowerCase(Locale.ROOT);
+        if ("none".equals(normalized)) {
+            return KeywordSettings.OnNoMatch.NONE;
+        }
+        if ("first".equals(normalized)) {
+            return KeywordSettings.OnNoMatch.FIRST;
+        }
+        return null;
     }
 
     private void readPluginApi(FileConfiguration config) {
@@ -1202,6 +1275,18 @@ public final class PluginConfig {
 
     public int knowledgeMaxFileChars() {
         return knowledgeMaxFileChars;
+    }
+
+    public KnowledgeSelect knowledgeSelect() {
+        return knowledgeSelect == null ? KnowledgeSelect.FULL : knowledgeSelect;
+    }
+
+    public KeywordSettings keywordSettings() {
+        return keywordSettings == null ? KeywordSettings.defaults() : keywordSettings;
+    }
+
+    public List<String> knowledgeWarnings() {
+        return List.copyOf(knowledgeWarnings);
     }
 
     private static int positiveOrDefault(int value, int fallback) {

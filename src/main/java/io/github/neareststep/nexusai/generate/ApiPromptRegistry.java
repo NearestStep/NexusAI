@@ -275,7 +275,9 @@ public final class ApiPromptRegistry {
                 null,
                 DialogueProfile.absent(),
                 List.of(),
-                PromptContext.none());
+                PromptContext.none(),
+                definition.knowledgeSelect(),
+                definition.knowledgeKeywords());
     }
 
     private void releaseNamespaceIfUnused(String namespace, Plugin owner) {

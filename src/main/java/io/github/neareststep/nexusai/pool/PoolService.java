@@ -12,6 +12,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
@@ -210,7 +211,7 @@ public final class PoolService {
                 return;
             }
             String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
-            GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
+            GenerationOverrides overrides = overridesFor(configuredPrompt, poolKey).withNoticeId(configuredPrompt);
             CallTrace trace = CallTrace.start(
                     RequestOrigin.POOL, null, configuredPrompt == null ? "" : configuredPrompt, "");
             CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides, trace);
@@ -338,7 +339,7 @@ public final class PoolService {
         return false;
     }
 
-    private GenerationOverrides overridesFor(String configuredPrompt) {
+    private GenerationOverrides overridesFor(String configuredPrompt, String rendered) {
         PoolEntry entry = entriesByPrompt.get(configuredPrompt);
         GenerationOverrides entryOverrides = entry == null ? GenerationOverrides.none() : entry.overrides();
         NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
@@ -356,7 +357,8 @@ public final class PoolService {
                 merged,
                 config.getSystemPrompt(),
                 knowledge,
-                named == null ? List.of() : named.knowledge()
+                named == null ? List.of() : named.knowledge(),
+                KnowledgeRequests.of(named, config.knowledgeSelect(), rendered)
         ).overrides();
     }
 

@@ -25,6 +25,7 @@ command:
   test-sending: "{prefix}&7Отправляю тестовый запрос..."
   test-ok: "{prefix}&aОтвет &8({latency_ms} мс)&a: &f{answer}"
   test-fail: "{prefix}&cТест не удался &8({latency_ms} мс)&c: &f{error}"
+  test-knowledge: "{prefix}&7Знания: &f{selection}"
   version: "{prefix}&fВерсия: &a{version}&7. Автор: &f{authors}"
   prompts-header: "{prefix}&eИменованные промпты &8({count})&e:"
   prompts-line: "&7- &f{id}"

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -11,6 +12,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -43,6 +45,8 @@ public final class PromptCatalog {
             "dialogue",
             "actions",
             "knowledge",
+            "knowledge-select",
+            "knowledge-keywords",
             "fallback-model",
             "context"
     );
@@ -98,6 +102,8 @@ public final class PromptCatalog {
                     new io.github.neareststep.nexusai.dialogue.DialogueBinding.Result(
                             io.github.neareststep.nexusai.dialogue.DialogueProfile.absent(), List.of());
             List<String> knowledge = List.of();
+            KnowledgeSelect knowledgeSelect = null;
+            List<String> knowledgeKeywords = List.of();
             FallbackModel fallbackModel = null;
             PromptContext context = PromptContext.none();
             if (raw instanceof ConfigurationSection section) {
@@ -109,13 +115,16 @@ public final class PromptCatalog {
                 format = readFormat(key, section, warnings);
                 dialogue = io.github.neareststep.nexusai.dialogue.DialogueBinding.read(key, section, warnings);
                 knowledge = readKnowledge(key, section, warnings);
+                knowledgeSelect = readKnowledgeSelect(key, section, warnings);
+                knowledgeKeywords = readKnowledgeKeywords(key, section, warnings);
                 fallbackModel = readFallbackModel(key, section, warnings);
                 context = readContext(key, section, warnings);
                 warnUnknownSettings(key, section, warnings);
             }
             loaded.put(key, new NamedPrompt(
                     key, template, vars, ttl, fallback, maxPromptLength, overrides, format,
-                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions(), context));
+                    knowledge, fallbackModel, dialogue.profile(), dialogue.actions(), context,
+                    knowledgeSelect, knowledgeKeywords));
         }
         warnCollisions(loaded, warnings);
         return new Parsed(new PromptCatalog(loaded), true, null, List.copyOf(warnings));
@@ -448,6 +457,53 @@ public final class PromptCatalog {
             }
         }
         return List.copyOf(names);
+    }
+
+    /**
+     * {@code null} means inherit {@code knowledge.select}. An unknown value is ignored.
+     */
+    private static KnowledgeSelect readKnowledgeSelect(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("knowledge-select")) {
+            return null;
+        }
+        String raw = section.getString("knowledge-select", "");
+        String normalized = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+        if ("full".equals(normalized)) {
+            return KnowledgeSelect.FULL;
+        }
+        if ("keywords".equals(normalized)) {
+            return KnowledgeSelect.KEYWORDS;
+        }
+        warnings.add("Prompt '" + id + "' has unknown knowledge-select '" + raw + "'. It was ignored.");
+        return null;
+    }
+
+    private static List<String> readKnowledgeKeywords(String id, ConfigurationSection section, List<String> warnings) {
+        if (!section.contains("knowledge-keywords")) {
+            return List.of();
+        }
+        Object raw = section.get("knowledge-keywords");
+        List<?> items;
+        if (raw instanceof String text) {
+            items = List.of(text);
+        } else if (raw instanceof List<?> list) {
+            items = list;
+        } else {
+            warnings.add("Prompt '" + id + "' knowledge-keywords must be a list of words. It was ignored.");
+            return List.of();
+        }
+        List<String> words = new ArrayList<>();
+        for (Object item : items) {
+            if (item == null) {
+                continue;
+            }
+            String word = String.valueOf(item).trim();
+            if (word.isEmpty() || words.contains(word)) {
+                continue;
+            }
+            words.add(word);
+        }
+        return List.copyOf(words);
     }
 
     private static FallbackModel readFallbackModel(String id, ConfigurationSection section, List<String> warnings) {

@@ -38,6 +38,11 @@ config-version: 1
 #   fallback-model      provider and model tried once after the model queue fails for this call.
 #                       Omit it to use fallback-model from config.yml.
 #   knowledge           file names from plugins/NexusAI/knowledge without .md or .txt
+#   knowledge-select    full or keywords. Omit it to use knowledge.select from config.yml.
+#                       keywords sends matching paragraphs. full sends whole files.
+#                       /nai talk attaches knowledge only when the effective mode is keywords.
+#   knowledge-keywords  words always added to the keyword query, including stop words.
+#                       Any text, including non-Latin.
 #   context             provider ids, or all. Omitted prompts keep the 1.0.x text and cache key.
 #                       Ignored for pool.entries, prewarm, and generate_.
 #

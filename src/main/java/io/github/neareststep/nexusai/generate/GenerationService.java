@@ -45,6 +45,8 @@ import io.github.neareststep.nexusai.json.JsonRepair;
 import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import org.bukkit.entity.Player;
@@ -297,6 +299,7 @@ public final class GenerationService {
             return;
         }
         String prompt = PromptAssembly.userPrompt(lookup.template, lookup.named, request, facts);
+        String knowledgeText = request.knowledgeQuery().orElse(prompt);
         if (needsContext(request, lookup.named, current)) {
             ContextRequest contextRequest = new ContextRequest(
                     request.playerId().orElse(null),
@@ -306,10 +309,11 @@ public final class GenerationService {
                     ContextRequest.Purpose.PLACEHOLDER);
             current.context().collect(contextRequest, lookup.named.context()).whenComplete((block, error) ->
                     schedule(future, trace, () -> afterText(
-                            owner, request, current, trace, future, lookup, ContextBlock.appendUser(prompt, block))));
+                            owner, request, current, trace, future, lookup,
+                            ContextBlock.appendUser(prompt, block), knowledgeText)));
             return;
         }
-        afterText(owner, request, current, trace, future, lookup, prompt);
+        afterText(owner, request, current, trace, future, lookup, prompt, knowledgeText);
     }
 
     private void afterText(
@@ -319,9 +323,10 @@ public final class GenerationService {
             CallTrace trace,
             CompletableFuture<GenerationResult> future,
             Lookup lookup,
-            String prompt
+            String prompt,
+            String knowledgeText
     ) {
-        Prepared prepared = prepare(current, request, lookup, prompt, jsonSessions.get(future));
+        Prepared prepared = prepare(current, request, lookup, prompt, jsonSessions.get(future), knowledgeText);
         if (request.cacheMode() == CacheMode.CACHED) {
             Optional<AiCache.CachedAnswer> hit = current.cache().lookup(prepared.cacheKey);
             JsonSession session = jsonSessions.get(future);
@@ -1019,7 +1024,8 @@ public final class GenerationService {
             GenerationRequest request,
             Lookup lookup,
             String prompt,
-            JsonSession session
+            JsonSession session,
+            String knowledgeText
     ) {
         PluginConfig config = current.config();
         GenerationOverrides base = lookup.named == null
@@ -1060,8 +1066,14 @@ public final class GenerationService {
         } else {
             names = List.of();
         }
+        KnowledgeRequest knowledgeRequest = new KnowledgeRequest(
+                lookup.named == null
+                        ? config.knowledgeSelect()
+                        : KnowledgeRequests.effective(lookup.named.knowledgeSelect(), config.knowledgeSelect()),
+                knowledgeText,
+                lookup.named == null ? List.of() : lookup.named.knowledgeKeywords());
         KnowledgeComposer.Prepared knowledge = KnowledgeComposer.prepare(
-                merged, config.getSystemPrompt(), current.knowledge(), names);
+                merged, config.getSystemPrompt(), current.knowledge(), names, knowledgeRequest);
         GenerationOverrides overrides = knowledge.overrides();
         String token = PromptAssembly.knowledgeToken(request, knowledge.cacheToken());
         String format = overrides.formatOr(config.defaultFormatId());
