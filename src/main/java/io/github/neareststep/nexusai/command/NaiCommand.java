@@ -351,19 +351,48 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         UsageReport.View view = UsageReport.parse(args.length < 2 ? null : args[1]);
-        SenderTasks.run(plugin, sender, () -> {
-            MessageService current = plugin.getMessageService();
-            List<UsageReport.Line> lines = view == null
-                    ? UsageReport.unknown()
-                    : UsageReport.render(view, plugin.tokenSnapshot(), estimatedShare(current), this::playerLabel);
-            for (UsageReport.Line line : lines) {
-                Map<String, String> values = new LinkedHashMap<>(line.values());
-                if (values.containsKey("name")) {
-                    values.put("name", redact(values.get("name")));
-                }
-                current.send(sender, line.key(), values);
+        Runnable publish = () -> publishUsage(sender, view);
+        if (usageRepliesInline(sender)) {
+            publish.run();
+            return;
+        }
+        SenderTasks.run(plugin, sender, publish, plugin.getLogger());
+    }
+
+    /**
+     * Console and RCON are answered before the command returns.
+     * The figures are the in-memory token ledger, so this thread does not read a region.
+     * Folia RCON keeps only the text sent while the command method runs, and a later
+     * global-region task never reaches that packet or the server log.
+     * A player still hops: the chat line belongs on that player's region.
+     */
+    static boolean usageRepliesInline(CommandSender sender) {
+        return !(sender instanceof Player);
+    }
+
+    private void publishUsage(CommandSender sender, UsageReport.View view) {
+        MessageService current = plugin.getMessageService();
+        List<UsageReport.Line> lines = view == null
+                ? UsageReport.unknown()
+                : UsageReport.render(view, plugin.tokenSnapshot(), estimatedShare(current), this::playerLabel);
+        sendUsage(sender, current, lines, this::redact);
+    }
+
+    static void sendUsage(
+            CommandSender sender,
+            MessageService messages,
+            List<UsageReport.Line> lines,
+            java.util.function.UnaryOperator<String> redact
+    ) {
+        java.util.function.UnaryOperator<String> mask = redact == null ? text -> text : redact;
+        for (UsageReport.Line line : lines) {
+            Map<String, String> values = new LinkedHashMap<>(line.values());
+            if (values.containsKey("name")) {
+                String name = values.get("name");
+                values.put("name", mask.apply(name == null ? "" : name));
             }
-        }, plugin.getLogger());
+            messages.send(sender, line.key(), values);
+        }
     }
 
     private long tokensToday() {

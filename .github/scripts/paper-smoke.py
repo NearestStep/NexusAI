@@ -1437,20 +1437,27 @@ def verify_folia_status(rcon_port: int, mock_port: int) -> None:
         raise RuntimeError(" /nai status did not print whether quotas are on")
 
 
+def usage_line_seen(rcon_text: str, log_text: str) -> bool:
+    """True when /nai usage printed today's header in the RCON reply or the server log."""
+    needle = "Token usage today:"
+    return needle in strip_colors(rcon_text or "") or needle in strip_colors(log_text or "")
+
+
 def verify_folia_usage(process, chunks, rcon_port: int, timeout: int) -> None:
+    """RCON must see the usage header. The reply is sent before the command returns."""
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during /nai usage with code {process.returncode}")
-        last = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai usage"))
-        if "Token usage today:" in last or "Token usage today:" in strip_colors("".join(chunks)):
+        last = rcon("127.0.0.1", rcon_port, "smoke", "nai usage")
+        if usage_line_seen(last, "".join(chunks)):
             print("--- /nai usage ---")
-            print(last)
+            print(strip_colors(last))
             return
         time.sleep(0.5)
     print("--- /nai usage ---")
-    print(last)
+    print(strip_colors(last))
     raise RuntimeError("/nai usage did not print today's token usage")
 
 
@@ -1664,6 +1671,13 @@ def _smoke_self_check() -> None:
     _need("FOLIA TEST OK" in source, "strict test success line is missing")
     _need("def console_command(" in source, "console command helper is missing")
     _need('console_command(process, "nai test")' in source, "full-mode /nai test does not use the console")
+    _need('rcon("127.0.0.1", rcon_port, "smoke", "nai usage")' in source, "full-mode /nai usage left RCON")
+    moved = "console_command(process, " + '"nai usage")'
+    _need(moved not in source, "full-mode /nai usage moved off RCON")
+    _need(usage_line_seen("Token usage today: 0", ""), "RCON usage header was ignored")
+    _need(usage_line_seen("", "[NexusAI] Token usage today:"), "logged usage header was ignored")
+    _need(usage_line_seen("§eToken usage today:", ""), "colored usage header was ignored")
+    _need(not usage_line_seen("Token usage", "Sending a test request"), "a partial usage line was accepted")
     _need("PROBE EVENTS OK" in source, "probe success line is missing")
 
     clean = "\n".join([
