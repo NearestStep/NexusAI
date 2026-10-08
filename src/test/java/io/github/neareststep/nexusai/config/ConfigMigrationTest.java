@@ -708,6 +708,79 @@ class ConfigMigrationTest {
         assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
     }
 
+    @Test
+    void versionOneReceivesCurrentKeysOnceAndSkipsOptionalKeys() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-v1-current");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 1
+                locale: de
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                  max-tokens: 128
+                knowledge:
+                  max-chars: 5000
+                  max-file-chars: 3000
+                model-queue:
+                  - provider: openai
+                    model: gpt-4o-mini
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("v1-current-keys");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("plugin-api.enabled"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("quotas.enabled"));
+        assertTrue(outcome.addedKeys().contains("knowledge.select"));
+        assertTrue(outcome.addedKeys().contains("knowledge.keywords.stop-words"));
+        assertTrue(outcome.addedKeys().stream().noneMatch(key -> key.contains("daily-token-limit")),
+                outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().stream().noneMatch(key -> key.contains("structured-output")),
+                outcome.addedKeys().toString());
+        List<Path> backups = Files.list(dir)
+                .filter(path -> path.getFileName().toString().startsWith("config.yml.bak"))
+                .toList();
+        assertEquals(1, backups.size());
+        assertEquals("config.yml.bak", backups.getFirst().getFileName().toString());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"));
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(2, yaml.getInt("config-version"));
+        assertEquals(128, yaml.getInt("api.max-tokens"));
+        assertEquals(5000, yaml.getInt("knowledge.max-chars"));
+        assertEquals("de", yaml.getString("locale"));
+        assertFalse(yaml.getBoolean("quotas.enabled"));
+        assertEquals("full", yaml.getString("knowledge.select"));
+        assertFalse(written.contains("structured-output"), written);
+        assertFalse(written.contains("daily-token-limit"), written);
+        assertFalse(written.contains("knowledge-select"), written);
+
+        ConfigStartup.Outcome second = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(second.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+        long stillOne = Files.list(dir)
+                .filter(path -> path.getFileName().toString().startsWith("config.yml.bak"))
+                .count();
+        assertEquals(1, stillOne);
+    }
+
+    @Test
+    void promptsMigrationDoesNotAddKeywordKeys() {
+        String original = """
+                welcome:
+                  prompt: "Hi {player}"
+                """;
+        ConfigMigrator.Outcome outcome = ConfigMigrator.migratePrompts(original);
+        assertFalse(outcome.yaml().contains("knowledge-select"));
+        assertFalse(outcome.yaml().contains("knowledge-keywords"));
+        assertTrue(outcome.yaml().contains("prompt: \"Hi {player}\""));
+        ConfigMigrator.Outcome again = ConfigMigrator.migratePrompts(outcome.yaml());
+        assertFalse(again.changed());
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

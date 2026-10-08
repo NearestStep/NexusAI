@@ -38,6 +38,8 @@ command:
   status-last-error: "&7마지막 오류: &f{last_error}"
   status-provider-pause: "&7제공자 일시정지: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7모델 대기열:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7모더레이션: &f{state} &8(오늘 검사 {checks}, 표시 {flags})"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &f오늘의 토큰 사용량 보기"

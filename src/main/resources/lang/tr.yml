@@ -38,6 +38,8 @@ command:
   status-last-error: "&7Son hata: &f{last_error}"
   status-provider-pause: "&7Sağlayıcı duraklaması: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7Model kuyruğu:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderasyon: &f{state} &8(bugün {checks} kontrol, {flags} işaret)"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &fBugünkü token kullanımını göster"
