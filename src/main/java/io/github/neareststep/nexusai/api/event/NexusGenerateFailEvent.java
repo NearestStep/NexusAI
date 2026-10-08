@@ -15,7 +15,8 @@ import java.util.UUID;
  * or an API call failed for any reason.
  * <p>
  * A cancelled pre-generate event arrives here as {@link NexusErrorKind#CANCELLED}.
- * Placeholder, talk, and pool admission refusals do not fire this event. A slow handler
+ * Placeholder, talk, greeting, pool, prewarm, test, and summary admission refusals do not
+ * fire this event. Fail without Pre is only for an API call. A slow handler
  * blocks a {@code nexusai-http-*} worker. While the server is stopping, shutdown does not
  * fire this event.
  */

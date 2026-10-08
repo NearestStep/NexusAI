@@ -98,7 +98,10 @@ tasks {
         description = "Paper load-test plugin. Not shaded into the release jar."
         archiveFileName.set("NexusAI-LoadDriver.jar")
         destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
-        from(sourceSets["loadtest"].output)
+        from(sourceSets["loadtest"].output) {
+            exclude("**/EventsProbePlugin.class")
+            exclude("**/EventsProbePlugin$*.class")
+        }
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 
@@ -108,7 +111,8 @@ tasks {
         archiveFileName.set("nexusai-events-probe.jar")
         destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
         from(sourceSets["loadtest"].output) {
-            exclude("plugin.yml")
+            include("**/EventsProbePlugin.class")
+            include("**/EventsProbePlugin$*.class")
         }
         from("src/loadtest/probe") {
             include("plugin.yml")

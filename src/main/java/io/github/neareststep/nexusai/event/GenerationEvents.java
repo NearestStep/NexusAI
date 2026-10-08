@@ -14,7 +14,7 @@ import java.time.Duration;
 
 /**
  * Which origins emit a failure event, and the mapping from a transport error onto
- * {@link GenerationError}. Admission refusals for placeholders, talk, and the pool stay quiet.
+ * {@link GenerationError}. Fail without Pre is allowed only for an API call.
  */
 public final class GenerationEvents {
 
@@ -22,19 +22,13 @@ public final class GenerationEvents {
     }
 
     /**
-     * Placeholder, talk (including a greeting), and pool refills do not emit Pre or Fail when
-     * limits, a quota, or a pause refuse the call. API emits Fail for every failure. Prewarm,
-     * {@code /nai test}, and summaries are not in that quiet set, so a refusal emits Fail and not Pre.
-     * Moderation never emits Pre, Post, or Fail.
+     * Fail without Pre is allowed only for {@link RequestOrigin#API}.
+     * Placeholder, talk (including a greeting), pool, prewarm, {@code /nai test}, and summaries
+     * do not emit Pre or Fail when limits, a quota, or a pause refuse the call. Prewarm fills
+     * the pool and stays quiet. Moderation never emits Pre, Post, or Fail.
      */
     public static boolean admissionEmitsFail(RequestOrigin origin) {
-        if (origin == null || origin == RequestOrigin.MODERATION) {
-            return false;
-        }
-        return origin != RequestOrigin.PLACEHOLDER
-                && origin != RequestOrigin.POOL
-                && origin != RequestOrigin.TALK
-                && origin != RequestOrigin.TALK_GREETING;
+        return origin == RequestOrigin.API;
     }
 
     /** Fail for an admission refusal when {@link #admissionEmitsFail} is true. No Pre was fired. */
@@ -51,7 +45,8 @@ public final class GenerationEvents {
 
     /**
      * Fail when this request already fired Pre, when the listener cancelled it, or when the origin
-     * reports admission failures. Talk and placeholders that never reached Pre stay quiet.
+     * is API. Placeholder, talk, greeting, pool, prewarm, test, and summary calls that never
+     * reached Pre stay quiet.
      */
     public static void failIfNeeded(CallTrace trace, Throwable error) {
         if (trace == null || trace.origin() == RequestOrigin.MODERATION) {

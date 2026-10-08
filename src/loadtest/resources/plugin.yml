@@ -10,7 +10,7 @@ description: Load scenarios for NexusAI. Not part of the release jar.
 commands:
   naiload:
     description: Run one NexusAI load scenario
-    usage: "/naiload <scenario> <rate> <seconds> <viewers> | /naiload api <prompt|template> <n>"
+    usage: "/naiload <scenario> <rate> <seconds> <viewers> | /naiload api <prompt|template> <n> | /naiload events"
     permission: nexusai.load
 
 permissions:

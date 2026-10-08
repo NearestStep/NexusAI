@@ -18,7 +18,7 @@ A cancelled Pre fires `NexusGenerateFailEvent` with `NexusErrorKind.CANCELLED` a
 
 A cache hit, joining a request that is already in flight, and an answer taken from a pool do not fire these events. Moderation does not fire Pre, Post, or Fail. `NexusProviderErrorEvent` does fire for a failed moderation HTTP call. `NexusModerationFlagEvent` fires after the line is appended to the moderation log and before staff are notified. It is not cancellable.
 
-Placeholder, `/nai talk` (including a greeting), and pool refills do not fire Pre or Fail when a limit, a quota, or a pause refuses the call. An API `generate` fires Fail for every failure, including a failure that never started HTTP. One `/nai talk` line fires one Pre. The model call after character actions is the same request. Post carries the final line. `NexusActionEvent` is between Pre and Post.
+Placeholder, `/nai talk` (including a greeting), a pool refill, prewarm, `/nai test`, and a dialogue summary do not fire Pre or Fail when a limit, a quota, or a pause refuses the call. Prewarm fills the pool and stays quiet. Fail without Pre is allowed only for an API `generate`. An API call fires Fail for every failure, including a failure that never started HTTP. One `/nai talk` line fires one Pre. The model call after character actions is the same request. Post carries the final line. `NexusActionEvent` is between Pre and Post.
 
 `attempts` counts HTTP attempts, including a later queue row. It does not start a second Pre.
 
@@ -26,7 +26,7 @@ Placeholder, `/nai talk` (including a greeting), and pool refills do not fire Pr
 
 `NexusPreGenerateEvent`, `NexusPostGenerateEvent`, `NexusGenerateFailEvent`, `NexusProviderErrorEvent`, and `NexusModerationFlagEvent` are asynchronous. They run on a `nexusai-http-*` thread or on an `HttpClient` thread. They do not run on a region thread. A handler that needs the world schedules that work itself. A handler that blocks holds the worker and delays other requests on it.
 
-`NexusActionEvent` is not asynchronous. `as: console` fires it on the global region thread. `as: player` fires it on the player's region thread. On Paper both are the main thread, so the handler may read the region, the world, and the player's permissions directly. Cancelling it skips the command. The model is told `refused: blocked by server`. The action cooldown and the daily counter are not spent. The action log records that fact. It does not name a plugin, because Bukkit does not report which listener cancelled the event.
+`NexusActionEvent` is not asynchronous. `as: console` fires it on the global region thread. `as: player` fires it on the player's region thread. On Paper both are the main thread, so the handler may read the region, the world, and the player's permissions directly. A listener can record `Bukkit.isPrimaryThread()`. When the player is online it can also record `Bukkit.isOwnedByCurrentRegion(player)`. Paper smoke checks `primary=true` for a console action. Folia must check region ownership for a player action. That check is required in the later Folia smoke (PR9b). Cancelling the event skips the command. The model is told `refused: blocked by server`. The action cooldown and the daily counter are not spent. The action log records that fact. It does not name a plugin, because Bukkit does not report which listener cancelled the event.
 
 While the server is stopping, shutdown does not fire Fail. While NexusAI is disabling and the server is still running, an unfinished API request fires Fail with `SHUTDOWN` when the handler list can still be used.
 

@@ -7,6 +7,8 @@ import io.github.neareststep.nexusai.api.event.NexusModerationFlagEvent;
 import io.github.neareststep.nexusai.api.event.NexusPostGenerateEvent;
 import io.github.neareststep.nexusai.api.event.NexusPreGenerateEvent;
 import io.github.neareststep.nexusai.api.event.NexusProviderErrorEvent;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -45,8 +47,19 @@ public final class EventsProbePlugin extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onAction(NexusActionEvent event) {
-        getLogger().info("NEXUSAI_EVENT phase=action requestId=" + event.requestId()
-                + " character=" + event.characterId());
+        StringBuilder line = new StringBuilder();
+        line.append("NEXUSAI_EVENT phase=action requestId=").append(event.requestId());
+        line.append(" character=").append(event.characterId());
+        line.append(" primary=").append(Bukkit.isPrimaryThread());
+        Player player = event.player();
+        if (player != null) {
+            try {
+                line.append(" ownedByRegion=").append(Bukkit.isOwnedByCurrentRegion(player));
+            } catch (Throwable ignored) {
+                // The player region check is not on every server. Paper still logs primary=.
+            }
+        }
+        getLogger().info(line.toString());
     }
 
     @EventHandler

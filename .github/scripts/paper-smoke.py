@@ -58,24 +58,26 @@ def main() -> int:
         download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         check_api = False
-        expect_probe = False
         if args.driver_dir.strip():
-            driver = find_driver(Path(args.driver_dir))
+            driver_dir = Path(args.driver_dir)
+            driver = find_driver(driver_dir)
+            probe = find_probe(driver_dir)
+            if probe is None:
+                raise RuntimeError(
+                    "LoadDriver is present but nexusai-events-probe.jar is missing from " + str(driver_dir)
+                )
             shutil.copy2(driver, work / "plugins" / driver.name)
+            shutil.copy2(probe, work / "plugins" / probe.name)
             print(f"load driver {driver.name}")
+            print(f"events probe {probe.name}")
             check_api = True
-            probe = find_probe(Path(args.driver_dir))
-            if probe is not None:
-                shutil.copy2(probe, work / "plugins" / probe.name)
-                print(f"events probe {probe.name}")
-                expect_probe = True
         mock_port = free_port()
         start_mock(mock_port)
         write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, expect_probe)
+        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
@@ -402,7 +404,6 @@ def boot(
     mock_port: int,
     timeout: int,
     check_api: bool = False,
-    expect_probe: bool = False,
 ) -> int:
     log_chunks: list[str] = []
 
@@ -475,8 +476,11 @@ def boot(
             print("--- naiload api ---")
             print(queued)
             wait_api_result(process, log_chunks, min(timeout, 90))
-            if expect_probe:
-                verify_event_order("".join(log_chunks))
+            queued_events = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "naiload events"))
+            print("--- naiload events ---")
+            print(queued_events)
+            wait_event_checks(process, log_chunks, min(timeout, 90))
+            verify_event_order("".join(log_chunks))
 
         # 26.2 closes the RCON socket as soon as stop begins, before the response
         # packet is finished. The command still reached the server.
@@ -498,9 +502,17 @@ def boot(
 
 
 def verify_event_order(text: str) -> None:
-    """One API generate logs pre, then post with the same request id, before the model result."""
+    """API, placeholder, and action checks. Prints EVENT ORDER OK when they all pass."""
     if "nexusai-events-probe enabled." not in text:
         raise RuntimeError("events probe did not enable")
+    verify_api_order(text)
+    verify_placeholder_order(text)
+    verify_action_thread(text)
+    print("EVENT ORDER OK")
+
+
+def verify_api_order(text: str) -> None:
+    """One API generate logs pre, then post with the same request id, before the model result."""
     pre_index = None
     pre_id = None
     post_index = None
@@ -528,7 +540,9 @@ def verify_event_order(text: str) -> None:
         ):
             post_index = index
         if (
-            result_index is None
+            post_index is not None
+            and result_index is None
+            and index > post_index
             and "API_RESULT" in line
             and "success=true" in line
             and "source=MODEL" in line
@@ -541,6 +555,91 @@ def verify_event_order(text: str) -> None:
         raise RuntimeError(
             f"expected API pre, then post, then API_RESULT; indexes were {pre_index}, {post_index}, {result_index}"
         )
+
+
+def verify_placeholder_order(text: str) -> None:
+    """One placeholder logs Pre then Post, both nexusai, and Post is before the visible text."""
+    pre_index, pre_id, post_index, text_index = _paired_phase(
+        text, "PLACEHOLDER", "nexusai", "PLACEHOLDER_TEXT", "text=pong"
+    )
+    if pre_index is None or post_index is None or text_index is None:
+        raise RuntimeError(
+            "events probe did not log a PLACEHOLDER pre and post for consumer nexusai before PLACEHOLDER_TEXT"
+        )
+    if pre_index >= post_index or post_index >= text_index:
+        raise RuntimeError(
+            "expected PLACEHOLDER pre, then post, then PLACEHOLDER_TEXT; "
+            f"indexes were {pre_index}, {post_index}, {text_index} requestId={pre_id}"
+        )
+
+
+def verify_action_thread(text: str) -> None:
+    """A console character action on Paper logs primary=true."""
+    for line in text.splitlines():
+        if (
+            "NEXUSAI_EVENT" in line
+            and "phase=action" in line
+            and "character=smoke" in line
+            and "primary=true" in line
+        ):
+            return
+    raise RuntimeError("character action did not log primary=true")
+
+
+def _paired_phase(
+    text: str,
+    origin: str,
+    consumer: str,
+    appearance_marker: str,
+    appearance_token: str,
+) -> tuple[int | None, str | None, int | None, int | None]:
+    pre_index = None
+    pre_id = None
+    post_index = None
+    appearance_index = None
+    for index, line in enumerate(text.splitlines()):
+        if (
+            pre_index is None
+            and "NEXUSAI_EVENT" in line
+            and "phase=pre" in line
+            and f"origin={origin}" in line
+            and f"consumer={consumer}" in line
+        ):
+            marker = "requestId="
+            start = line.find(marker)
+            if start < 0:
+                raise RuntimeError(f"{origin} pre event line has no requestId")
+            pre_id = line[start + len(marker):].split()[0]
+            pre_index = index
+        if (
+            pre_id
+            and post_index is None
+            and "NEXUSAI_EVENT" in line
+            and "phase=post" in line
+            and f"requestId={pre_id}" in line
+            and f"origin={origin}" in line
+            and f"consumer={consumer}" in line
+        ):
+            post_index = index
+        if appearance_index is None and appearance_marker in line and appearance_token in line:
+            appearance_index = index
+    return pre_index, pre_id, post_index, appearance_index
+
+
+def wait_event_checks(process, chunks: list[str], timeout: int) -> None:
+    """Poll until the placeholder text and the action result are both in the log."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"server exited during event smoke with code {process.returncode}")
+        text = "".join(chunks)
+        if "PLACEHOLDER_TEXT text=pong" in text and "ACTION_DONE" in text and "phase=action" in text:
+            print("event smoke saw placeholder text and a character action")
+            return
+        if "PLACEHOLDER_TEXT timeout" in text or "PLACEHOLDER_TEXT error=" in text:
+            raise RuntimeError("placeholder expansion did not return the model text")
+        time.sleep(0.5)
+    raise RuntimeError("timed out waiting for PLACEHOLDER_TEXT and ACTION_DONE")
 
 
 def wait_api_result(process, chunks: list[str], timeout: int) -> None:

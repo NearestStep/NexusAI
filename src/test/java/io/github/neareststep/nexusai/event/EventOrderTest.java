@@ -216,11 +216,7 @@ class EventOrderTest {
             CallTrace trace = CallTrace.start(origin, null, "prompt", "label");
             GenerationEvents.admissionRefused(trace, NexusErrorKind.LOCAL_LIMIT, "limited");
             GenerationEvents.admissionRefused(trace, NexusErrorKind.QUOTA_EXCEEDED, "quota");
-            boolean quiet = origin == RequestOrigin.PLACEHOLDER
-                    || origin == RequestOrigin.POOL
-                    || origin == RequestOrigin.TALK
-                    || origin == RequestOrigin.TALK_GREETING
-                    || origin == RequestOrigin.MODERATION;
+            boolean quiet = origin != RequestOrigin.API;
             if (quiet) {
                 assertTrue(support.events.isEmpty(), origin + " " + names());
                 continue;
