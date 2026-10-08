@@ -75,7 +75,7 @@ tasks {
     }
 
     build {
-        dependsOn(shadowJar, "loadDriverJar")
+        dependsOn(shadowJar, "loadDriverJar", "eventsProbeJar")
     }
 
     test {
@@ -99,6 +99,20 @@ tasks {
         archiveFileName.set("NexusAI-LoadDriver.jar")
         destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
         from(sourceSets["loadtest"].output)
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
+
+    register<Jar>("eventsProbeJar") {
+        group = "build"
+        description = "Logs NexusAI events for the smoke script. Not shaded into the release jar."
+        archiveFileName.set("nexusai-events-probe.jar")
+        destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
+        from(sourceSets["loadtest"].output) {
+            exclude("plugin.yml")
+        }
+        from("src/loadtest/probe") {
+            include("plugin.yml")
+        }
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 

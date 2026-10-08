@@ -58,21 +58,36 @@ def main() -> int:
         download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         check_api = False
+        expect_probe = False
         if args.driver_dir.strip():
             driver = find_driver(Path(args.driver_dir))
             shutil.copy2(driver, work / "plugins" / driver.name)
             print(f"load driver {driver.name}")
             check_api = True
+            probe = find_probe(Path(args.driver_dir))
+            if probe is not None:
+                shutil.copy2(probe, work / "plugins" / probe.name)
+                print(f"events probe {probe.name}")
+                expect_probe = True
         mock_port = free_port()
         start_mock(mock_port)
         write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api)
+        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, expect_probe)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
+
+
+def find_probe(directory: Path) -> Path | None:
+    if directory.is_file() and directory.name == "nexusai-events-probe.jar":
+        return directory
+    jars = sorted(path for path in directory.glob("nexusai-events-probe.jar") if path.is_file())
+    if not jars:
+        return None
+    return jars[0]
 
 
 def find_driver(directory: Path) -> Path:
@@ -379,7 +394,16 @@ def write_server(
     (work / "server.properties").write_text("\n".join(lines), encoding="utf-8")
 
 
-def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, timeout: int, check_api: bool = False) -> int:
+def boot(
+    work: Path,
+    version: str,
+    paper: dict,
+    rcon_port: int,
+    mock_port: int,
+    timeout: int,
+    check_api: bool = False,
+    expect_probe: bool = False,
+) -> int:
     log_chunks: list[str] = []
 
     def reader(pipe) -> None:
@@ -451,6 +475,8 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
             print("--- naiload api ---")
             print(queued)
             wait_api_result(process, log_chunks, min(timeout, 90))
+            if expect_probe:
+                verify_event_order("".join(log_chunks))
 
         # 26.2 closes the RCON socket as soon as stop begins, before the response
         # packet is finished. The command still reached the server.
@@ -469,6 +495,52 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+def verify_event_order(text: str) -> None:
+    """One API generate logs pre, then post with the same request id, before the model result."""
+    if "nexusai-events-probe enabled." not in text:
+        raise RuntimeError("events probe did not enable")
+    pre_index = None
+    pre_id = None
+    post_index = None
+    result_index = None
+    for index, line in enumerate(text.splitlines()):
+        if (
+            pre_index is None
+            and "NEXUSAI_EVENT" in line
+            and "phase=pre" in line
+            and "origin=API" in line
+        ):
+            marker = "requestId="
+            start = line.find(marker)
+            if start < 0:
+                raise RuntimeError("pre event line has no requestId")
+            pre_id = line[start + len(marker):].split()[0]
+            pre_index = index
+        if (
+            pre_id
+            and post_index is None
+            and "NEXUSAI_EVENT" in line
+            and "phase=post" in line
+            and f"requestId={pre_id}" in line
+            and "origin=API" in line
+        ):
+            post_index = index
+        if (
+            result_index is None
+            and "API_RESULT" in line
+            and "success=true" in line
+            and "source=MODEL" in line
+            and "text=pong" in line
+        ):
+            result_index = index
+    if pre_index is None or post_index is None or result_index is None:
+        raise RuntimeError("events probe did not log an API pre, a matching post, and API_RESULT")
+    if pre_index >= post_index or post_index >= result_index:
+        raise RuntimeError(
+            f"expected API pre, then post, then API_RESULT; indexes were {pre_index}, {post_index}, {result_index}"
+        )
 
 
 def wait_api_result(process, chunks: list[str], timeout: int) -> None:

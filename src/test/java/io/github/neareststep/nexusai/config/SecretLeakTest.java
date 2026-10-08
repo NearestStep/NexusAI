@@ -17,6 +17,8 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.dialogue.DialogueProtocol;
 import io.github.neareststep.nexusai.dialogue.DialogueTransport;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.EventSupport;
 import io.github.neareststep.nexusai.generate.GenerationRuntime;
 import io.github.neareststep.nexusai.generate.GenerationService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
@@ -210,6 +212,16 @@ class SecretLeakTest {
         });
         server.start();
         ExecutorService executor = Executors.newFixedThreadPool(2);
+        EventSupport events = EventSupport.register("SecretAudit");
+        EventDispatcher.install(EventDispatcher.create(
+                logger,
+                () -> List.of(canary),
+                event -> {
+                    events.events.add(event);
+                    captured.add(event.toString());
+                },
+                System::nanoTime,
+                () -> false));
         try {
             String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1";
             Plugin owner = ownerPlugin("Quests");
@@ -235,10 +247,12 @@ class SecretLeakTest {
                 }
                 service.shutdown();
             }
+            assertFalse(events.events.isEmpty());
             for (String line : captured) {
                 assertFalse(line != null && line.contains(canary), line);
             }
         } finally {
+            events.close();
             logger.removeHandler(handler);
             server.stop(0);
             executor.shutdownNow();

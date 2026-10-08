@@ -13,6 +13,7 @@ import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.prompt.PromptContext;
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -169,7 +171,23 @@ public final class DialogueService {
                 new DialogueBudget(),
                 new GreetingCache(),
                 router::route,
-                this::runAction,
+                new DialogueEngine.ActionSink() {
+                    @Override
+                    public String run(UUID playerId, CharacterAction action, String command) {
+                        return runAction(playerId, action, command, 0L, "");
+                    }
+
+                    @Override
+                    public String run(
+                            UUID playerId,
+                            CharacterAction action,
+                            String command,
+                            long requestId,
+                            String characterId
+                    ) {
+                        return runAction(playerId, action, command, requestId, characterId);
+                    }
+                },
                 actionLog(),
                 ZoneId.systemDefault(),
                 summaries,
@@ -617,28 +635,56 @@ public final class DialogueService {
                 GenerationOverrides.none(), null, "", 0, 0, 0, ignored -> false, System.currentTimeMillis());
     }
 
-    private String runAction(UUID playerId, CharacterAction action, String command) {
+    private String runAction(UUID playerId, CharacterAction action, String command, long requestId, String characterId) {
+        AtomicBoolean expired = new AtomicBoolean();
         CompletableFuture<String> done = new CompletableFuture<>();
         try {
             plugin.getServer().getGlobalRegionScheduler().run(plugin, task -> {
+                if (expired.get()) {
+                    done.complete(null);
+                    return;
+                }
                 Player online = Bukkit.getPlayer(playerId);
                 if (online == null) {
                     done.complete("failed: player unavailable");
                     return;
                 }
                 if (action.console()) {
-                    done.complete(dispatch(true, online, command));
+                    done.complete(runCommand(expired, true, online, action, command, requestId, characterId));
                     return;
                 }
-                online.getScheduler().run(plugin, scheduled -> done.complete(dispatch(false, online, command)), () ->
-                        done.complete("failed: player unavailable"));
+                online.getScheduler().run(plugin, scheduled -> {
+                    if (expired.get()) {
+                        done.complete(null);
+                        return;
+                    }
+                    done.complete(runCommand(expired, false, online, action, command, requestId, characterId));
+                }, () -> done.complete("failed: player unavailable"));
             });
-            return done.get(5, TimeUnit.SECONDS);
+            String result = done.get(5, TimeUnit.SECONDS);
+            return result == null ? "failed: timed out" : result;
         } catch (TimeoutException e) {
+            expired.set(true);
             return "failed: timed out";
         } catch (Exception e) {
+            expired.set(true);
             return "failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    private static String runCommand(
+            AtomicBoolean expired,
+            boolean console,
+            Player player,
+            CharacterAction action,
+            String command,
+            long requestId,
+            String characterId
+    ) {
+        return ActionExecution.execute(
+                expired,
+                () -> EventDispatcher.get().action(player, characterId, action.name(), command, console, requestId),
+                () -> dispatch(console, player, command));
     }
 
     private static String dispatch(boolean console, Player player, String command) {

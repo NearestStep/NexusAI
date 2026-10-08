@@ -26,6 +26,9 @@ import io.github.neareststep.nexusai.budget.QuotaGroups;
 import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.FormatPresets;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.GenerationEvents;
+import io.github.neareststep.nexusai.event.PreCancelled;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -373,6 +376,12 @@ public final class GenerationService {
             Throwable error
     ) {
         try {
+            if (PreCancelled.find(error) != null) {
+                GenerationError generationError = GenerationEvents.from(error);
+                releaseShared(current, prepared, shared, SharedCompletion.fail(PreCancelled.find(error), generationError));
+                deliver(future, trace, failure(trace, request, lookup, current, generationError), true);
+                return;
+            }
             if (error == null) {
                 String rejection = PlayerInput.rejectionReason(answer == null ? null : answer.text(), prepared.prompt);
                 if (rejection != null) {
@@ -394,6 +403,16 @@ public final class GenerationService {
             String text = SecretMask.redact(
                     PlayerInput.stripSectionSigns(answer.text(), current.config().allowMarkup()).trim(),
                     current.config().configuredSecrets());
+            EventDispatcher.get().post(
+                    trace,
+                    text,
+                    answer.providerId(),
+                    answer.model(),
+                    answer.fallbackModelUsed(),
+                    TokenUsage.from(answer.usage()),
+                    answer.finishReason(),
+                    answer.attempts(),
+                    null);
             current.gate().recordSuccess(admissionKey, pauseStamp, failureEpoch, true);
             if (prepared.writeCache) {
                 writeCache(current, prepared, answer, text);
@@ -454,7 +473,7 @@ public final class GenerationService {
             } else {
                 generationError = NexusErrors.of(current.config(), NexusErrorKind.PROVIDER_ERROR, "Provider error", 0, 0L);
             }
-            deliver(future, trace, failure(trace, request, lookup, current, generationError), true);
+            deliver(future, trace, failure(trace, request, lookup, current, generationError), true, false);
             return;
         }
         ModelAnswer answer = shared.answer();
@@ -475,7 +494,7 @@ public final class GenerationService {
                 0,
                 Duration.ZERO,
                 null);
-        deliver(future, trace, result, true);
+        deliver(future, trace, result, true, false);
     }
 
     private void recordHttpFailure(GenerationRuntime current, String admissionKey, Throwable error) {
@@ -887,6 +906,19 @@ public final class GenerationService {
     }
 
     private void deliver(CompletableFuture<GenerationResult> future, CallTrace trace, GenerationResult result, boolean notify) {
+        deliver(future, trace, result, notify, true);
+    }
+
+    private void deliver(
+            CompletableFuture<GenerationResult> future,
+            CallTrace trace,
+            GenerationResult result,
+            boolean notify,
+            boolean events
+    ) {
+        if (events && trace != null && result != null && !result.success()) {
+            EventDispatcher.get().fail(trace, result.error().orElse(null), result.attempts(), null);
+        }
         releaseQuota(trace);
         if (future == null || result == null || pending.remove(future) == null) {
             return;

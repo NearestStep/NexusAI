@@ -7,6 +7,7 @@ import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.event.GenerationEvents;
 import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.time.ZoneId;
@@ -231,11 +232,12 @@ public final class DialogueEngine {
                     trace
             ));
         } catch (RuntimeException e) {
+            GenerationEvents.failIfNeeded(trace, e);
             return failure(request, e);
         }
         String spoken = first.text();
         if (!tools.isEmpty() && !first.toolsUnsupported() && !first.toolNames().isEmpty()) {
-            String note = runTools(request, first.toolNames(), tools);
+            String note = runTools(request, first.toolNames(), tools, trace.requestId());
             List<DialogueProtocol.MemoryLine> follow = new ArrayList<>(messages);
             if (spoken != null && !spoken.isBlank()) {
                 follow.add(new DialogueProtocol.MemoryLine("assistant", spoken));
@@ -253,11 +255,15 @@ public final class DialogueEngine {
                 ));
                 spoken = second.text();
             } catch (RuntimeException e) {
+                GenerationEvents.failIfNeeded(trace, e);
                 return failure(request, e);
             }
         }
         if (spoken == null || spoken.isBlank()) {
+            GenerationEvents.failIfNeeded(trace, new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null));
             spoken = request.fallback();
+        } else {
+            GenerationEvents.postText(trace, spoken);
         }
         remember(request, "user", sanitized);
         remember(request, "assistant", spoken);
@@ -356,6 +362,7 @@ public final class DialogueEngine {
                 return cached;
             }
         }
+        CallTrace trace = CallTrace.start(RequestOrigin.TALK_GREETING, request.playerId(), characterId(request), "");
         ModelReply reply;
         try {
             reply = model.complete(new ModelCall(
@@ -366,9 +373,10 @@ public final class DialogueEngine {
                     request.formatId(),
                     request.playerId(),
                     "",
-                    CallTrace.start(RequestOrigin.TALK_GREETING, request.playerId(), characterId(request), "")
+                    trace
             ));
         } catch (RuntimeException e) {
+            GenerationEvents.failIfNeeded(trace, e);
             AiRequestException typed = AiErrors.find(e);
             if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
                 throw e;
@@ -376,6 +384,11 @@ public final class DialogueEngine {
             return request.fallback();
         }
         String text = reply.text() == null || reply.text().isBlank() ? request.fallback() : reply.text();
+        if (reply.text() == null || reply.text().isBlank()) {
+            GenerationEvents.failIfNeeded(trace, new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null));
+        } else {
+            GenerationEvents.postText(trace, text);
+        }
         if (request.settings().cacheGreeting()) {
             greetings.put(cacheKey, text, request.nowMillis(), request.settings().greetingCacheSeconds() * 1000L);
         }
@@ -389,7 +402,7 @@ public final class DialogueEngine {
         return request.actions();
     }
 
-    private String runTools(TalkRequest request, List<String> names, List<CharacterAction> defined) {
+    private String runTools(TalkRequest request, List<String> names, List<CharacterAction> defined, long requestId) {
         StringBuilder note = new StringBuilder(
                 "Server action results. Tell the player in character. Do not invent actions or claim one ran when it was refused.");
         int ran = 0;
@@ -425,7 +438,7 @@ public final class DialogueEngine {
             }
             String result;
             try {
-                result = sink.run(request.playerId(), action, command);
+                result = sink.run(request.playerId(), action, command, requestId, request.characterId());
             } catch (RuntimeException e) {
                 result = "failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             }
@@ -583,6 +596,13 @@ public final class DialogueEngine {
 
     public interface ActionSink {
         String run(UUID playerId, CharacterAction action, String command);
+
+        /**
+         * The talk turn and character this command belongs to. The three-argument form is the default.
+         */
+        default String run(UUID playerId, CharacterAction action, String command, long requestId, String characterId) {
+            return run(playerId, action, command);
+        }
     }
 
     public enum CallKind {

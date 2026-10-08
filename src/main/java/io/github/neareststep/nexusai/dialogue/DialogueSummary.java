@@ -3,8 +3,11 @@ package io.github.neareststep.nexusai.dialogue;
 import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.api.RequestOrigin;
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.event.GenerationEvents;
 
 import java.util.List;
 import java.util.UUID;
@@ -108,10 +111,11 @@ public final class DialogueSummary {
     }
 
     private void run(SummaryJob job) {
+        String payload = foldedText(job.previousSummary(), job.lines());
+        String wrapped = PlayerInput.wrap(payload);
+        DialogueEngine.ModelCall request = call(job, wrapped);
         try {
-            String payload = foldedText(job.previousSummary(), job.lines());
-            String wrapped = PlayerInput.wrap(payload);
-            DialogueEngine.ModelReply reply = model.complete(call(job, wrapped));
+            DialogueEngine.ModelReply reply = model.complete(request);
             String clean = SummaryText.clean(
                     reply == null ? "" : reply.text(),
                     wrapped,
@@ -119,13 +123,18 @@ public final class DialogueSummary {
             );
             clean = SecretMask.redact(clean, secrets.get());
             if (clean.isEmpty()) {
+                GenerationEvents.failIfNeeded(
+                        request.trace(),
+                        new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null));
                 refuse(job);
                 return;
             }
+            GenerationEvents.postText(request.trace(), clean);
             if (memory.completeSummary(job.playerId(), job.characterId(), clean, job.nowMillis(), job.epoch())) {
                 stats.success(job.nowMillis());
             }
         } catch (RuntimeException e) {
+            GenerationEvents.failIfNeeded(request.trace(), e);
             refuse(job);
         }
     }
