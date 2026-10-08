@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&e名前付きプロンプト &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7名前付きプロンプトはありません。&fprompts.yml&7 に追加してください。"
+  prompts-registered: "{prefix}&7プラグインから登録: &f{prompts}"
   reload-ok: "{prefix}&a設定を再読み込みしました。"
   reload-fail: "{prefix}&c再読み込みに失敗しました: &f{error}"
   status-header: "{prefix}&eステータス:"

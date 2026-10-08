@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&e이름 있는 프롬프트 &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7이름 있는 프롬프트가 없습니다. &fprompts.yml&7에 추가하세요."
+  prompts-registered: "{prefix}&7플러그인이 등록한 프롬프트: &f{prompts}"
   reload-ok: "{prefix}&a설정을 다시 불러왔습니다."
   reload-fail: "{prefix}&c다시 불러오기 실패: &f{error}"
   status-header: "{prefix}&e상태:"

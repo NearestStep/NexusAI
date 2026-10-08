@@ -185,12 +185,8 @@ public final class PromptImporter {
             if (first == ' ' || first == '\t' || first == '#' || first == '-') {
                 continue;
             }
-            int colon = line.indexOf(':');
-            if (colon <= 0) {
-                continue;
-            }
-            String key = line.substring(0, colon).trim();
-            if (PromptCatalog.ID.matcher(key).matches() && !"config-version".equals(key)) {
+            String key = PromptCatalog.topLevelKey(line);
+            if (key != null && PromptCatalog.ID.matcher(key).matches() && !"config-version".equals(key)) {
                 ids.add(key);
             }
         }
@@ -235,15 +231,12 @@ public final class PromptImporter {
 
     private static String extractBlock(String yaml, String id) {
         String[] lines = yaml.split("\\R", -1);
-        String prefix = id + ":";
         int start = -1;
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
-            if (line.equals(prefix) || line.startsWith(prefix)) {
-                if (isTopLevelKey(line) && keyOf(line).equals(id)) {
-                    start = i;
-                    break;
-                }
+            if (isTopLevelKey(line) && id.equals(keyOf(line))) {
+                start = i;
+                break;
             }
         }
         if (start < 0) {
@@ -345,7 +338,8 @@ public final class PromptImporter {
     }
 
     private static String keyOf(String line) {
-        return line.substring(0, line.indexOf(':')).trim();
+        String key = PromptCatalog.topLevelKey(line);
+        return key == null ? "" : key;
     }
 
     private static String safeName(String requested) {

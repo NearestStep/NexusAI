@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&ePrompts nommés &8({count})&e :"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7Aucun prompt nommé. Ajoutez-les dans &fprompts.yml&7."
+  prompts-registered: "{prefix}&7Enregistrés par des plugins : &f{prompts}"
   reload-ok: "{prefix}&aConfiguration rechargée."
   reload-fail: "{prefix}&cÉchec du rechargement : &f{error}"
   status-header: "{prefix}&eÉtat :"

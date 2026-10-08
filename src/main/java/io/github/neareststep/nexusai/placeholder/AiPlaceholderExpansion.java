@@ -10,6 +10,7 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
@@ -180,7 +181,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         if (player == null || resolved.id() == null || resolved.id().isBlank() || !config.contextSettings().enabled()) {
             return null;
         }
-        NamedPrompt named = prompts.find(resolved.id()).orElse(null);
+        NamedPrompt named = visiblePrompts().find(resolved.id()).orElse(null);
         if (named == null || !named.context().active()) {
             return null;
         }
@@ -250,10 +251,18 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     }
 
     private ResolvedPrompt resolve(Player player, String raw) {
-        return prompts.resolve(
+        return visiblePrompts().resolve(
                 raw,
                 config,
                 template -> VarSubstitutor.resolve(player, template),
                 ContextVariables.capture(player));
+    }
+
+    /**
+     * File prompts plus prompts registered from code. A {@code prompts.yml} id wins.
+     * Read on each request so a plugin can register after {@code /nai reload}.
+     */
+    private PromptCatalog visiblePrompts() {
+        return prompts.overlayRegistered(ApiPromptRegistry.get().namedPrompts());
     }
 }

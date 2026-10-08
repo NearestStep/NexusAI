@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&eBenannte Prompts &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7Keine benannten Prompts. Trag sie in &fprompts.yml&7 ein."
+  prompts-registered: "{prefix}&7Von Plugins registriert: &f{prompts}"
   reload-ok: "{prefix}&aKonfiguration neu geladen."
   reload-fail: "{prefix}&cNeuladen fehlgeschlagen: &f{error}"
   status-header: "{prefix}&eStatus:"

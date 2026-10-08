@@ -8,7 +8,9 @@ config-version: 1
 # If <id> is not defined in this file, the placeholder text is sent to the model as-is.
 # That keeps existing literal prompts working.
 #
-# An id matches [a-z0-9_-]. The prompt text may be a string, a block scalar, or a list of lines.
+# An id matches [a-z0-9_-]. A plugin may also register namespace:id from code.
+# Quote that id here when overriding it: "quests:intro":
+# The prompt text may be a string, a block scalar, or a list of lines.
 # A list is joined with newlines, so line breaks stay in the prompt.
 #
 # {token} in the prompt is filled from vars before the request. A var value may contain
@@ -42,7 +44,9 @@ config-version: 1
 # Answer order: model-queue, then fallback-model, then a pooled answer, then fallback text.
 #
 # pool.entries[].prompt and prewarm.prompts may use an id.
-# /nai reload reads this file again. /nai prompts lists the ids. /nai test <id> sends that prompt.
+# /nai reload reads this file again. It does not drop prompts a plugin registered from code.
+# /nai prompts lists the ids in this file, then one line of those registered prompts.
+# /nai test <id> sends that prompt, including a registered namespace:id.
 
 # survival_tips:
 #   prompt: |

@@ -23,7 +23,11 @@ import java.util.regex.Pattern;
  */
 public final class PromptCatalog {
 
-    static final Pattern ID = Pattern.compile("[a-z0-9_-]+");
+    /**
+     * A file id, or {@code namespace:id} for a prompt registered from code.
+     * One colon is allowed. Older ids have none and still match.
+     */
+    static final Pattern ID = Pattern.compile("[a-z0-9_-]+(:[a-z0-9_-]+)?");
 
     private static final Set<String> SETTINGS = Set.of(
             "prompt",
@@ -76,7 +80,7 @@ public final class PromptCatalog {
                 continue;
             }
             if (!ID.matcher(key).matches()) {
-                warnings.add("Skipping prompt id '" + key + "': ids must match [a-z0-9_-].");
+                warnings.add("Skipping prompt id '" + key + "': ids must match [a-z0-9_-] or namespace:id.");
                 continue;
             }
             Object raw = yaml.get(key);
@@ -128,6 +132,28 @@ public final class PromptCatalog {
         List<String> ids = new ArrayList<>(prompts.keySet());
         ids.sort(String::compareTo);
         return List.copyOf(ids);
+    }
+
+    /**
+     * File prompts plus prompts registered from code. A file id replaces the code prompt
+     * with the same id. An empty registry returns this catalog.
+     */
+    public PromptCatalog overlayRegistered(Map<String, NamedPrompt> registered) {
+        if (registered == null || registered.isEmpty()) {
+            return this;
+        }
+        Map<String, NamedPrompt> merged = new LinkedHashMap<>();
+        for (Map.Entry<String, NamedPrompt> entry : registered.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank() || entry.getValue() == null) {
+                continue;
+            }
+            merged.put(entry.getKey(), entry.getValue());
+        }
+        if (merged.isEmpty()) {
+            return this;
+        }
+        merged.putAll(prompts);
+        return new PromptCatalog(merged);
     }
 
     /**
@@ -502,22 +528,58 @@ public final class PromptCatalog {
         }
     }
 
+    /**
+     * Top-level YAML key, or {@code null} when the line is blank, a comment, or nested.
+     * The separator is the colon that ends the key ({@code :} at end of line, or colon plus space),
+     * so {@code quests:intro:} and {@code "quests:intro":} both yield {@code quests:intro}.
+     */
+    static String topLevelKey(String line) {
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        char first = line.charAt(0);
+        if (first == ' ' || first == '\t' || first == '#' || first == '-') {
+            return null;
+        }
+        boolean quoted = false;
+        char quote = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (quoted) {
+                if (c == quote && line.charAt(i - 1) != '\\') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if ((c == '"' || c == '\'') && (i == 0 || line.charAt(i - 1) != '\\')) {
+                quoted = true;
+                quote = c;
+                continue;
+            }
+            if (c == ':' && (i + 1 == line.length() || line.charAt(i + 1) == ' ' || line.charAt(i + 1) == '\t')) {
+                return unquote(line.substring(0, i).trim());
+            }
+        }
+        return null;
+    }
+
+    static String unquote(String key) {
+        if (key == null || key.length() < 2) {
+            return key;
+        }
+        char start = key.charAt(0);
+        char end = key.charAt(key.length() - 1);
+        if ((start == '"' && end == '"') || (start == '\'' && end == '\'')) {
+            return key.substring(1, key.length() - 1);
+        }
+        return key;
+    }
+
     static List<String> duplicateIds(String yamlText) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (String line : yamlText.split("\\R", -1)) {
-            if (line.isEmpty()) {
-                continue;
-            }
-            char first = line.charAt(0);
-            if (first == ' ' || first == '\t' || first == '#' || first == '-') {
-                continue;
-            }
-            int colon = line.indexOf(':');
-            if (colon <= 0) {
-                continue;
-            }
-            String key = line.substring(0, colon).trim();
-            if (!ID.matcher(key).matches()) {
+            String key = topLevelKey(line);
+            if (key == null || !ID.matcher(key).matches()) {
                 continue;
             }
             counts.merge(key, 1, Integer::sum);

@@ -223,7 +223,7 @@ Alias: `/nexusai`. The `/nai` command in `plugin.yml` has no permission of its o
 | `/nai version` | `nexusai.command` | Plugin version and the authors from `plugin.yml` (`PluginMeta.getAuthors()`) |
 | `/nai reload` | `nexusai.command` and `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache, pool, and prewarm |
 | `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, queue strategy and the next row, fallback model, moderation on/off, today's checks and flags, dialogue summaries (`off`, or `on (N ok, M failed today)`), and context providers (id, plugin, priority, timeout, ok or suspended, timeout count). Context values are not printed |
-| `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
+| `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml`, then prompts a plugin registered from code |
 | `/nai prompts import <file> [--overwrite]` | `nexusai.command` and `nexusai.import` | Import prompt definitions from `plugins/NexusAI/import/<file>` into `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.command` and `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
 | `/nai talk <id> [message]` | `nexusai.talk` or `nexusai.command` | Talk to the character `id` from `prompts.yml`. A message is one reply. With no message, a session opens and later chat goes to that character |
@@ -396,7 +396,19 @@ welcome:
 
 `prompt` may be a string, a block scalar (`|`), or a list of lines. A list is joined with newlines. `{biome}` is replaced before the request. `%player_biome%` is resolved for the player who is looking. The cache and the pool use that finished text, so a player in a plains biome never sees a desert player's answer. `welcome` is not prewarmed and is not filled on startup, because the value depends on the player. `survival_tips` has no player-specific vars, so every viewer shares one cache entry.
 
-If the id is missing from `prompts.yml`, the placeholder text is sent as a literal prompt, same as before.
+If the id is missing from `prompts.yml` and no plugin has registered it, the placeholder text is sent as a literal prompt, same as before.
+
+A plugin registers its own prompt with `NexusAIApi.registerPrompt(plugin, localId, definition)`. The id is `namespace:localId`. The namespace is the plugin name in lower case, and any character outside `[a-z0-9_-]` becomes `_` (`My Plugin` and `my_plugin` are the same namespace). `localId` matches `[a-z0-9_-]{1,64}`. The same plugin may register that id again to replace it. A second plugin with the same namespace gets `IllegalStateException` naming both plugins. The prompt is not written to a file. `NexusAIApi.generate`, `%ainexus_cached_<id>%`, and `/nai test <id>` can use it. `/nai reload` keeps it. Disabling the owner plugin removes it.
+
+A code prompt cannot set `actions`, `dialogue`, or `context`, and its `vars` are plain defaults (a `%` placeholder is rejected). An admin overrides that id in `prompts.yml`. Quote a key that contains a colon:
+
+```yaml
+"quests:intro":
+  prompt: "Use the server's intro instead."
+  context: all
+```
+
+The file entry replaces the whole prompt, so it can add `actions`, `dialogue`, and `context`. A schema stored on the code prompt stays the code schema. Removing the file entry reveals the code prompt again, without a reload of the plugin.
 
 `pool.entries[].prompt` and `prewarm.prompts` accept the same id:
 
@@ -415,7 +427,7 @@ Optional keys on a prompt: `ttl` (cache seconds), `fallback`, `max-prompt-length
 
 HTTP 401 and 403 are reported as an invalid or unauthorized key. HTTP 429 is reported as a provider rate limit. The words "provider paused" are used only when requests to that provider are actually paused. `/nai test` does not start that pause.
 
-`/nai reload` reads `prompts.yml` again. `/nai prompts` prints the ids. The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded.
+`/nai reload` reads `prompts.yml` again and does not drop prompts registered from code. `/nai prompts` prints the file ids, then one line of registered prompts with the plugin name (`quests:intro (Quests)`). The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts from the file and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded. Registered prompts stay either way.
 
 ### Unique answers (pool)
 

@@ -28,6 +28,7 @@ class LocaleFilesTest {
             "command.prompts-header",
             "command.prompts-line",
             "command.prompts-empty",
+            "command.prompts-registered",
             "command.status-prompts",
             "command.test-sending",
             "command.test-ok",
@@ -84,6 +85,8 @@ class LocaleFilesTest {
                 assertTrue(yaml.contains(key), file.getFileName() + " missing " + key);
                 assertFalse(yaml.getString(key).isBlank(), file.getFileName() + " blank " + key);
             }
+            assertTrue(yaml.getString("command.prompts-registered").contains("{prompts}"),
+                    file.getFileName() + " prompts-registered {prompts}");
             String version = yaml.getString("command.version");
             assertTrue(version != null && version.contains("{version}"), file.getFileName() + " {version}");
             assertTrue(version.contains("{authors}"), file.getFileName() + " {authors}");
@@ -112,6 +115,8 @@ class LocaleFilesTest {
             if (!file.getFileName().toString().equals("en.yml")) {
                 assertFalse(yaml.getString("command.help-prompts-import").contains("Import prompts from the import folder"),
                         file.getFileName() + " help-prompts-import still English");
+                assertFalse(yaml.getString("command.prompts-registered").contains("Registered by plugins"),
+                        file.getFileName() + " prompts-registered still English");
                 assertFalse(yaml.getString("command.status-unpooled").contains("requested but not pooled"),
                         file.getFileName() + " status-unpooled still English");
                 assertTrue(yaml.getString("command.prompts-import-ok").contains("{file}"), file.getFileName() + " {file}");

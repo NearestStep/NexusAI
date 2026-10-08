@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.api;
 
 import io.github.neareststep.nexusai.context.ContextRegistry;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.generate.GenerationService;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -154,5 +155,57 @@ public final class NexusAIApi {
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI is not enabled"));
         }
         return current.generate(owner, request);
+    }
+
+    /**
+     * Registers {@code namespace:localId} for {@code owner}. The namespace is {@code owner}'s name
+     * in lower case, with every character outside {@code [a-z0-9_-]} replaced by {@code _}.
+     * {@code localId} matches {@code [a-z0-9_-]{1,64}}.
+     * <p>
+     * Registering the same id again from the same plugin replaces that prompt. A different plugin
+     * whose name normalizes to the same namespace throws {@link IllegalStateException} naming both
+     * plugins. {@code /nai reload} keeps the prompt. Disabling {@code owner} removes it.
+     * The prompt is not written to a file.
+     * <p>
+     * Code prompts cannot set {@code actions}, {@code dialogue}, or {@code context}. An admin can
+     * add those by overriding the same id in {@code prompts.yml} ({@code "quests:intro":}). That
+     * file entry replaces the definition. A schema stored on {@code definition} stays the code schema.
+     * <p>
+     * The id is then usable from {@link #generate}, {@code %ainexus_cached_<id>%}, and
+     * {@code /nai test <id>}. {@code /nai prompts} lists it with the plugin name.
+     * <pre>{@code
+     * NexusAIApi.registerPrompt(this, "intro", PromptDefinition.builder(
+     *                 "Write a two-sentence intro for the quest {quest}.")
+     *         .format("short")
+     *         .maxTokens(120)
+     *         .ttl(Duration.ofMinutes(30))
+     *         .fallback("A new quest awaits.")
+     *         .build());
+     * }</pre>
+     */
+    public static void registerPrompt(Plugin owner, String localId, PromptDefinition definition) {
+        if (owner == null || localId == null || definition == null) {
+            throw new IllegalArgumentException("owner, localId, and definition are required");
+        }
+        ApiPromptRegistry.get().register(owner, localId, definition);
+    }
+
+    /**
+     * Removes {@code namespace:localId} when this plugin owns it.
+     * {@code false} when the arguments are missing, the id is invalid, or another plugin owns it.
+     */
+    public static boolean unregisterPrompt(Plugin owner, String localId) {
+        if (owner == null || localId == null) {
+            return false;
+        }
+        return ApiPromptRegistry.get().unregister(owner, localId);
+    }
+
+    /** Full ids ({@code quests:intro}) registered by {@code owner}. */
+    public static List<String> registeredPromptIds(Plugin owner) {
+        if (owner == null) {
+            return List.of();
+        }
+        return ApiPromptRegistry.get().ids(owner);
     }
 }

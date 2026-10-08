@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&eNazwane prompty &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7Brak nazwanych promptów. Dodaj je w &fprompts.yml&7."
+  prompts-registered: "{prefix}&7Zarejestrowane przez pluginy: &f{prompts}"
   reload-ok: "{prefix}&aKonfiguracja przeładowana."
   reload-fail: "{prefix}&cBłąd przeładowania: &f{error}"
   status-header: "{prefix}&eStatus:"

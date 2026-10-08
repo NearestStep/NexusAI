@@ -309,6 +309,50 @@ class PromptCatalogTest {
         assertTrue(parsed.catalog().sharedContextWarnings("pool.entries", List.of("plain")).isEmpty());
     }
 
+    @Test
+    void namespaceIdsLoadQuotedAndUnquotedAndOldIdsStay() {
+        PromptCatalog.Parsed parsed = PromptCatalog.parse("""
+                survival_tips: "Give one tip"
+                quests:intro: "unquoted"
+                "shop:price": "quoted"
+                'mail:note': "single"
+                Bad Id: "nope"
+                quests:intro:extra: "too many"
+                """);
+        assertTrue(parsed.valid(), parsed.error());
+        assertEquals(List.of("mail:note", "quests:intro", "shop:price", "survival_tips"), parsed.catalog().ids());
+        assertEquals("Give one tip", parsed.catalog().find("survival_tips").orElseThrow().template());
+        assertEquals("unquoted", parsed.catalog().find("quests:intro").orElseThrow().template());
+        assertEquals("quoted", parsed.catalog().find("shop:price").orElseThrow().template());
+        assertEquals("single", parsed.catalog().find("mail:note").orElseThrow().template());
+        String warnings = String.join("\n", parsed.warnings());
+        assertTrue(warnings.contains("Bad Id"), warnings);
+        assertTrue(warnings.contains("quests:intro:extra"), warnings);
+        assertTrue(warnings.contains("namespace:id"), warnings);
+    }
+
+    @Test
+    void duplicateNamespaceIdIsReported() {
+        PromptCatalog.Parsed parsed = PromptCatalog.parse("""
+                "quests:intro": "one"
+                "quests:intro": "two"
+                """);
+        String combined = (parsed.error() == null ? "" : parsed.error()) + " " + parsed.warnings();
+        assertTrue(combined.contains("quests:intro"), combined);
+        assertTrue(combined.contains("more than once"), combined);
+    }
+
+    @Test
+    void adminOverrideMayAddContextOnANamespaceId() {
+        NamedPrompt prompt = PromptCatalog.parse("""
+                "quests:intro":
+                  prompt: "from file"
+                  context: [economy]
+                """).catalog().find("quests:intro").orElseThrow();
+        assertEquals("from file", prompt.template());
+        assertEquals(List.of("economy"), prompt.context().ids());
+    }
+
     private static PluginConfig config() {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("api.provider", "openai");

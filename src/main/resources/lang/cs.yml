@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&ePojmenované prompty &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7Žádné pojmenované prompty. Přidejte je do &fprompts.yml&7."
+  prompts-registered: "{prefix}&7Registrované pluginy: &f{prompts}"
   reload-ok: "{prefix}&aKonfigurace znovu načtena."
   reload-fail: "{prefix}&cObnovení selhalo: &f{error}"
   status-header: "{prefix}&eStav:"

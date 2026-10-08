@@ -11,6 +11,7 @@ import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
+import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.config.QueueStrategy;
 import io.github.neareststep.nexusai.config.FallbackModel;
@@ -20,6 +21,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.moderation.ModerationService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.PromptImporter;
@@ -420,10 +422,11 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
         GenerationOverrides overrides = GenerationOverrides.none();
         String noticeId = prompt;
-        NamedPrompt namedPrompt = plugin.getPromptCatalog().find(prompt).orElse(null);
+        PromptCatalog visible = visiblePrompts();
+        NamedPrompt namedPrompt = visible.find(prompt).orElse(null);
         if (namedPrompt != null) {
             Player player = sender instanceof Player online ? online : null;
-            ResolvedPrompt resolved = plugin.getPromptCatalog().resolve(
+            ResolvedPrompt resolved = visible.resolve(
                     prompt,
                     plugin.getPluginConfig(),
                     template -> VarSubstitutor.resolve(player, template),
@@ -512,14 +515,25 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         List<String> ids = plugin.getPromptCatalog().ids();
-        if (ids.isEmpty()) {
+        String registered = ApiPromptRegistry.get().summary();
+        if (ids.isEmpty() && registered.isEmpty()) {
             messages.send(sender, "command.prompts-empty");
             return;
         }
-        messages.send(sender, "command.prompts-header", Map.of("count", Integer.toString(ids.size())));
-        for (String id : ids) {
-            messages.send(sender, "command.prompts-line", Map.of("id", id));
+        if (!ids.isEmpty()) {
+            messages.send(sender, "command.prompts-header", Map.of("count", Integer.toString(ids.size())));
+            for (String id : ids) {
+                messages.send(sender, "command.prompts-line", Map.of("id", id));
+            }
         }
+        if (!registered.isEmpty()) {
+            messages.send(sender, "command.prompts-registered", Map.of("prompts", registered));
+        }
+    }
+
+    /** File prompts plus prompts a plugin registered from code. Talk stays on the file catalog. */
+    private PromptCatalog visiblePrompts() {
+        return plugin.getPromptCatalog().overlayRegistered(ApiPromptRegistry.get().namedPrompts());
     }
 
     /**
@@ -681,7 +695,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         if (args.length == 2 && "test".equals(args[0].toLowerCase(Locale.ROOT)) && sender.hasPermission("nexusai.test")) {
             String prefix = args[1].toLowerCase(Locale.ROOT);
             List<String> ids = new ArrayList<>();
-            for (String id : plugin.getPromptCatalog().ids()) {
+            for (String id : visiblePrompts().ids()) {
                 if (id.startsWith(prefix)) {
                     ids.add(id);
                 }

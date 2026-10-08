@@ -21,6 +21,7 @@ command:
   prompts-header: "{prefix}&e已命名提示词 &8({count})&e:"
   prompts-line: "&7- &f{id}"
   prompts-empty: "{prefix}&7没有已命名的提示词。请写入 &fprompts.yml&7。"
+  prompts-registered: "{prefix}&7由插件注册：&f{prompts}"
   reload-ok: "{prefix}&a配置已重载。"
   reload-fail: "{prefix}&c重载失败：&f{error}"
   status-header: "{prefix}&e状态："

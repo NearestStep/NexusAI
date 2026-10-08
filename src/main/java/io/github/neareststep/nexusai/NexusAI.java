@@ -35,6 +35,7 @@ import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.generate.GenerationRuntime;
 import io.github.neareststep.nexusai.generate.GenerationService;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
@@ -133,6 +134,8 @@ public final class NexusAI extends JavaPlugin {
         this.contextRegistry = new ContextRegistry(getLogger());
         NexusAIApi.bindContextRegistry(contextRegistry);
         getServer().getPluginManager().registerEvents(contextRegistry, this);
+        ApiPromptRegistry.get().retainEnabled();
+        getServer().getPluginManager().registerEvents(new ApiPromptRegistry.DisableListener(), this);
         contextRegistry.load(getServer().getServicesManager());
         loadPrompts();
         logCredentialState();

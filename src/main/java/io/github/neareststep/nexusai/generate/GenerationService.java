@@ -690,7 +690,9 @@ public final class GenerationService {
         int maxVar = current.config().pluginApiMaxVarChars();
         NamedPrompt named = null;
         if (request.promptId().isPresent()) {
-            named = current.catalog().find(request.promptId().get()).orElse(null);
+            named = ApiPromptRegistry.get().effective(current.catalog(), request.promptId().get())
+                    .map(ApiPromptRegistry.Effective::prompt)
+                    .orElse(null);
             if (named == null) {
                 return Lookup.error(null, NexusErrorKind.UNKNOWN_PROMPT, NexusErrors.UNKNOWN_PROMPT);
             }

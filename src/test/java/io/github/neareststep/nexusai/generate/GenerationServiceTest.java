@@ -18,6 +18,7 @@ import io.github.neareststep.nexusai.api.GenerationError;
 import io.github.neareststep.nexusai.api.GenerationRequest;
 import io.github.neareststep.nexusai.api.GenerationResult;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.api.PromptDefinition;
 import io.github.neareststep.nexusai.api.NexusContextProvider;
 import io.github.neareststep.nexusai.api.NexusErrorKind;
 import io.github.neareststep.nexusai.api.ResultSource;
@@ -498,6 +499,40 @@ class GenerationServiceTest {
         GenerationResult omitted = harness.service.generate(
                 harness.owner, GenerationRequest.template("Hello").temperature(-1).build()).get(5, TimeUnit.SECONDS);
         assertEquals(ResultSource.MODEL, omitted.source());
+    }
+
+    @Test
+    void registeredPromptIsSentUntilPromptsYmlReplacesIt() throws Exception {
+        ApiPromptRegistry.get().clear();
+        try {
+            Harness harness = harness(false);
+            NexusAIApi.registerPrompt(harness.owner, "intro", PromptDefinition.builder("from code").build());
+            GenerationResult result = harness.service.generate(
+                    harness.owner, GenerationRequest.prompt("quests:intro").build()).get(5, TimeUnit.SECONDS);
+            assertTrue(result.success());
+            assertEquals("quests:intro", result.promptId());
+            assertEquals("from code", harness.script.prompt.get());
+
+            harness.catalog = PromptCatalog.parse("""
+                    "quests:intro":
+                      prompt: "from file"
+                      context: all
+                    """).catalog();
+            harness.publish(harness.config());
+            GenerationResult overridden = harness.service.generate(
+                    harness.owner, GenerationRequest.prompt("quests:intro").build()).get(5, TimeUnit.SECONDS);
+            assertTrue(overridden.success());
+            assertEquals("from file", harness.script.prompt.get());
+
+            assertTrue(NexusAIApi.unregisterPrompt(harness.owner, "intro"));
+            harness.catalog = PromptCatalog.empty();
+            harness.publish(harness.config());
+            GenerationResult missing = harness.service.generate(
+                    harness.owner, GenerationRequest.prompt("quests:intro").build()).get(5, TimeUnit.SECONDS);
+            assertEquals(NexusErrorKind.UNKNOWN_PROMPT, missing.error().orElseThrow().kind());
+        } finally {
+            ApiPromptRegistry.get().clear();
+        }
     }
 
     @Test
