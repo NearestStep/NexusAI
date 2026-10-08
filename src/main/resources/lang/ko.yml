@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7테스트 요청을 보내는 중..."
   test-ok: "{prefix}&a응답 &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&c테스트 실패 &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7지식: &f{selection}"
   version: "{prefix}&f버전: &a{version}&7. 작성자: &f{authors}"
   prompts-header: "{prefix}&e이름 있는 프롬프트 &8({count})&e:"
   prompts-line: "&7- &f{id}"

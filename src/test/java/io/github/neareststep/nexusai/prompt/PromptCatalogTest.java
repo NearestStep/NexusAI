@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.api.PromptDefinition;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.ai.AiProvider;
 import io.github.neareststep.nexusai.cache.AiCache;
@@ -351,6 +353,45 @@ class PromptCatalogTest {
                 """).catalog().find("quests:intro").orElseThrow();
         assertEquals("from file", prompt.template());
         assertEquals(List.of("economy"), prompt.context().ids());
+    }
+
+    @Test
+    void knowledgeSelectAndKeywords() {
+        PromptCatalog.Parsed parsed = PromptCatalog.parse("""
+                rules_help:
+                  prompt: "Answer the player's question about server rules: {question}"
+                  knowledge: [rules, faq]
+                  knowledge-select: keywords
+                  knowledge-keywords: [rules, бан, апелляция]
+                plain:
+                  prompt: "Hi"
+                  knowledge: [lore]
+                bad:
+                  prompt: "Hi"
+                  knowledge-select: vectors
+                  knowledge-keywords: "one word"
+                """);
+        assertTrue(parsed.valid(), parsed.error());
+        NamedPrompt rules = parsed.catalog().find("rules_help").orElseThrow();
+        assertEquals(KnowledgeSelect.KEYWORDS, rules.knowledgeSelect());
+        assertEquals(List.of("rules", "faq"), rules.knowledge());
+        assertEquals(List.of("rules", "бан", "апелляция"), rules.knowledgeKeywords());
+        NamedPrompt plain = parsed.catalog().find("plain").orElseThrow();
+        assertNull(plain.knowledgeSelect());
+        assertTrue(plain.knowledgeKeywords().isEmpty());
+        assertTrue(parsed.warnings().stream().anyMatch(line -> line.contains("knowledge-select")), parsed.warnings().toString());
+        assertEquals(List.of("one word"), parsed.catalog().find("bad").orElseThrow().knowledgeKeywords());
+        assertNull(parsed.catalog().find("bad").orElseThrow().knowledgeSelect());
+
+        PromptDefinition definition = PromptDefinition.builder("Answer {question}")
+                .knowledge(List.of("rules"))
+                .knowledgeSelect(KnowledgeSelect.KEYWORDS)
+                .knowledgeKeywords(List.of("бан", " бан "))
+                .build();
+        assertEquals(KnowledgeSelect.KEYWORDS, definition.knowledgeSelect());
+        assertEquals(List.of("бан"), definition.knowledgeKeywords());
+        assertThrows(IllegalArgumentException.class, () -> PromptDefinition.builder("Answer").knowledgeSelect(null));
+        assertThrows(IllegalArgumentException.class, () -> PromptDefinition.builder("Answer").knowledgeKeywords(null));
     }
 
     private static PluginConfig config() {

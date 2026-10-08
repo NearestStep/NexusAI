@@ -9,7 +9,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
+
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -41,25 +44,58 @@ public final class KnowledgeBase {
                 knowledge:
                   - example
               The name is the file name without .md or .txt.
-              Text outside this comment is sent to the model. Replace it with your server lore.
+              In keywords mode, lines that start with # are section headings and <!-- keywords: ... -->
+              adds words for that paragraph. Those comments are not sent to the model.
+              In full mode the file is sent as written, including comments.
             -->
+
+            # Harbor
+
+            The harbor is old. Ships pay the dock fee before they unload.
+
+            # Rules
+
+            <!-- keywords: grief, steal -->
+            Do not grief builds or steal from chests.
+
+            Ask in chat when a rule is unclear.
             """;
 
     private final Map<String, String> files;
+    private final Map<String, String> keywordFiles;
     private final Set<String> invalidUtf8;
+    private final Set<String> fullTruncated;
+    private final int fullFileChars;
     private final int maxChars;
+    private final KeywordSelector selector;
     private final Logger logger;
     private final Set<String> truncationWarned = ConcurrentHashMap.newKeySet();
+    private final Set<String> fullTruncationWarned = ConcurrentHashMap.newKeySet();
 
-    private KnowledgeBase(Map<String, String> files, Set<String> invalidUtf8, int maxChars, Logger logger) {
+    private KnowledgeBase(
+            Map<String, String> files,
+            Map<String, String> keywordFiles,
+            Set<String> invalidUtf8,
+            Set<String> fullTruncated,
+            int fullFileChars,
+            int maxChars,
+            KeywordSettings keywords,
+            Logger logger
+    ) {
         this.files = files;
+        this.keywordFiles = keywordFiles == null ? Map.of() : keywordFiles;
         this.invalidUtf8 = invalidUtf8 == null ? Set.of() : Set.copyOf(invalidUtf8);
+        this.fullTruncated = fullTruncated == null ? Set.of() : Set.copyOf(fullTruncated);
+        this.fullFileChars = Math.max(1, fullFileChars);
         this.maxChars = Math.max(1, maxChars);
         this.logger = logger == null ? Logger.getLogger("nexusai.knowledge") : logger;
+        Tokenizer tokenizer = Tokenizer.builtin(keywords == null ? List.of() : keywords.stopWords());
+        KnowledgeIndex index = KnowledgeIndex.build(this.keywordFiles, tokenizer);
+        this.selector = new KeywordSelector(index, tokenizer, keywords, this.maxChars, this.logger);
     }
 
     public static KnowledgeBase empty() {
-        return new KnowledgeBase(Map.of(), Set.of(), 6000, null);
+        return new KnowledgeBase(Map.of(), Map.of(), Set.of(), Set.of(), 4000, 6000, KeywordSettings.defaults(), null);
     }
 
     /**
@@ -89,10 +125,32 @@ public final class KnowledgeBase {
             Logger logger,
             Iterable<String> secrets
     ) {
+        return load(folder, maxChars, maxFileChars, KeywordSettings.legacyFileCap(maxFileChars), true, warnings, logger, secrets);
+    }
+
+    /**
+     * @param warnFullTruncationAtLoad when false, a file longer than {@code knowledge.max-file-chars}
+     *                                  is remembered and warned later, only if a full-mode prompt uses it
+     */
+    public static KnowledgeBase load(
+            Path folder,
+            int maxChars,
+            int maxFileChars,
+            KeywordSettings keywords,
+            boolean warnFullTruncationAtLoad,
+            List<String> warnings,
+            Logger logger,
+            Iterable<String> secrets
+    ) {
         List<String> notes = warnings == null ? new ArrayList<>() : warnings;
-        int fileCap = Math.max(1, maxFileChars);
+        KeywordSettings keywordSettings = keywords == null ? KeywordSettings.defaults() : keywords;
+        int fullCap = Math.max(1, maxFileChars);
+        int keywordCap = Math.max(1, keywordSettings.maxFileChars());
+        boolean sameCap = fullCap == keywordCap;
         Map<String, String> loaded = new LinkedHashMap<>();
+        Map<String, String> indexed = new LinkedHashMap<>();
         Set<String> invalidUtf8 = new LinkedHashSet<>();
+        Set<String> fullTruncated = new LinkedHashSet<>();
         if (folder != null && Files.isDirectory(folder)) {
             try (var stream = Files.list(folder)) {
                 List<Path> paths = stream
@@ -141,14 +199,20 @@ public final class KnowledgeBase {
                         }
                         continue;
                     }
-                    if (text.length() > fileCap) {
-                        text = text.substring(0, fileCap);
-                        notes.add("Knowledge file '" + name + "' was truncated to " + fileCap + " characters.");
+                    String fullText = cap(text, fullCap, sameCap && warnFullTruncationAtLoad, name, notes);
+                    String keywordText = sameCap ? fullText : cap(text, keywordCap, true, name, notes);
+                    if (!sameCap && text.length() > fullCap) {
+                        if (warnFullTruncationAtLoad) {
+                            notes.add("Knowledge file '" + name + "' was truncated to " + fullCap + " characters.");
+                        } else {
+                            fullTruncated.add(name);
+                        }
                     }
-                    String stripped = stripTrailingNewlines(text);
-                    if (!stripped.isBlank()) {
-                        loaded.put(name, stripped);
+                    if (fullText.isBlank() && keywordText.isBlank()) {
+                        continue;
                     }
+                    loaded.put(name, fullText);
+                    indexed.put(name, keywordText.isBlank() ? fullText : keywordText);
                 }
             } catch (IOException e) {
                 notes.add("Could not list the knowledge folder.");
@@ -157,7 +221,85 @@ public final class KnowledgeBase {
                 }
             }
         }
-        return new KnowledgeBase(Map.copyOf(loaded), invalidUtf8, maxChars, logger);
+        return new KnowledgeBase(
+                Map.copyOf(loaded),
+                Map.copyOf(indexed),
+                invalidUtf8,
+                fullTruncated,
+                fullCap,
+                maxChars,
+                keywordSettings,
+                logger);
+    }
+
+    /**
+     * One warning per file, and only for files a prompt actually uses while selection is {@code full}.
+     */
+    public void warnFullModeTruncation(Collection<String> names, Logger target) {
+        if (names == null || names.isEmpty() || fullTruncated.isEmpty()) {
+            return;
+        }
+        Logger out = target == null ? logger : target;
+        for (String name : names) {
+            if (name == null || !fullTruncated.contains(name) || !fullTruncationWarned.add(name)) {
+                continue;
+            }
+            out.warning("Knowledge file '" + name + "' was truncated to " + fullFileChars + " characters.");
+        }
+    }
+
+    /**
+     * Block, cache token, and the {@code /nai test} summary for this request.
+     * {@link KnowledgeSelect#FULL} is the historical whole-file block.
+     */
+    public Piece render(List<String> names, KnowledgeRequest request) {
+        KnowledgeRequest effective = request == null ? KnowledgeRequest.full() : request;
+        if (effective.mode() != KnowledgeSelect.KEYWORDS) {
+            String block = block(names);
+            return new Piece(block, sha256(block), KnowledgeSummaries.format(included(names), KnowledgeSelect.FULL));
+        }
+        KeywordSelector.Selection selection = selector.select(names, effective.text(), effective.keywords());
+        String block = wrap(selection.content());
+        return new Piece(block, sha256(block), KnowledgeSummaries.format(selection.labels(), KnowledgeSelect.KEYWORDS));
+    }
+
+    public KeywordSelector selector() {
+        return selector;
+    }
+
+    private static String cap(String text, int cap, boolean warn, String name, List<String> notes) {
+        String body = text == null ? "" : text;
+        if (body.length() > cap) {
+            body = body.substring(0, cap);
+            if (warn) {
+                notes.add("Knowledge file '" + name + "' was truncated to " + cap + " characters.");
+            }
+        }
+        return stripTrailingNewlines(body);
+    }
+
+    private List<String> included(List<String> names) {
+        if (names == null || names.isEmpty()) {
+            return List.of();
+        }
+        List<String> labels = new ArrayList<>();
+        for (String name : names) {
+            if (name == null || labels.contains(name)) {
+                continue;
+            }
+            String text = files.get(name);
+            if (text != null && !text.isBlank()) {
+                labels.add(name);
+            }
+        }
+        return List.copyOf(labels);
+    }
+
+    private String wrap(String content) {
+        if (content == null || content.isEmpty()) {
+            return "";
+        }
+        return OPEN + "\n" + content + "\n" + CLOSE;
     }
 
     public boolean contains(String name) {
@@ -269,5 +411,13 @@ public final class KnowledgeBase {
             end--;
         }
         return text.substring(0, end);
+    }
+
+    public record Piece(String block, String cacheToken, String summary) {
+        public Piece {
+            block = block == null ? "" : block;
+            cacheToken = cacheToken == null ? "" : cacheToken;
+            summary = summary == null ? "" : summary;
+        }
     }
 }

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.prompt;
 
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -24,6 +25,8 @@ public final class ResolvedPrompt {
     private final GenerationOverrides overrides;
     private final String formatId;
     private final List<String> knowledge;
+    private final KnowledgeSelect knowledgeSelect;
+    private final List<String> knowledgeKeywords;
     private final boolean usable;
 
     private ResolvedPrompt(
@@ -36,6 +39,8 @@ public final class ResolvedPrompt {
             GenerationOverrides overrides,
             String formatId,
             List<String> knowledge,
+            KnowledgeSelect knowledgeSelect,
+            List<String> knowledgeKeywords,
             boolean usable
     ) {
         this.named = named;
@@ -47,6 +52,10 @@ public final class ResolvedPrompt {
         this.overrides = overrides;
         this.formatId = formatId;
         this.knowledge = knowledge == null ? List.of() : List.copyOf(knowledge);
+        this.knowledgeSelect = knowledgeSelect;
+        this.knowledgeKeywords = knowledgeKeywords == null || knowledgeKeywords.isEmpty()
+                ? List.of()
+                : List.copyOf(knowledgeKeywords);
         this.usable = usable;
     }
 
@@ -64,6 +73,8 @@ public final class ResolvedPrompt {
                 null,
                 withFallback(GenerationOverrides.none().withFormat(format), null, config),
                 format,
+                List.of(),
+                null,
                 List.of(),
                 usable
         );
@@ -88,6 +99,8 @@ public final class ResolvedPrompt {
                 overrides,
                 format,
                 prompt.knowledge(),
+                prompt.knowledgeSelect(),
+                prompt.knowledgeKeywords(),
                 usable
         );
     }
@@ -141,6 +154,17 @@ public final class ResolvedPrompt {
 
     public List<String> knowledge() {
         return knowledge;
+    }
+
+    /**
+     * @return prompt {@code knowledge-select}, or {@code null} when this prompt inherits the global mode
+     */
+    public KnowledgeSelect knowledgeSelect() {
+        return knowledgeSelect;
+    }
+
+    public List<String> knowledgeKeywords() {
+        return knowledgeKeywords;
     }
 
     public String poolKey() {

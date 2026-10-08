@@ -38,6 +38,8 @@ public final class PromptDefinition {
     private final String fallback;
     private final Map<String, String> vars;
     private final List<String> knowledge;
+    private final KnowledgeSelect knowledgeSelect;
+    private final List<String> knowledgeKeywords;
     private final Object schema;
 
     private PromptDefinition(
@@ -51,6 +53,8 @@ public final class PromptDefinition {
             String fallback,
             Map<String, String> vars,
             List<String> knowledge,
+            KnowledgeSelect knowledgeSelect,
+            List<String> knowledgeKeywords,
             Object schema
     ) {
         this.text = text;
@@ -63,6 +67,8 @@ public final class PromptDefinition {
         this.fallback = fallback;
         this.vars = vars;
         this.knowledge = knowledge;
+        this.knowledgeSelect = knowledgeSelect;
+        this.knowledgeKeywords = knowledgeKeywords;
         this.schema = schema;
     }
 
@@ -118,6 +124,17 @@ public final class PromptDefinition {
     }
 
     /**
+     * {@code knowledge-select}, or {@code null} to inherit {@code knowledge.select}.
+     */
+    public KnowledgeSelect knowledgeSelect() {
+        return knowledgeSelect;
+    }
+
+    public List<String> knowledgeKeywords() {
+        return knowledgeKeywords;
+    }
+
+    /**
      * Code schema stored for {@link NexusAIApi#generateJson(org.bukkit.plugin.Plugin, GenerationRequest)}.
      * {@code prompts.yml} does not replace this value. Only a {@link JsonSchema} is sent.
      */
@@ -146,6 +163,8 @@ public final class PromptDefinition {
         private String fallback;
         private Map<String, String> vars = Map.of();
         private List<String> knowledge = List.of();
+        private KnowledgeSelect knowledgeSelect;
+        private List<String> knowledgeKeywords = List.of();
         private Object schema;
 
         private Builder(String text) {
@@ -255,6 +274,34 @@ public final class PromptDefinition {
             return this;
         }
 
+        /** {@code full} or {@code keywords}. Omitted means inherit {@code knowledge.select}. */
+        public Builder knowledgeSelect(KnowledgeSelect select) {
+            if (select == null) {
+                throw new IllegalArgumentException("knowledgeSelect is required");
+            }
+            this.knowledgeSelect = select;
+            return this;
+        }
+
+        /** Words always added to a keyword query. Any text, including non-Latin. */
+        public Builder knowledgeKeywords(List<String> words) {
+            if (words == null) {
+                throw new IllegalArgumentException("knowledgeKeywords is required");
+            }
+            List<String> copy = new ArrayList<>();
+            for (String word : words) {
+                if (word == null || word.isBlank()) {
+                    throw new IllegalArgumentException("knowledge keyword is empty");
+                }
+                String trimmed = word.trim();
+                if (!copy.contains(trimmed)) {
+                    copy.add(trimmed);
+                }
+            }
+            this.knowledgeKeywords = copy;
+            return this;
+        }
+
         /**
          * Schema for {@link NexusAIApi#generateJson(org.bukkit.plugin.Plugin, GenerationRequest)}.
          * An admin override in {@code prompts.yml} does not replace it.
@@ -285,6 +332,7 @@ public final class PromptDefinition {
                     ? Map.of()
                     : Collections.unmodifiableMap(new LinkedHashMap<>(vars));
             List<String> knowledgeCopy = knowledge.isEmpty() ? List.of() : List.copyOf(knowledge);
+            List<String> keywordCopy = knowledgeKeywords.isEmpty() ? List.of() : List.copyOf(knowledgeKeywords);
             return new PromptDefinition(
                     body,
                     format,
@@ -296,6 +344,8 @@ public final class PromptDefinition {
                     fallbackSet ? fallback : null,
                     varCopy,
                     knowledgeCopy,
+                    knowledgeSelect,
+                    keywordCopy,
                     schema);
         }
 

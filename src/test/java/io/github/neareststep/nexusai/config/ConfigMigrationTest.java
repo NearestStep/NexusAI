@@ -669,6 +669,45 @@ class ConfigMigrationTest {
         assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
     }
 
+    @Test
+    void knowledgeKeywordKeysAreAppendedOnce() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-knowledge-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                knowledge:
+                  max-chars: 5000
+                  max-file-chars: 3000
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("knowledge-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("knowledge.select"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("knowledge.keywords.max-paragraphs"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("knowledge.keywords.stop-words"), outcome.addedKeys().toString());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("max-paragraphs:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(2, yaml.getInt("config-version"));
+        assertEquals(5000, yaml.getInt("knowledge.max-chars"));
+        assertEquals(3000, yaml.getInt("knowledge.max-file-chars"));
+        assertEquals("full", yaml.getString("knowledge.select"));
+        assertEquals(6, yaml.getInt("knowledge.keywords.max-paragraphs"));
+        assertEquals(1200, yaml.getInt("knowledge.keywords.max-paragraph-chars"));
+        assertEquals(200000, yaml.getInt("knowledge.keywords.max-file-chars"));
+        assertEquals(1, yaml.getInt("knowledge.keywords.min-matches"));
+        assertEquals("none", yaml.getString("knowledge.keywords.on-no-match"));
+        assertTrue(yaml.getStringList("knowledge.keywords.stop-words").isEmpty());
+
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

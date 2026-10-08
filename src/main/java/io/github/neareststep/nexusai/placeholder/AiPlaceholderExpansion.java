@@ -15,6 +15,8 @@ import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
 import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -154,7 +156,11 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 resolved.overrides(),
                 config.getSystemPrompt(),
                 plugin.getKnowledgeBase(),
-                resolved.knowledge());
+                resolved.knowledge(),
+                new KnowledgeRequest(
+                        KnowledgeRequests.effective(resolved.knowledgeSelect(), config.knowledgeSelect()),
+                        resolved.text(),
+                        resolved.knowledgeKeywords()));
         NamedPrompt named = contextPrompt(player, resolved);
         if (named == null) {
             return cachedLookup(player, raw, resolved, resolved.text(), prepared);

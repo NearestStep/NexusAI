@@ -41,7 +41,10 @@ class ExamplesConfigTest {
 
     private static final Set<String> FALLBACK_MODEL = Set.of("provider", "model");
 
-    private static final Set<String> KNOWLEDGE = Set.of("max-chars", "max-file-chars");
+    private static final Set<String> KNOWLEDGE = Set.of("max-chars", "max-file-chars", "select", "keywords");
+
+    private static final Set<String> KNOWLEDGE_KEYWORDS = Set.of(
+            "max-paragraphs", "max-paragraph-chars", "max-file-chars", "min-matches", "on-no-match", "stop-words");
 
     private static final Set<String> FORMAT = Set.of(
             "instruction", "max-lines", "max-chars", "max-chars-per-line", "max-words",
@@ -96,6 +99,7 @@ class ExamplesConfigTest {
     private static final Set<String> PROMPT_SETTINGS = Set.of(
             "prompt", "vars", "ttl", "fallback", "max-prompt-length", "model", "system-prompt",
             "temperature", "max-tokens", "format", "dialogue", "actions", "knowledge",
+            "knowledge-select", "knowledge-keywords",
             "fallback-model", "context");
 
     private static final Set<String> PROMPT_DIALOGUE = Set.of(
@@ -259,6 +263,9 @@ class ExamplesConfigTest {
         }
         if ("knowledge".equals(parent)) {
             return KNOWLEDGE.contains(key);
+        }
+        if ("knowledge.keywords".equals(parent)) {
+            return KNOWLEDGE_KEYWORDS.contains(key);
         }
         if ("formats".equals(parent)) {
             return "default".equals(key) || FormatPresets.known(key);

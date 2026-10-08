@@ -148,6 +148,15 @@ public final class MemoryStore {
         return memory.view();
     }
 
+    /**
+     * The previous player line. Expires a stale transcript and does not trim it.
+     */
+    public String lastUserLine(UUID player, String characterId, long nowMillis, long expiryMillis) {
+        TurnMemory stored = get(player, characterId);
+        stored.expire(nowMillis, expiryMillis);
+        return stored.lastUserText();
+    }
+
     public String summary(UUID player, String characterId, long nowMillis, long expiryMillis) {
         TurnMemory memory = get(player, characterId);
         memory.expire(nowMillis, expiryMillis);

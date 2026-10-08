@@ -109,6 +109,20 @@ public final class TurnMemory {
         return List.copyOf(lines);
     }
 
+    /**
+     * The latest player line, or {@code ""} when there is none.
+     * Does not trim the transcript.
+     */
+    public synchronized String lastUserText() {
+        for (int i = lines.size() - 1; i >= 0; i--) {
+            Line line = lines.get(i);
+            if ("user".equals(line.role())) {
+                return line.text();
+            }
+        }
+        return "";
+    }
+
     public synchronized long updatedAt() {
         return updatedAt;
     }

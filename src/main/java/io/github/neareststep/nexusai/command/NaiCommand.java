@@ -23,6 +23,7 @@ import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.moderation.ModerationService;
@@ -525,12 +526,17 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 noticeId = resolved.id();
             }
             prompt = resolved.text();
-            overrides = KnowledgeComposer.prepare(
+            KnowledgeComposer.Prepared prepared = KnowledgeComposer.prepare(
                     resolved.overrides(),
                     plugin.getPluginConfig().getSystemPrompt(),
                     plugin.getKnowledgeBase(),
-                    resolved.knowledge()).overrides();
+                    resolved.knowledge(),
+                    KnowledgeRequests.of(namedPrompt, plugin.getPluginConfig().knowledgeSelect(), prompt));
+            overrides = prepared.overrides();
             overrides = overrides.withNoticeId(noticeId);
+            if (!resolved.knowledge().isEmpty()) {
+                messages.send(sender, "command.test-knowledge", Map.of("selection", prepared.summary()));
+            }
             if (player != null
                     && namedPrompt.context().active()
                     && plugin.getPluginConfig().contextSettings().enabled()

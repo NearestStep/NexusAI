@@ -170,7 +170,10 @@ public final class GenerationRequest {
         return knowledge;
     }
 
-    /** Stored for a later keyword selector. This version does not read it. */
+    /**
+     * Words used to pick knowledge paragraphs. When unset, the prompt text is used.
+     * A context block appended to the user message is not part of this query.
+     */
     public Optional<String> knowledgeQuery() {
         return knowledgeQuery == null ? Optional.empty() : Optional.of(knowledgeQuery);
     }

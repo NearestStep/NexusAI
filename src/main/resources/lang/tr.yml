@@ -17,6 +17,7 @@ command:
   test-sending: "{prefix}&7Test isteği gönderiliyor..."
   test-ok: "{prefix}&aYanıt &8({latency_ms} ms)&a: &f{answer}"
   test-fail: "{prefix}&cTest başarısız &8({latency_ms} ms)&c: &f{error}"
+  test-knowledge: "{prefix}&7Bilgi: &f{selection}"
   version: "{prefix}&fSürüm: &a{version}&7. Yazar: &f{authors}"
   prompts-header: "{prefix}&eAdlandırılmış istemler &8({count})&e:"
   prompts-line: "&7- &f{id}"

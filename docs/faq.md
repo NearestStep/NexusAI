@@ -83,6 +83,10 @@ Files in `plugins/NexusAI/knowledge/` must be UTF-8 (`.md` or `.txt`). A Windows
 
 The stack trace is only at FINE. Re-save the file as UTF-8 and run `/nai reload`. `example.md` is created once and is never overwritten.
 
+## Keyword knowledge sends the whole file
+
+`knowledge.select` defaults to `full`. That mode still sends each listed file, including HTML comments, up to `knowledge.max-file-chars` (4000) and `knowledge.max-chars` (6000). Set `knowledge.select: keywords`, or `knowledge-select: keywords` on the prompt, to send only matching paragraphs. A file in that mode may be up to `knowledge.keywords.max-file-chars` (200000). Split the file on blank lines, and put a `#` heading above a section so those words count for the paragraphs under it. `<!-- keywords: ban, mute -->` on a paragraph adds words and is not sent. `/nai talk` does not attach knowledge while the mode is `full`. There is no vector database and no embeddings.
+
 ## Placeholders and `{tokens}`
 
 | Token | Where it is filled |

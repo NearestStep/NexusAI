@@ -8,6 +8,10 @@ import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.command.SenderTasks;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -532,6 +536,15 @@ public final class DialogueService {
         Predicate<String> permissions = node -> Boolean.TRUE.equals(grants.get(node));
         String fallback = prompt.fallback() != null ? prompt.fallback() : config.getFallback();
         String instruction = formatInstruction(prompt, config);
+        String previous = "";
+        if (message != null && !message.isBlank()) {
+            previous = memory.lastUserLine(
+                    player.getUniqueId(),
+                    characterId,
+                    System.currentTimeMillis(),
+                    config.dialogueSettings().memoryExpiryMillis());
+        }
+        String knowledgeBlock = talkKnowledge(prompt, config, plugin.getKnowledgeBase(), message, previous);
         String summaryBlock = "";
         if (config.dialogueSettings().summaryEnabled()) {
             summaryBlock = DialogueSummary.block(memory.summary(
@@ -549,7 +562,7 @@ public final class DialogueService {
                 sessionChat,
                 false,
                 false,
-                characterSystem(prompt, config, player, summaryBlock),
+                characterSystem(prompt, config, player, summaryBlock, knowledgeBlock),
                 fallback,
                 prompt.dialogue(),
                 prompt.actions(),
@@ -602,6 +615,19 @@ public final class DialogueService {
      * in that same gap, after the summary.
      */
     static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player, String summaryBlock) {
+        return characterSystem(prompt, config, player, summaryBlock, "");
+    }
+
+    /**
+     * Knowledge, when present, sits after the summary and before the context block and the format instruction.
+     */
+    static String characterSystem(
+            NamedPrompt prompt,
+            PluginConfig config,
+            Player player,
+            String summaryBlock,
+            String knowledgeBlock
+    ) {
         String sheet = prompt.render(
                 template -> VarSubstitutor.resolve(player, template),
                 ContextVariables.capture(player)
@@ -616,10 +642,43 @@ public final class DialogueService {
         if (summaryBlock != null && !summaryBlock.isEmpty()) {
             system.append("\n\n").append(summaryBlock);
         }
+        if (knowledgeBlock != null && !knowledgeBlock.isEmpty()) {
+            system.append("\n\n").append(knowledgeBlock);
+        }
         if (instruction != null && !instruction.isBlank()) {
             system.append("\n\n").append(instruction);
         }
         return system.toString();
+    }
+
+    /**
+     * Talk attaches knowledge only in keywords mode. Full mode keeps the 1.1 system string.
+     * A greeting has no player line, so only {@code knowledge-keywords} are used.
+     */
+    static String talkKnowledge(
+            NamedPrompt prompt,
+            PluginConfig config,
+            KnowledgeBase knowledge,
+            String message,
+            String previousLine
+    ) {
+        if (prompt == null || knowledge == null || prompt.knowledge().isEmpty() || config == null) {
+            return "";
+        }
+        if (KnowledgeRequests.effective(prompt.knowledgeSelect(), config.knowledgeSelect()) != KnowledgeSelect.KEYWORDS) {
+            return "";
+        }
+        String query;
+        if (message == null || message.isBlank()) {
+            query = "";
+        } else {
+            String previous = previousLine == null ? "" : previousLine;
+            query = previous.isBlank() ? message : message + "\n" + previous;
+        }
+        return knowledge.render(
+                prompt.knowledge(),
+                new KnowledgeRequest(KnowledgeSelect.KEYWORDS, query, prompt.knowledgeKeywords())
+        ).block();
     }
 
     static String formatInstruction(NamedPrompt prompt, PluginConfig config) {
