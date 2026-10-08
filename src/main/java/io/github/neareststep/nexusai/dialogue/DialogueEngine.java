@@ -153,7 +153,17 @@ public final class DialogueEngine {
                 profile.leaveRadius(settings.leaveRadius()),
                 request.nowMillis()
         );
-        String greeting = greeting(request);
+        String greeting;
+        try {
+            greeting = greeting(request);
+        } catch (RuntimeException error) {
+            AiRequestException typed = AiErrors.find(error);
+            if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+                sessions.close(request.playerId());
+                return TalkResult.of(TalkCode.QUOTA, request.characterId());
+            }
+            throw error;
+        }
         remember(request, "assistant", greeting);
         foldIfNeeded(request);
         return TalkResult.text(TalkCode.STARTED, request.characterId(), greeting);
@@ -270,6 +280,9 @@ public final class DialogueEngine {
                 || typed.kind() == AiErrorKind.MARKUP_ONLY)) {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
+        if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+            return TalkResult.of(TalkCode.QUOTA, request.characterId());
+        }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
         if (shouldLogFailure(typed, detail)) {
             logProviderFailure(detail);
@@ -287,6 +300,9 @@ public final class DialogueEngine {
      * line was not sent.
      */
     private static boolean shouldLogFailure(AiRequestException typed, String detail) {
+        if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+            return false;
+        }
         if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
             return true;
         }
@@ -353,6 +369,10 @@ public final class DialogueEngine {
                     CallTrace.start(RequestOrigin.TALK_GREETING, request.playerId(), characterId(request), "")
             ));
         } catch (RuntimeException e) {
+            AiRequestException typed = AiErrors.find(e);
+            if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+                throw e;
+            }
             return request.fallback();
         }
         String text = reply.text() == null || reply.text().isBlank() ? request.fallback() : reply.text();

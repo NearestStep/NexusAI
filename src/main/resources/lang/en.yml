@@ -49,6 +49,26 @@ command:
   status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderation: &f{state} &8({checks} checks, {flags} flags today)"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
+  help-usage: "&7/nai usage [players|consumers|history] &8- &fShow today's token usage"
+  status-tokens: "&7Tokens today: &f{tokens}{detail}"
+  status-quotas: "&7Quotas: &f{state}"
+  usage-limit-suffix: " (limit {limit})"
+  usage-estimated-suffix: " ({percent}% estimated)"
+  usage-on: "on"
+  usage-off: "off"
+  usage-header: "{prefix}&eToken usage today:"
+  usage-server: "&7Server: &f{requests} &7requests, &f{tokens} &7tokens &8(prompt {prompt}, completion {completion}){estimated}"
+  usage-title-providers: "&7Providers:"
+  usage-title-rows: "&7Queue rows:"
+  usage-title-origins: "&7Origins:"
+  usage-line: "&7- &f{name}&7: &f{requests} &7requests, &f{tokens} &7tokens"
+  usage-empty: "&7- none"
+  usage-players-header: "{prefix}&eTop players by tokens today:"
+  usage-consumers-header: "{prefix}&eAPI consumers today:"
+  usage-history-header: "{prefix}&eToken usage, last 30 days:"
+  usage-history-line: "&7- &f{day}&7: &f{requests} &7requests, &f{tokens} &7tokens"
+  usage-unknown: "{prefix}&cUnknown usage view. Use &eplayers&c, &econsumers&c, or &ehistory&c."
+  usage-denied: "{prefix}&cYou do not have permission to view token usage."
 
 common:
   "yes": "yes"
@@ -64,6 +84,7 @@ error:
   unknown-model: "unknown model"
   timeout: "timeout"
   other: "error"
+  local-quota: "daily token limit"
 
 # Dialogue keys.
 talk:
@@ -83,6 +104,7 @@ talk:
   replies: "{prefix}&7This conversation is over."
   daily: "{prefix}&cYou have reached today's conversation limit."
   busy: "{prefix}&7The character is busy. Try again later."
+  quota: "{prefix}&cYour AI limit for today is used up."
   failed: "{prefix}&cNo reply: &f{error}"
   empty: "{prefix}&7Say a little more."
   reply: "{prefix}&f{character}&7: &f{reply}"

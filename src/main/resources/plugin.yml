@@ -10,7 +10,7 @@ softdepend: [PlaceholderAPI]
 commands:
   nai:
     description: NexusAI commands
-    usage: /nai <help|version|reload|status|test|prompts|prompts import|talk>
+    usage: /nai <help|version|reload|status|usage|test|prompts|prompts import|talk>
     aliases: [nexusai]
 
 permissions:

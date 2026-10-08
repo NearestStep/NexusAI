@@ -222,14 +222,15 @@ Alias: `/nexusai`. The `/nai` command in `plugin.yml` has no permission of its o
 | `/nai help` | `nexusai.command` lists every line that sender may run. `nexusai.talk` without `nexusai.command` lists only `/nai talk` and `/nai talk end` | Show command help |
 | `/nai version` | `nexusai.command` | Plugin version and the authors from `plugin.yml` (`PluginMeta.getAuthors()`) |
 | `/nai reload` | `nexusai.command` and `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache, pool, and prewarm |
-| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, queue strategy and the next row, fallback model, moderation on/off, today's checks and flags, dialogue summaries (`off`, or `on (N ok, M failed today)`), and context providers (id, plugin, priority, timeout, ok or suspended, timeout count). Context values are not printed |
+| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, queue strategy and the next row, fallback model, moderation on/off, today's checks and flags, dialogue summaries (`off`, or `on (N ok, M failed today)`), context providers (id, plugin, priority, timeout, ok or suspended, timeout count), tokens used today (and the server limit, when one is set), and whether quotas are on. Context values are not printed |
+| `/nai usage [players\|consumers\|history]` | `nexusai.command` and `nexusai.status` | Today's token totals. With no argument: server, providers, queue rows, and origins. `players` is the top 10 by tokens. `consumers` is every API plugin. `history` is the last 30 days. Names are masked the same way as logs |
 | `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml`, then prompts a plugin registered from code |
 | `/nai prompts import <file> [--overwrite]` | `nexusai.command` and `nexusai.import` | Import prompt definitions from `plugins/NexusAI/import/<file>` into `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.command` and `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
 | `/nai talk <id> [message]` | `nexusai.talk` or `nexusai.command` | Talk to the character `id` from `prompts.yml`. A message is one reply. With no message, a session opens and later chat goes to that character |
 | `/nai talk end` | `nexusai.talk` or `nexusai.command` | End your dialogue session |
 
-`/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. `/nai prompts import` accepts `--overwrite` only as its last argument. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`. From the console, target a player with `/nai talk <player> <id> [message]`. A missing id prints that usage line. An unknown character or an offline player is reported to the console, not to the named player. The character's reply still goes to the player.
+`/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. `/nai usage` accepts one optional argument (`players`, `consumers`, or `history`). `/nai prompts import` accepts `--overwrite` only as its last argument. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`. From the console, target a player with `/nai talk <player> <id> [message]`. A missing id prints that usage line. An unknown character or an offline player is reported to the console, not to the named player. The character's reply still goes to the player.
 
 Listing ids does not change files. Import rewrites `prompts.yml`, so it needs `nexusai.import` as well as `nexusai.command`. Put a `.yml` or `.yaml` file in `plugins/NexusAI/import/`. The path must stay inside that folder: absolute paths, backslashes, and `..` are rejected. Ids and fields are checked the same way `prompts.yml` is loaded. New ids are added. An id that already exists is reported as conflicting and is not replaced unless you pass `--overwrite`. Invalid ids are skipped. Before the file changes, NexusAI copies `prompts.yml` to `prompts.yml.bak`, or `prompts.yml.bak.<timestamp>` when that backup already exists. It then reloads prompts.
 
@@ -239,9 +240,9 @@ Defaults come from `plugin.yml`. OP receives every node whose default is `op`. `
 
 | Permission | Default | Effect |
 |------------|---------|--------|
-| `nexusai.command` | op | Admin subcommands: help, version, reload, status, test, and `prompts`. Also allows `/nai talk` |
+| `nexusai.command` | op | Admin subcommands: help, version, reload, status, usage, test, and `prompts`. Also allows `/nai talk` |
 | `nexusai.reload` | op | `/nai reload`. Also requires `nexusai.command` |
-| `nexusai.status` | op | `/nai status`. Also requires `nexusai.command` |
+| `nexusai.status` | op | `/nai status` and `/nai usage`. Also requires `nexusai.command` |
 | `nexusai.test` | op | `/nai test`. Also requires `nexusai.command` |
 | `nexusai.import` | op | `/nai prompts import`. Also requires `nexusai.command`. Listing ids does not use this node |
 | `nexusai.talk` | op | `/nai talk` and `/nai talk end`. Grant this to the players who should talk. They do not need `nexusai.command` |
@@ -249,6 +250,8 @@ Defaults come from `plugin.yml`. OP receives every node whose default is `op`. `
 | `nexusai.moderation.bypass` | false | Skip the chat check. Operators do not receive this node unless it is granted |
 
 An action's `permission` field is a node you write on that action. It is not registered in `plugin.yml`. The example `nexusai.action.give_iron` is checked only when that action is about to run.
+
+`nexusai.quota.<name>` is also not in `plugin.yml`. It selects a row under `quotas.groups.<name>` when quotas are on. See [Token usage and quotas](#token-usage-and-quotas).
 
 ## Dialogues
 
@@ -366,6 +369,47 @@ NexusAI does not send analytics, metrics, or usage data. The build has no bStats
 The only outbound HTTP is `POST /chat/completions` on a base URL from `providers` (or the legacy `api.base-url` / provider default). The admin sets that URL. Placeholders, the pool, prewarm, `/nai test`, and `/nai talk` use that request. A talk request may include the action tool list. Running an action is a local command.
 
 When `moderation.enabled` is true, each checked public chat line is sent to the moderation provider as the same kind of request. The message body is included. The player name is not. When moderation is off, chat is not sent. A local base URL such as Ollama or LM Studio (`http://localhost:11434/v1`) keeps that request on the machine. A remote provider receives the text of every checked message.
+
+## Token usage and quotas
+
+Every request that reaches HTTP is counted in memory and saved to `plugins/NexusAI/token-usage.yml`. That file is separate from `usage.yml`, which still stores daily request caps. Counts reset at server-local midnight. A missing `usage` object is estimated as about one token per four characters when `quotas.missing-usage` is `estimate` (the default). `ignore` skips that response. The estimate is rough for Cyrillic and CJK text, because those characters are not one token each.
+
+`quotas.enabled` defaults to false. Counters still move, and `/nai status` and `/nai usage` can show them. No request is rejected for a token cap while quotas are off. `limits.*` is unchanged.
+
+When quotas are on, a call is admitted only when `spent + reserved` is still below every cap that applies. The reservation is `ceil(characters / 4)` of the text that will be sent, plus `max_tokens`. If that field is left unset, the reserve uses 1024, and a reasoning model reserves at least 2048. The reservation is released when the call succeeds, fails, or is cancelled. The ledger then stores the provider's real usage, so the next check sees what was spent. One call that is already in flight can finish above the cap. Later calls wait until midnight. A rejected call does not pause a provider, does not start prompt backoff, and does not cool a queue row.
+
+Caps, all daily, and `0` means no cap:
+
+- `quotas.server-tokens-per-day` applies to every origin, including moderation.
+- `quotas.player-tokens-per-day` applies to a player who has none of the groups below. Player slices are placeholders, `/nai talk`, greetings, dialogue summaries, and API calls made for that player. Moderation, the pool, prewarm, and `/nai test` do not spend a player cap.
+- `quotas.groups.<name>` applies when the player has `nexusai.quota.<name>`. That node is not registered in `plugin.yml`. The most generous matching group wins, separately for tokens and for requests. A `0` on one field beats every positive number. `requests-per-day` on a group replaces `limits.player-requests-per-day` for that player. The per-minute limit stays. The permission is read on the thread that owns the player and remembered for 60 seconds. Reload and quit clear it.
+- `quotas.consumers.<plugin>` applies only to `NexusAIApi.generate` for that plugin's `Plugin.getName()`. `consumers.default` is used by each plugin that has no row of its own. It is not one shared pot.
+- `daily-token-limit` on a `model-queue` row is optional and is not written into an existing `config.yml`. The row is skipped until midnight once spent and reserved tokens reach it, the same way `daily-request-limit` skips a row. A fallback model with the same provider and model shares that row. If every row is out of tokens, the call fails locally. A daily request cap on the queue is still the existing local limit.
+
+`/nai talk` answers a quota rejection with `talk.quota` (`Your AI limit for today is used up.`). That line is not stored in the dialogue. `NexusAIApi.generate` completes with `NexusErrorKind.QUOTA_EXCEEDED` and does not call HTTP. `NexusAIApi.quota(plugin)` returns today's tokens and requests for that plugin, with empty limits when quotas are off or that consumer has no cap. It reads memory on any thread. `API_VERSION` stays 3.
+
+The first time each cap is reached on a day, one info line is logged: `Token quota reached: server 200000/200000`. A player or plugin line includes the name and not the request text. Configured secrets are masked.
+
+Placeholders, resolved for the viewer and never by starting a request:
+
+```
+%ainexus_usage_server_tokens%
+%ainexus_usage_server_limit%
+%ainexus_usage_server_remaining%
+%ainexus_usage_server_percent%
+%ainexus_usage_server_requests%
+%ainexus_usage_player_tokens%
+%ainexus_usage_player_limit%
+%ainexus_usage_player_remaining%
+%ainexus_usage_player_percent%
+%ainexus_usage_player_requests%
+%ainexus_usage_consumer_tokens_<plugin>%
+%ainexus_usage_consumer_requests_<plugin>%
+```
+
+Token and request counts are shown even when quotas are off. Limit, remaining, and percent are empty when quotas are off or that cap is 0. Remaining is `max(0, limit - spent)` and does not subtract in-flight reservations. Percent is 0–100. Without a player, every `usage_player_*` value is empty. An unknown `usage_*` name is empty.
+
+`/nai usage` prints the same numbers. See [Commands](#commands).
 
 ## Placeholders
 

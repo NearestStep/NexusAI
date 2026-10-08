@@ -1,6 +1,9 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.config.FallbackModel;
@@ -214,6 +217,10 @@ public final class PoolService {
             if (!job.isDone()) {
                 int left = remaining - 1;
                 job.whenComplete((answer, error) -> {
+                    if (quotaBlocked(error)) {
+                        pauseForQuota(configuredPrompt, poolKey, memory);
+                        return;
+                    }
                     acceptFill(memory, entry, duplicates, storedUnique, answer, error);
                     fillOne(configuredPrompt, poolKey, memory, entry, left, duplicates, storedUnique);
                 });
@@ -227,12 +234,28 @@ public final class PoolService {
                 } catch (CompletionException e) {
                     error = e;
                 }
+                if (quotaBlocked(error)) {
+                    pauseForQuota(configuredPrompt, poolKey, memory);
+                    return;
+                }
                 acceptFill(memory, entry, duplicates, storedUnique, null, error);
             } else {
                 acceptFill(memory, entry, duplicates, storedUnique, job.join(), null);
             }
             remaining--;
         }
+    }
+
+    /** A quota refusal stops this wave and waits a minute instead of spinning. */
+    private void pauseForQuota(String configuredPrompt, String poolKey, String memory) {
+        AtomicBoolean flag = replenishing.computeIfAbsent(memory, ignored -> new AtomicBoolean(false));
+        flag.set(false);
+        scheduleRetry(configuredPrompt, poolKey, 60_000L);
+    }
+
+    private static boolean quotaBlocked(Throwable error) {
+        AiRequestException typed = AiErrors.find(error);
+        return typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA;
     }
 
     private void acceptFill(

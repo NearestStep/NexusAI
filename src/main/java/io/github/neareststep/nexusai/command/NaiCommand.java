@@ -13,6 +13,9 @@ import io.github.neareststep.nexusai.context.ContextService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
+import io.github.neareststep.nexusai.budget.TokenLedger;
+import io.github.neareststep.nexusai.budget.UsageReport;
 import io.github.neareststep.nexusai.config.QueueStrategy;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -54,7 +57,7 @@ import java.util.stream.Stream;
 public final class NaiCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "version", "reload", "status", "test", "prompts", "talk");
+            "help", "version", "reload", "status", "usage", "test", "prompts", "talk");
     private static final String DEFAULT_TEST_PROMPT = "Reply with exactly the word pong.";
 
     private final NexusAI plugin;
@@ -90,7 +93,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "command.no-permission");
             return true;
         }
-        if (args.length > 1 && !"test".equals(sub) && !"prompts".equals(sub)) {
+        if (args.length > 1 && !"test".equals(sub) && !"prompts".equals(sub) && !"usage".equals(sub)) {
             messages.send(sender, "command.extra-args");
             return true;
         }
@@ -102,6 +105,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             ));
             case "reload" -> handleReload(sender, messages);
             case "status" -> handleStatus(sender, messages);
+            case "usage" -> handleUsage(sender, messages, args);
             case "test" -> handleTest(sender, messages, args);
             case "prompts" -> handlePrompts(sender, messages, args);
             default -> messages.send(sender, "command.unknown");
@@ -138,6 +142,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         }
         if (sender.hasPermission("nexusai.status")) {
             messages.send(sender, "command.help-status");
+            messages.send(sender, "command.help-usage");
         }
         if (sender.hasPermission("nexusai.test")) {
             messages.send(sender, "command.help-test");
@@ -288,6 +293,15 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-dialogue-summary", Map.of(
                 "summary", dialogues == null ? "off" : dialogues.summaryStatus(System.currentTimeMillis())
         ));
+        messages.send(sender, "command.status-tokens", Map.of(
+                "tokens", Long.toString(tokensToday()),
+                "detail", tokenDetail(messages)
+        ));
+        QuotaPolicy quotas = plugin.getQuotaPolicy();
+        boolean quotasOn = quotas != null && quotas.enabled();
+        messages.send(sender, "command.status-quotas", Map.of(
+                "state", messages.raw(quotasOn ? "command.usage-on" : "command.usage-off")
+        ));
         FallbackModel fallback = config.fallbackModel();
         String fallbackEntry = messages.raw("common.none");
         if (fallback.configured() && queue != null) {
@@ -323,6 +337,77 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return config.providerKeyPresence(yes, no);
         }
         return no;
+    }
+
+    private void handleUsage(CommandSender sender, MessageService messages, String[] args) {
+        if (args.length > 2) {
+            messages.send(sender, "command.extra-args");
+            return;
+        }
+        if (!sender.hasPermission("nexusai.status")) {
+            messages.send(sender, "command.usage-denied");
+            return;
+        }
+        UsageReport.View view = UsageReport.parse(args.length < 2 ? null : args[1]);
+        SenderTasks.run(plugin, sender, () -> {
+            MessageService current = plugin.getMessageService();
+            List<UsageReport.Line> lines = view == null
+                    ? UsageReport.unknown()
+                    : UsageReport.render(view, plugin.tokenSnapshot(), estimatedShare(current), this::playerLabel);
+            for (UsageReport.Line line : lines) {
+                Map<String, String> values = new LinkedHashMap<>(line.values());
+                if (values.containsKey("name")) {
+                    values.put("name", redact(values.get("name")));
+                }
+                current.send(sender, line.key(), values);
+            }
+        }, plugin.getLogger());
+    }
+
+    private long tokensToday() {
+        TokenLedger.Snapshot snap = plugin.tokenSnapshot();
+        if (snap == null || snap.server() == null) {
+            return 0L;
+        }
+        return snap.server().total();
+    }
+
+    private String tokenDetail(MessageService messages) {
+        TokenLedger.Snapshot snap = plugin.tokenSnapshot();
+        long tokens = snap == null || snap.server() == null ? 0L : snap.server().total();
+        long estimated = snap == null || snap.server() == null ? 0L : snap.server().estimated();
+        QuotaPolicy quotas = plugin.getQuotaPolicy();
+        long limit = quotas != null && quotas.enabled() ? quotas.settings().serverTokensPerDay() : 0L;
+        return UsageReport.limitSuffix(messages.raw("command.usage-limit-suffix"), limit)
+                + UsageReport.estimatedSuffix(messages.raw("command.usage-estimated-suffix"), tokens, estimated);
+    }
+
+    private String estimatedShare(MessageService messages) {
+        TokenLedger.Snapshot snap = plugin.tokenSnapshot();
+        if (snap == null || snap.server() == null) {
+            return "";
+        }
+        return UsageReport.estimatedSuffix(
+                messages.raw("command.usage-estimated-suffix"), snap.server().total(), snap.server().estimated());
+    }
+
+    /** Offline name when the server has one, otherwise the ledger id. */
+    private String playerLabel(String id) {
+        if (id == null || id.isBlank()) {
+            return "";
+        }
+        try {
+            if (Bukkit.getServer() == null) {
+                return id;
+            }
+            String name = Bukkit.getOfflinePlayer(UUID.fromString(id)).getName();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        } catch (Throwable ignored) {
+            return id;
+        }
+        return id;
     }
 
     /**
@@ -692,6 +777,19 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         if (args.length >= 2 && "prompts".equals(args[0].toLowerCase(Locale.ROOT))) {
             return completePrompts(sender, args);
         }
+        if (args.length == 2 && "usage".equals(args[0].toLowerCase(Locale.ROOT))) {
+            if (!sender.hasPermission("nexusai.status")) {
+                return List.of();
+            }
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            List<String> views = new ArrayList<>();
+            for (String view : List.of("players", "consumers", "history")) {
+                if (view.startsWith(prefix)) {
+                    views.add(view);
+                }
+            }
+            return views;
+        }
         if (args.length == 2 && "test".equals(args[0].toLowerCase(Locale.ROOT)) && sender.hasPermission("nexusai.test")) {
             String prefix = args[1].toLowerCase(Locale.ROOT);
             List<String> ids = new ArrayList<>();
@@ -718,7 +816,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             if ("reload".equals(sub) && !sender.hasPermission("nexusai.reload")) {
                 continue;
             }
-            if ("status".equals(sub) && !sender.hasPermission("nexusai.status")) {
+            if (("status".equals(sub) || "usage".equals(sub)) && !sender.hasPermission("nexusai.status")) {
                 continue;
             }
             if ("test".equals(sub) && !sender.hasPermission("nexusai.test")) {

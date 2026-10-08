@@ -40,6 +40,8 @@ public final class ModelQueue {
             "^usage\\.yml\\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.tmp$");
 
     private final List<Slot> slots;
+    /** Spent plus reserved tokens for a row. {@link RowTokens#NONE} leaves token caps unenforced. */
+    private volatile RowTokens rowTokens = RowTokens.NONE;
     private final Map<String, Slot> fallbackSlots = new LinkedHashMap<>();
     private final Map<String, AtomicInteger> providerCounts = new LinkedHashMap<>();
     private final int remainingThreshold;
@@ -165,12 +167,27 @@ public final class ModelQueue {
         List<QueueEntryConfig> source = entries == null ? List.of() : entries;
         for (int i = 0; i < source.size(); i++) {
             QueueEntryConfig entry = source.get(i);
-            loaded.add(new Slot(i, entry.provider(), entry.model(), entry.dailyRequestLimit()));
+            loaded.add(new Slot(
+                    i, entry.provider(), entry.model(), entry.dailyRequestLimit(), entry.dailyTokenLimit()));
             providerCounts.putIfAbsent(entry.provider(), new AtomicInteger());
         }
         this.slots = List.copyOf(loaded);
         sweepTemps();
         load();
+    }
+
+    /** Token cap for one queue row. {@code 0} means the row has no token cap. A fallback-only slot is {@code 0}. */
+    public int dailyTokenLimit(int index) {
+        Slot slot = slot(index);
+        return slot == null ? 0 : slot.dailyTokenLimit;
+    }
+
+    /**
+     * Where {@link #isSelectable} reads tokens already spent or reserved on a row.
+     * Passing {@link RowTokens#NONE}, or leaving this unset, does not enforce {@code daily-token-limit}.
+     */
+    public void rowTokens(RowTokens source) {
+        this.rowTokens = source == null ? RowTokens.NONE : source;
     }
 
     /** Storage id written to {@code usage.yml} for a queue row, or empty when {@code index} is not a row. */
@@ -454,6 +471,8 @@ public final class ModelQueue {
             blocked.add(slot);
             if (slot.unavailableUntil > nowMillis) {
                 soonest = Math.min(soonest, slot.unavailableUntil);
+            } else if (tokenBlocked(slot, false)) {
+                soonest = Math.min(soonest, nextMidnight(nowMillis));
             }
             boolean daily = isDaily(slot);
             if (!daily) {
@@ -483,8 +502,11 @@ public final class ModelQueue {
             return withRetry(cause, retry);
         }
         if (sawBlocked && dailyOnly) {
+            AiErrorKind kind = tokenOnlyExhaustion(blocked) && fallbackBudgets.isEmpty()
+                    ? AiErrorKind.LOCAL_QUOTA
+                    : AiErrorKind.LOCAL_LIMIT;
             return new AiRequestException(
-                    AiErrorKind.LOCAL_LIMIT, 0, "All model-queue entries are exhausted." + retry, null);
+                    kind, 0, "All model-queue entries are exhausted." + retry, null);
         }
         if (sawHeader) {
             return new AiRequestException(AiErrorKind.RATE_LIMIT, 0, "AI provider rate limit." + retry, null);
@@ -630,6 +652,8 @@ public final class ModelQueue {
             String state;
             if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
                 state = "LIMIT REACHED (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
+            } else if (tokenBlocked(slot, false)) {
+                state = "LIMIT REACHED (tokens " + rowTokens.used(slot.storageId()) + "/" + slot.dailyTokenLimit + ")";
             } else if (nowMillis < slot.unavailableUntil) {
                 String when = Instant.ofEpochMilli(slot.unavailableUntil).atZone(zone).format(CLOCK);
                 state = "COOLDOWN until " + when;
@@ -908,6 +932,9 @@ public final class ModelQueue {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
             return false;
         }
+        if (tokenBlocked(slot, true)) {
+            return false;
+        }
         if (ignoreCooldown && slot.hold != Hold.DAILY) {
             return true;
         }
@@ -976,6 +1003,10 @@ public final class ModelQueue {
     }
 
     private String slotReason(Slot slot) {
+        if (tokenBlocked(slot, false) && !isRequestDaily(slot)) {
+            return "daily token limit reached (" + rowTokens.used(slot.storageId())
+                    + "/" + slot.dailyTokenLimit + ")";
+        }
         if (isDaily(slot)) {
             if (slot.dailyLimit > 0) {
                 return "daily request limit reached (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
@@ -1009,9 +1040,65 @@ public final class ModelQueue {
         return "request or token budget exhausted";
     }
 
-    private static boolean isDaily(Slot slot) {
+    private static boolean isRequestDaily(Slot slot) {
         return slot.hold == Hold.DAILY
                 || (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit);
+    }
+
+    private boolean isDaily(Slot slot) {
+        return isRequestDaily(slot) || tokenBlocked(slot, false);
+    }
+
+    private boolean tokenOnlyExhaustion(List<Slot> blocked) {
+        if (blocked.isEmpty()) {
+            return false;
+        }
+        for (Slot slot : blocked) {
+            if (isRequestDaily(slot) || !tokenBlocked(slot, false)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean tokenBlocked(Slot slot, boolean note) {
+        if (slot.dailyTokenLimit <= 0) {
+            return false;
+        }
+        RowTokens source = rowTokens;
+        if (source == null) {
+            return false;
+        }
+        long used = source.used(slot.storageId());
+        if (used < slot.dailyTokenLimit) {
+            return false;
+        }
+        if (note && source instanceof QuotaPolicy policy) {
+            policy.noteIfExhausted("row " + slot.storageId(), used, slot.dailyTokenLimit);
+        }
+        return true;
+    }
+
+    private long nextMidnight(long nowMillis) {
+        long midnight = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli();
+        if (midnight <= nowMillis) {
+            return nowMillis + 1_000L;
+        }
+        return midnight;
+    }
+
+    /** True when every row is at its token cap. Request caps and cooldowns do not count. */
+    public synchronized boolean allRowsTokenBlocked(long nowMillis) {
+        roll(nowMillis);
+        if (slots.isEmpty()) {
+            return false;
+        }
+        for (Slot slot : slots) {
+            if (!tokenBlocked(slot, false)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean isBudgetBlock(Slot slot) {
@@ -1083,6 +1170,9 @@ public final class ModelQueue {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
             return "LIMIT REACHED (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
         }
+        if (tokenBlocked(slot, false)) {
+            return "LIMIT REACHED (tokens " + rowTokens.used(slot.storageId()) + "/" + slot.dailyTokenLimit + ")";
+        }
         if (nowMillis < slot.unavailableUntil) {
             String when = Instant.ofEpochMilli(slot.unavailableUntil).atZone(zone).format(CLOCK);
             return "COOLDOWN until " + when;
@@ -1122,7 +1212,7 @@ public final class ModelQueue {
         if (existing != null) {
             return existing;
         }
-        Slot created = new Slot(-1, provider, model, 0);
+        Slot created = new Slot(-1, provider, model, 0, 0);
         fallbackSlots.put(id, created);
         providerCounts.putIfAbsent(provider, new AtomicInteger());
         return created;
@@ -1167,6 +1257,7 @@ public final class ModelQueue {
         private final String provider;
         private final String model;
         private final int dailyLimit;
+        private final int dailyTokenLimit;
         private final AtomicInteger requests = new AtomicInteger();
         private final AtomicInteger rejected = new AtomicInteger();
         private volatile long unavailableUntil;
@@ -1177,11 +1268,12 @@ public final class ModelQueue {
         private volatile AiRequestException lastError;
         private volatile long lastFailedAt;
 
-        private Slot(int index, String provider, String model, int dailyLimit) {
+        private Slot(int index, String provider, String model, int dailyLimit, int dailyTokenLimit) {
             this.index = index;
             this.provider = provider;
             this.model = model;
             this.dailyLimit = dailyLimit;
+            this.dailyTokenLimit = Math.max(0, dailyTokenLimit);
         }
 
         private Choice choice() {

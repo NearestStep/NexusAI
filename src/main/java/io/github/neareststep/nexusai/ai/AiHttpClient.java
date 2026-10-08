@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -33,6 +35,7 @@ public final class AiHttpClient {
     private final AiDiagnostics diagnostics;
     private final Logger logger;
     private final ConcurrentHashMap<String, CompletableFuture<SharedCompletion>> inFlight = new ConcurrentHashMap<>();
+    private volatile QuotaPolicy quotas;
 
     public AiHttpClient(
             AiCache cache,
@@ -48,6 +51,11 @@ public final class AiHttpClient {
         this.gate = Objects.requireNonNull(gate, "gate");
         this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
         this.logger = Objects.requireNonNull(logger, "logger");
+    }
+
+    /** Server, player, and consumer caps for placeholder, pool, prewarm, and {@code /nai test}. */
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
     }
 
     /**
@@ -213,10 +221,15 @@ public final class AiHttpClient {
         if (rejection.isPresent()) {
             return rejected(rejection.get());
         }
+        QuotaPolicy.Decision quota = reserve(prompt, effective, call);
+        if (quota != null && !quota.allowed()) {
+            return quotaRejected(quota.message());
+        }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
         CompletableFuture<SharedCompletion> created = new CompletableFuture<>();
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false, call);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false, call,
+                quota == null ? null : quota.hold());
         return adapt(created);
     }
 
@@ -249,11 +262,16 @@ public final class AiHttpClient {
         if (rejection.isPresent()) {
             return rejected(rejection.get());
         }
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        QuotaPolicy.Decision quota = reserve(prompt, effective, call);
+        if (quota != null && !quota.allowed()) {
+            return quotaRejected(quota.message());
+        }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(prompt);
         CompletableFuture<SharedCompletion> created = new CompletableFuture<>();
-        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true, call);
+        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true, call,
+                quota == null ? null : quota.hold());
         return adapt(created);
     }
 
@@ -331,9 +349,18 @@ public final class AiHttpClient {
                     SharedCompletion.fail(new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejection.get(), null), null));
             return adapted;
         }
+        QuotaPolicy.Decision quota = reserve(prompt, overrides, trace);
+        if (quota != null && !quota.allowed()) {
+            completeShared(
+                    cacheKey,
+                    flight.future(),
+                    SharedCompletion.fail(new AiRequestException(AiErrorKind.LOCAL_QUOTA, 0, quota.message(), null), null));
+            return adapted;
+        }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, flight.future(), writeCache, cacheKey, overrides, cacheTtl, true, false, trace);
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, flight.future(), writeCache, cacheKey, overrides, cacheTtl, true, false, trace,
+                quota == null ? null : quota.hold());
         return adapted;
     }
 
@@ -367,20 +394,21 @@ public final class AiHttpClient {
             Duration cacheTtl,
             boolean clearPause,
             boolean ignoreCooldown,
-            CallTrace trace
+            CallTrace trace,
+            QuotaPolicy.Hold quotaHold
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         CompletableFuture<ModelAnswer> upstream;
         try {
             upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
+            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause, quotaHold);
             return;
         }
         upstream.whenComplete((answer, error) -> {
             try {
                 finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
-                        effectiveCacheTtl(cacheTtl, answer), clearPause);
+                        effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
                 created.completeExceptionally(thrown);
@@ -413,7 +441,8 @@ public final class AiHttpClient {
             Throwable error,
             boolean writeCache,
             Duration cacheTtl,
-            boolean clearPause
+            boolean clearPause,
+            QuotaPolicy.Hold quotaHold
     ) {
         String value = answer == null ? null : answer.text();
         try {
@@ -450,7 +479,8 @@ public final class AiHttpClient {
                     // clearPause is false for /nai test, so a probe does not start the hold.
                     gate.recordFailure(admissionKey, kind, 0L, clearPause);
                     logger.fine(PlayerInput.MARKUP_ONLY);
-                } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
+                } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.LOCAL_QUOTA
+                        && kind != AiErrorKind.REJECTED) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(
@@ -468,10 +498,28 @@ public final class AiHttpClient {
             logger.log(Level.WARNING, "AI completion handler failed", e);
             created.completeExceptionally(e);
         } finally {
+            if (quotaHold != null) {
+                quotaHold.releaseWith(quotas);
+            }
             if (cacheKey != null) {
                 inFlight.remove(cacheKey, created);
             }
         }
+    }
+
+    private QuotaPolicy.Decision reserve(String prompt, GenerationOverrides overrides, CallTrace trace) {
+        QuotaPolicy policy = quotas;
+        if (policy == null) {
+            return null;
+        }
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        long estimate = QuotaEstimates.forCall(config, prompt, effective, effective.model(config.getModel()));
+        return policy.tryReserve(QuotaPolicy.Charge.of(trace, estimate, null));
+    }
+
+    private static CompletableFuture<String> quotaRejected(String reason) {
+        return CompletableFuture.failedFuture(new AiRequestException(
+                AiErrorKind.LOCAL_QUOTA, 0, reason == null || reason.isBlank() ? "Token quota reached" : reason, null));
     }
 
     private String failureDetail(String admissionKey, AiErrorKind kind, Throwable failure) {
@@ -533,7 +581,8 @@ public final class AiHttpClient {
             return;
         }
         AiErrorKind kind = AiErrors.classify(error);
-        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED || kind == AiErrorKind.MARKUP_ONLY) {
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.LOCAL_QUOTA || kind == AiErrorKind.REJECTED
+                || kind == AiErrorKind.MARKUP_ONLY) {
             return;
         }
         AiRequestException typed = AiErrors.find(error);

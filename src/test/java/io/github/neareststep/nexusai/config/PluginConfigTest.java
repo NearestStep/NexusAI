@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
 import io.github.neareststep.nexusai.budget.MissingUsage;
+import io.github.neareststep.nexusai.budget.QuotaSettings;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
@@ -472,6 +473,62 @@ class PluginConfigTest {
         assertTrue(clamped.quotaWarnings().isEmpty());
         assertEquals(MissingUsage.ESTIMATE, clamped.missingUsage());
         assertEquals(10, clamped.tokenSaveIntervalSeconds());
+    }
+
+    @Test
+    void quotaLimitsRejectNegativesUnknownKeysAndBadGroupNames() {
+        PluginConfig defaults = new PluginConfig(baseYaml());
+        assertFalse(defaults.quotaSettings().enabled());
+        assertEquals(0L, defaults.quotaSettings().serverTokensPerDay());
+        assertEquals(0L, defaults.quotaSettings().playerTokensPerDay());
+        assertTrue(defaults.quotaSettings().groups().isEmpty());
+        assertTrue(defaults.quotaSettings().consumers().isEmpty());
+
+        YamlConfiguration yaml = baseYaml();
+        yaml.set("quotas.enabled", true);
+        yaml.set("quotas.server-tokens-per-day", -5);
+        yaml.set("quotas.player-tokens-per-day", 40);
+        yaml.set("quotas.groups.VIP.tokens-per-day", 10);
+        yaml.set("quotas.groups.vip.tokens-per-day", 100);
+        yaml.set("quotas.groups.vip.requests-per-day", 3);
+        yaml.set("quotas.groups.vip.extra", 1);
+        yaml.set("quotas.groups.vip.tokens-per-day", 100);
+        yaml.set("quotas.consumers.default.tokens-per-day", 9);
+        yaml.set("quotas.consumers.default.requests-per-day", -2);
+        yaml.set("quotas.consumers.default.note", "nope");
+        yaml.set("quotas.consumers.plain", "text");
+        yaml.set("model-queue", List.of(Map.of(
+                "provider", "openai",
+                "model", "gpt-4o-mini",
+                "daily-token-limit", -2)));
+        PluginConfig config = new PluginConfig(yaml);
+        QuotaSettings settings = config.quotaSettings();
+        assertTrue(settings.enabled());
+        assertEquals(0L, settings.serverTokensPerDay());
+        assertEquals(40L, settings.playerTokensPerDay());
+        assertFalse(settings.groups().containsKey("VIP"));
+        assertEquals(100L, settings.groups().get("vip").tokensPerDay());
+        assertEquals(3L, settings.groups().get("vip").requestsPerDay());
+        assertEquals(9L, settings.consumer("Quests").tokensPerDay());
+        assertEquals(0L, settings.consumer("Quests").requestsPerDay());
+        assertEquals(0, config.modelQueue().getFirst().dailyTokenLimit());
+        String warnings = String.join("\n", config.quotaWarnings());
+        assertTrue(warnings.contains("quotas.server-tokens-per-day is -5. A negative limit is treated as 0."), warnings);
+        assertTrue(warnings.contains("quotas.groups.VIP is not a valid group name. It was skipped."), warnings);
+        assertTrue(warnings.contains("Unknown key quotas.groups.vip.extra. It was ignored."), warnings);
+        assertTrue(warnings.contains("quotas.consumers.default.requests-per-day is -2. A negative limit is treated as 0."), warnings);
+        assertTrue(warnings.contains("Unknown key quotas.consumers.default.note. It was ignored."), warnings);
+        assertTrue(warnings.contains("quotas.consumers.plain is not a section. It was skipped."), warnings);
+        assertTrue(warnings.contains("daily-token-limit is -2. A negative limit is treated as 0."), warnings);
+
+        YamlConfiguration huge = baseYaml();
+        huge.set("model-queue", List.of(Map.of(
+                "provider", "openai",
+                "model", "gpt-4o-mini",
+                "daily-token-limit", 2147483648L)));
+        PluginConfig clamped = new PluginConfig(huge);
+        assertEquals(Integer.MAX_VALUE, clamped.modelQueue().getFirst().dailyTokenLimit());
+        assertTrue(String.join("\n", clamped.quotaWarnings()).contains("Using " + Integer.MAX_VALUE));
     }
 
     @Test

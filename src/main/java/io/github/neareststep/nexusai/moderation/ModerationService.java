@@ -5,7 +5,11 @@ import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.ai.ReasoningModels;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FormatPresets;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -43,6 +47,7 @@ public final class ModerationService {
     private final Logger logger;
     private final LongSupplier clock;
     private volatile TokenAccounting accounting = TokenAccounting.none();
+    private volatile QuotaPolicy quotas;
 
     public ModerationService(
             ModerationSettings settings,
@@ -78,6 +83,11 @@ public final class ModerationService {
         this.notifier = notifier == null ? (player, message, category, reason) -> { } : notifier;
         this.logger = logger == null ? Logger.getLogger("nexusai.moderation") : logger;
         this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    /** Server and row caps. Moderation does not spend the player cap. */
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
     }
 
     /** Counts a moderation HTTP attempt. The player slice is not used for this origin. */
@@ -133,16 +143,25 @@ public final class ModerationService {
         if (reserved != null) {
             return Decision.skipped(reserved);
         }
-        Optional<ModelQueue.Choice> choice = reserveDaily(now);
-        if (choice.isEmpty()) {
+        String wrapped = PlayerInput.wrap(text);
+        QuotaPolicy.Decision serverQuota = reserveServer(wrapped);
+        if (serverQuota != null && !serverQuota.allowed()) {
             gate.release(playerId, now);
-            return Decision.skipped(dailyBlocked(now) ? Skip.DAILY_CAP : Skip.UNAVAILABLE);
+            return Decision.skipped(Skip.DAILY_CAP);
+        }
+        Optional<ReservedRow> choice = reserveDaily(now, wrapped);
+        if (choice.isEmpty()) {
+            if (serverQuota != null) {
+                serverQuota.hold().releaseWith(quotas);
+            }
+            gate.release(playerId, now);
+            return Decision.skipped(dailyBlocked(now) || queue.allRowsTokenBlocked(now)
+                    ? Skip.DAILY_CAP : Skip.UNAVAILABLE);
         }
         queue.recordModerationCheck();
-        String wrapped = PlayerInput.wrap(text);
         String reply;
         try {
-            reply = call(playerId, wrapped, choice.get());
+            reply = call(playerId, wrapped, choice.get().choice);
         } catch (AiRequestException e) {
             logger.log(Level.FINE, "Chat moderation request failed: "
                     + SecretMask.redact(e.getMessage(), config.configuredSecrets()));
@@ -152,6 +171,14 @@ public final class ModerationService {
             logger.log(Level.FINE, "Chat moderation request failed: "
                     + SecretMask.redact(detail, config.configuredSecrets()));
             return new Decision(Skip.CHECKED, false, "none", "");
+        } finally {
+            if (serverQuota != null) {
+                serverQuota.hold().releaseWith(quotas);
+            }
+            QuotaPolicy.Decision row = choice.get().row;
+            if (row != null) {
+                row.hold().releaseWith(quotas);
+            }
         }
         Optional<ModerationVerdict> parsed = VerdictParser.parse(reply);
         if (parsed.isEmpty()) {
@@ -173,17 +200,37 @@ public final class ModerationService {
         return new Decision(Skip.CHECKED, true, verdict.category(), verdict.reason());
     }
 
-    private Optional<ModelQueue.Choice> reserveDaily(long now) {
+    private QuotaPolicy.Decision reserveServer(String wrapped) {
+        QuotaPolicy policy = quotas;
+        if (policy == null) {
+            return null;
+        }
+        String model = settings.pinned() ? settings.model() : config.getModel();
+        return policy.tryReserve(new QuotaPolicy.Charge(
+                RequestOrigin.MODERATION, "nexusai", null, null, estimate(wrapped, model), null));
+    }
+
+    private Optional<ReservedRow> reserveDaily(long now, String wrapped) {
         if (!settings.pinned()) {
             Optional<ModelQueue.Choice> selected = queue.select(now);
             if (selected.isEmpty()) {
                 return Optional.empty();
             }
             ProviderSettings provider = config.provider(selected.get().provider());
-            if (!canCall(provider) || !queue.tryConsume(selected.get().index(), now)) {
+            if (!canCall(provider)) {
                 return Optional.empty();
             }
-            return selected;
+            QuotaPolicy.Decision row = reserveRow(selected.get(), wrapped);
+            if (row != null && !row.allowed()) {
+                return Optional.empty();
+            }
+            if (!queue.tryConsume(selected.get().index(), now)) {
+                if (row != null) {
+                    row.hold().releaseWith(quotas);
+                }
+                return Optional.empty();
+            }
+            return Optional.of(new ReservedRow(selected.get(), row));
         }
         ProviderSettings provider = config.provider(settings.provider());
         if (!canCall(provider)) {
@@ -193,12 +240,40 @@ public final class ModerationService {
             if (!row.provider().equals(settings.provider()) || !row.model().equals(settings.model())) {
                 continue;
             }
-            if (!queue.tryConsume(row.index(), now)) {
+            ModelQueue.Choice choice = new ModelQueue.Choice(row.index(), row.provider(), row.model());
+            QuotaPolicy.Decision reserved = reserveRow(choice, wrapped);
+            if (reserved != null && !reserved.allowed()) {
                 return Optional.empty();
             }
-            return Optional.of(new ModelQueue.Choice(row.index(), row.provider(), row.model()));
+            if (!queue.tryConsume(row.index(), now)) {
+                if (reserved != null) {
+                    reserved.hold().releaseWith(quotas);
+                }
+                return Optional.empty();
+            }
+            return Optional.of(new ReservedRow(choice, reserved));
         }
-        return Optional.of(new ModelQueue.Choice(-1, settings.provider(), settings.model()));
+        return Optional.of(new ReservedRow(new ModelQueue.Choice(-1, settings.provider(), settings.model()), null));
+    }
+
+    private QuotaPolicy.Decision reserveRow(ModelQueue.Choice choice, String wrapped) {
+        QuotaPolicy policy = quotas;
+        if (policy == null || choice == null || choice.index() < 0) {
+            return null;
+        }
+        return policy.tryReserveRow(
+                queue.rowStorageId(choice.index()),
+                queue.dailyTokenLimit(choice.index()),
+                estimate(wrapped, choice.model()));
+    }
+
+    private long estimate(String wrapped, String model) {
+        int chars = ResponseUsage.chars(settings.systemPrompt()) + ResponseUsage.chars(wrapped);
+        Integer maxTokens = settings.maxTokens() > 0 ? settings.maxTokens() : null;
+        return QuotaEstimates.tokens(chars, maxTokens, ReasoningModels.isReasoning(model));
+    }
+
+    private record ReservedRow(ModelQueue.Choice choice, QuotaPolicy.Decision row) {
     }
 
     private boolean canCall(ProviderSettings provider) {

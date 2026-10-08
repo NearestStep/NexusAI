@@ -493,6 +493,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case UNKNOWN_MODEL -> "HTTP " + status + " unknown model from " + host + ": " + truncated;
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
+            case LOCAL_QUOTA -> "Local quota reached";
             case REJECTED -> "Rejected model answer from " + host;
             case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case MARKUP_ONLY -> PlayerInput.MARKUP_ONLY;
