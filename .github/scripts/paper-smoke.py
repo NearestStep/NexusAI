@@ -950,6 +950,19 @@ def strip_colors(text: str) -> str:
     return "".join(out)
 
 
+def console_command(process, line: str) -> None:
+    """Run a command on the server console.
+
+    Folia RCON returns only the text buffered while the command method runs.
+    A later {@code SenderTasks} message is not part of that packet and is not
+    copied into the server log. The console sender does write it to the log.
+    """
+    if process.stdin is None or process.stdin.closed:
+        raise RuntimeError(f"server console is closed; cannot run {line}")
+    process.stdin.write(line + "\n")
+    process.stdin.flush()
+
+
 def rcon(host: str, port: int, password: str, command: str) -> str:
     deadline = time.time() + 20
     last_error: Exception | None = None
@@ -1443,20 +1456,20 @@ def verify_folia_usage(process, chunks, rcon_port: int, timeout: int) -> None:
 
 def verify_folia_default_test(process, chunks, rcon_port: int, mock: MockHandle, timeout: int) -> None:
     before = len(mock.bodies())
-    reply = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai test"))
-    print("--- /nai test ---")
-    print(reply)
+    answers_before = mock_answer_count("".join(chunks))
+    print("--- /nai test ---", flush=True)
+    console_command(process, "nai test")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during /nai test with code {process.returncode}")
-        combined = reply + "\n" + "".join(chunks)
-        answered = is_mock_answer_line(combined)
+        text = strip_colors("".join(chunks))
+        answered = mock_answer_count(text) > answers_before
         reached = len(mock.bodies()) > before
         if answered and reached:
             print("FOLIA TEST OK", flush=True)
             return
-        if "Test failed" in combined and not answered:
+        if "Test failed" in text and not answered:
             raise RuntimeError("/nai test failed")
         time.sleep(0.2)
     raise RuntimeError("/nai test did not log the mock answer line")
@@ -1470,18 +1483,17 @@ def verify_folia_context_prompt(process, chunks, rcon_port: int, mock: MockHandl
     """
     before = len(mock.bodies())
     answers_before = mock_answer_count("".join(chunks))
-    reply = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "nai test context_ping"))
-    print("--- /nai test context_ping ---")
-    print(reply)
+    print("--- /nai test context_ping ---", flush=True)
+    console_command(process, "nai test context_ping")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during context prompt with code {process.returncode}")
         text = "".join(chunks)
-        combined = reply + "\n" + text
+        visible = strip_colors(text)
         saw_prompt = any("Reply with one word." in body for body in mock.bodies()[before:])
-        answered = mock_answer_count(combined) > answers_before
-        if "Test failed" in combined and not answered:
+        answered = mock_answer_count(visible) > answers_before
+        if "Test failed" in visible and not answered:
             raise RuntimeError("/nai test context_ping failed")
         if saw_prompt and "NEXUSAI_CONTEXT " in text and answered:
             print("context provider observed", flush=True)
@@ -1650,6 +1662,8 @@ def _smoke_self_check() -> None:
     _need(success in source, "full-mode success line is missing")
     _need("FOLIA REFUSAL ABSENT" in source, "refusal-absent check is missing")
     _need("FOLIA TEST OK" in source, "strict test success line is missing")
+    _need("def console_command(" in source, "console command helper is missing")
+    _need('console_command(process, "nai test")' in source, "full-mode /nai test does not use the console")
     _need("PROBE EVENTS OK" in source, "probe success line is missing")
 
     clean = "\n".join([
