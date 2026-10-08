@@ -162,24 +162,31 @@ class GenerationServiceTest {
             return blocked;
         };
         GenerationRequest request = GenerationRequest.template("Same words").build();
+        CountDownLatch joined = new CountDownLatch(1);
+        GenerationService.onInFlightJoin = joined::countDown;
         CompletableFuture<GenerationResult> first = harness.service.generate(harness.owner, request);
-        assertTrue(entered.await(5, TimeUnit.SECONDS));
-        CompletableFuture<GenerationResult> second = harness.service.generate(harness.owner, request);
-        blocked.complete(pong());
-        GenerationResult leader = first.get(5, TimeUnit.SECONDS);
-        GenerationResult joiner = second.get(5, TimeUnit.SECONDS);
-        assertEquals(ResultSource.MODEL, leader.source());
-        assertEquals(6, leader.usage().totalTokens());
-        assertEquals(ResultSource.IN_FLIGHT, joiner.source());
-        assertEquals("pong", joiner.text());
-        assertEquals(0, joiner.usage().totalTokens());
-        assertEquals(0, joiner.attempts());
-        assertEquals(Duration.ZERO, joiner.modelLatency());
-        assertEquals("openai", joiner.providerId());
-        assertEquals("gpt-4o-mini", joiner.model());
-        assertEquals("stop", joiner.finishReason());
-        assertEquals(1, harness.script.calls.get());
-        assertEquals(2, harness.hooks.afterCount.get());
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            CompletableFuture<GenerationResult> second = harness.service.generate(harness.owner, request);
+            assertTrue(joined.await(5, TimeUnit.SECONDS));
+            blocked.complete(pong());
+            GenerationResult leader = first.get(5, TimeUnit.SECONDS);
+            GenerationResult joiner = second.get(5, TimeUnit.SECONDS);
+            assertEquals(ResultSource.MODEL, leader.source());
+            assertEquals(6, leader.usage().totalTokens());
+            assertEquals(ResultSource.IN_FLIGHT, joiner.source());
+            assertEquals("pong", joiner.text());
+            assertEquals(0, joiner.usage().totalTokens());
+            assertEquals(0, joiner.attempts());
+            assertEquals(Duration.ZERO, joiner.modelLatency());
+            assertEquals("openai", joiner.providerId());
+            assertEquals("gpt-4o-mini", joiner.model());
+            assertEquals("stop", joiner.finishReason());
+            assertEquals(1, harness.script.calls.get());
+            assertEquals(2, harness.hooks.afterCount.get());
+        } finally {
+            GenerationService.onInFlightJoin = null;
+        }
     }
 
     @Test

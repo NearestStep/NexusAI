@@ -87,6 +87,9 @@ public final class GenerationService {
     private volatile QuotaPolicy quotas;
     private volatile boolean closed;
 
+    /** Runs on the worker when a second call has joined an in-flight request. Null in production. */
+    static volatile Runnable onInFlightJoin;
+
     public GenerationService(Plugin plugin, ExecutorService http, ExecutorService scheduler, Logger logger) {
         this(plugin, http, scheduler, logger, new BukkitRegions(), new BukkitPlayerState(), new GenerationHooks());
     }
@@ -349,6 +352,10 @@ public final class GenerationService {
             }
             AiHttpClient.Flight flight = current.http().attach(prepared.cacheKey);
             if (!flight.leader()) {
+                Runnable joined = onInFlightJoin;
+                if (joined != null) {
+                    joined.run();
+                }
                 flight.future().whenComplete((shared, error) -> schedule(future, trace, () ->
                         deliverJoin(future, trace, request, current, lookup, shared, error)));
                 return;
