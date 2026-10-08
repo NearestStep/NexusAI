@@ -18,7 +18,7 @@ Implement `NexusContextProvider` and register it from your plugin (`softdepend: 
 NexusAIApi.registerContextProvider(this, provider);
 ```
 
-`id()` returns `economy`. `provide()` runs on `nexusai-context-N` and must return a future without blocking. `ContextRequest` has no `Player`. Read the balance on the main thread into a map, and return the map from `provide()`.
+`id()` returns `economy`. `provide()` runs on `nexusai-context-N` and must return a future without blocking. `ContextRequest` has no `Player`. Read the balance on the main thread on Paper, or on the region owner's thread on Folia, into a map, and return the map from `provide()`.
 
 The worked class is `src/test/java/io/github/neareststep/nexusai/context/ExampleBalanceProvider.java`. It rounds `12347.18` to `~12k` so the `cached_` key does not change on every coin. The same shape is in the README section "Context providers".
 

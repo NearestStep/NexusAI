@@ -40,6 +40,7 @@ dependencies {
     implementation("com.github.ben-manes.caffeine:caffeine:3.2.0")
 
     testImplementation("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
+    testImplementation("me.clip:placeholderapi:2.11.6")
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

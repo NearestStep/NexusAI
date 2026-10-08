@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.context;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.api.NexusContextProvider;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -18,14 +19,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Example context provider. A sync timer on the main thread reads online balances into a map.
- * {@link #provide} only returns that map and does not touch Bukkit.
+ * Example context provider. A global-region timer reads online balances into a map.
+ * On Paper that timer is the main thread. On Folia each balance is read on the region
+ * owner's thread. {@link #provide} only returns that map and does not touch Bukkit.
  * Vault is optional: {@code Economy#getBalance} is called by reflection when the plugin is installed.
  * Compile this class against the NexusAI jar ({@code compileOnly}). Register with {@code softdepend: [NexusAI]}.
  */
 public final class ExampleBalanceProvider implements NexusContextProvider, Listener {
 
     private final ConcurrentHashMap<UUID, String> balances = new ConcurrentHashMap<>();
+    private Plugin owner;
+    private ScheduledTask refreshTask;
 
     @Override
     public String id() {
@@ -51,14 +55,18 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     public void register(Plugin plugin) {
+        this.owner = plugin;
         Bukkit.getServicesManager().register(NexusContextProvider.class, this, plugin, ServicePriority.Normal);
         Bukkit.getPluginManager().registerEvents(this, plugin);
-        Bukkit.getScheduler().runTaskTimer(plugin, this::refresh, 100L, 100L);
+        this.refreshTask = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, task -> refresh(), 100L, 100L);
     }
 
     public void shutdown(Plugin plugin) {
         Bukkit.getServicesManager().unregister(NexusContextProvider.class, this);
-        Bukkit.getScheduler().cancelTasks(plugin);
+        if (refreshTask != null) {
+            refreshTask.cancel();
+            refreshTask = null;
+        }
     }
 
     @EventHandler
@@ -77,9 +85,16 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     private void refresh() {
+        Plugin plugin = owner;
+        if (plugin == null) {
+            return;
+        }
         Object economy = economy();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            remember(player.getUniqueId(), balance(economy, player));
+            if (player == null) {
+                continue;
+            }
+            player.getScheduler().run(plugin, task -> remember(player.getUniqueId(), balance(economy, player)), null);
         }
     }
 

@@ -3,17 +3,31 @@ package io.github.neareststep.nexusai.command;
 import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.api.RequestOrigin;
+import io.github.neareststep.nexusai.budget.UsageReport;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.context.RegionOwnership;
+import io.github.neareststep.nexusai.context.RegionPlayerFixture;
+import io.github.neareststep.nexusai.i18n.MessageService;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.ConsoleCommandSender;
+import org.bukkit.command.RemoteConsoleCommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -22,6 +36,93 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NaiCommandTest {
+
+    @AfterEach
+    void resetRegionOwnership() {
+        RegionOwnership.reset();
+    }
+
+    @Test
+    void testDefersAndSkipsTheWorldWhenTheRegionIsNotOwned() {
+        AtomicBoolean touched = new AtomicBoolean();
+        RegionOwnership.install(player -> false);
+        Player player = RegionPlayerFixture.throwing(touched);
+        assertTrue(NaiCommand.deferTestToOwner(player));
+        assertEquals("", NaiCommand.testContextWorld(player));
+        assertFalse(touched.get());
+    }
+
+    @Test
+    void testReadsTheWorldWhenTheRegionIsOwned() {
+        RegionOwnership.install(player -> true);
+        Player player = RegionPlayerFixture.named("Steve", "lobby");
+        assertFalse(NaiCommand.deferTestToOwner(player));
+        assertEquals("lobby", NaiCommand.testContextWorld(player));
+    }
+
+    @Test
+    void consoleAndRconUsageReplyBeforeTheCallReturns() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("prefix", "");
+        yaml.set("command.usage-header", "Token usage today:");
+        yaml.set("command.usage-line", "- {name}: {tokens}");
+        MessageService messages = new MessageService(yaml, new YamlConfiguration(), "en");
+        List<UsageReport.Line> lines = List.of(
+                new UsageReport.Line("command.usage-header", Map.of()),
+                new UsageReport.Line("command.usage-line", Map.of("name", "sk-secret", "tokens", "4")));
+        List<String> sent = new ArrayList<>();
+        CommandSender console = recordingSender(ConsoleCommandSender.class, sent);
+        assertTrue(NaiCommand.usageRepliesInline(console));
+        NaiCommand.sendUsage(console, messages, lines, text -> text.replace("sk-secret", "hidden"));
+        assertTrue(sent.stream().anyMatch(line -> line.contains("Token usage today:")), sent.toString());
+        assertTrue(sent.stream().anyMatch(line -> line.contains("4")), sent.toString());
+        assertTrue(sent.stream().anyMatch(line -> line.contains("hidden")), sent.toString());
+        assertFalse(sent.stream().anyMatch(line -> line.contains("sk-secret")), sent.toString());
+
+        assertTrue(NaiCommand.usageRepliesInline(recordingSender(RemoteConsoleCommandSender.class, new ArrayList<>())));
+        assertFalse(NaiCommand.usageRepliesInline(RegionPlayerFixture.named("Steve", "lobby")));
+    }
+
+    private static CommandSender recordingSender(Class<? extends CommandSender> type, List<String> sent) {
+        return (CommandSender) java.lang.reflect.Proxy.newProxyInstance(
+                type.getClassLoader(),
+                new Class<?>[]{type},
+                (proxy, method, args) -> {
+                    if ("sendMessage".equals(method.getName()) && args != null) {
+                        for (Object arg : args) {
+                            if (arg instanceof Component component) {
+                                sent.add(PlainTextComponentSerializer.plainText().serialize(component));
+                            } else if (arg instanceof String text) {
+                                sent.add(text);
+                            }
+                        }
+                    }
+                    if ("getName".equals(method.getName())) {
+                        return "sender";
+                    }
+                    if (method.getReturnType() == boolean.class) {
+                        return false;
+                    }
+                    if (method.getReturnType() == int.class) {
+                        return 0;
+                    }
+                    return null;
+                });
+    }
+
+    @Test
+    void consoleTestIsNotDeferred() {
+        assertFalse(NaiCommand.deferTestToOwner(null));
+        assertEquals("", NaiCommand.testContextWorld(null));
+    }
+
+    @Test
+    void missingServerMeansThePlayerIsNotOwned() {
+        Player player = RegionPlayerFixture.named("Steve", "lobby");
+        assertFalse(RegionOwnership.installed());
+        assertTrue(NaiCommand.deferTestToOwner(player));
+        assertEquals("", NaiCommand.testContextWorld(player));
+    }
 
     @Test
     void testTraceNamesThePlayerAndTheNotice() {

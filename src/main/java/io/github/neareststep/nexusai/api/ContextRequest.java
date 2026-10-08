@@ -4,8 +4,10 @@ import java.util.UUID;
 
 /**
  * What a context provider may read. There is no {@code Player}: Bukkit state that is only
- * safe on the region thread belongs in the provider's own cache, updated from an event or a
- * sync timer. {@link NexusContextProvider#provide} then returns that cached value.
+ * safe on the region thread belongs in the provider's own cache, updated from an event or
+ * {@code Bukkit.getGlobalRegionScheduler()}. On Paper that scheduler is the main thread. On Folia,
+ * read each player on the region owner's thread. {@link NexusContextProvider#provide} then returns
+ * that cached value.
  */
 public record ContextRequest(UUID playerId, String playerName, String world, String promptId, Purpose purpose) {
 

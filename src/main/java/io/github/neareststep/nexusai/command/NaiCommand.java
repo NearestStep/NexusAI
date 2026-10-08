@@ -20,6 +20,7 @@ import io.github.neareststep.nexusai.config.QueueStrategy;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
@@ -350,19 +351,48 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
             return;
         }
         UsageReport.View view = UsageReport.parse(args.length < 2 ? null : args[1]);
-        SenderTasks.run(plugin, sender, () -> {
-            MessageService current = plugin.getMessageService();
-            List<UsageReport.Line> lines = view == null
-                    ? UsageReport.unknown()
-                    : UsageReport.render(view, plugin.tokenSnapshot(), estimatedShare(current), this::playerLabel);
-            for (UsageReport.Line line : lines) {
-                Map<String, String> values = new LinkedHashMap<>(line.values());
-                if (values.containsKey("name")) {
-                    values.put("name", redact(values.get("name")));
-                }
-                current.send(sender, line.key(), values);
+        Runnable publish = () -> publishUsage(sender, view);
+        if (usageRepliesInline(sender)) {
+            publish.run();
+            return;
+        }
+        SenderTasks.run(plugin, sender, publish, plugin.getLogger());
+    }
+
+    /**
+     * Console and RCON are answered before the command returns.
+     * The figures are the in-memory token ledger, so this thread does not read a region.
+     * Folia RCON keeps only the text sent while the command method runs, and a later
+     * global-region task never reaches that packet or the server log.
+     * A player still hops: the chat line belongs on that player's region.
+     */
+    static boolean usageRepliesInline(CommandSender sender) {
+        return !(sender instanceof Player);
+    }
+
+    private void publishUsage(CommandSender sender, UsageReport.View view) {
+        MessageService current = plugin.getMessageService();
+        List<UsageReport.Line> lines = view == null
+                ? UsageReport.unknown()
+                : UsageReport.render(view, plugin.tokenSnapshot(), estimatedShare(current), this::playerLabel);
+        sendUsage(sender, current, lines, this::redact);
+    }
+
+    static void sendUsage(
+            CommandSender sender,
+            MessageService messages,
+            List<UsageReport.Line> lines,
+            java.util.function.UnaryOperator<String> redact
+    ) {
+        java.util.function.UnaryOperator<String> mask = redact == null ? text -> text : redact;
+        for (UsageReport.Line line : lines) {
+            Map<String, String> values = new LinkedHashMap<>(line.values());
+            if (values.containsKey("name")) {
+                String name = values.get("name");
+                values.put("name", mask.apply(name == null ? "" : name));
             }
-        }, plugin.getLogger());
+            messages.send(sender, line.key(), values);
+        }
     }
 
     private long tokensToday() {
@@ -490,7 +520,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleTest(CommandSender sender, MessageService messages, String[] args) {
-        if (sender instanceof Player player && !ownsRegion(player)) {
+        if (sender instanceof Player player && deferTestToOwner(player)) {
             player.getScheduler().run(plugin, scheduled -> handleTest(sender, plugin.getMessageService(), args), () ->
                     plugin.getLogger().fine("Skipped /nai test because the player is no longer valid"));
             return;
@@ -541,8 +571,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                     && namedPrompt.context().active()
                     && plugin.getPluginConfig().contextSettings().enabled()
                     && plugin.getContextService() != null) {
-                org.bukkit.Location location = player.getLocation();
-                String world = location.getWorld() == null ? "" : location.getWorld().getName();
+                String world = testContextWorld(player);
                 ContextRequest request = new ContextRequest(
                         player.getUniqueId(),
                         player.getName(),
@@ -692,15 +721,34 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         return PlayerInput.wrap(raw);
     }
 
-    private static boolean ownsRegion(Player player) {
-        try {
-            if (Bukkit.getServer() == null) {
-                return true;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return true;
+    /**
+     * A player command that does not already own the player is moved to that player's region.
+     * Console senders are not players, so they are not deferred.
+     */
+    static boolean deferTestToOwner(Player player) {
+        return player != null && !ownsRegion(player);
+    }
+
+    /**
+     * World hint for a player {@code /nai test}. Empty when this thread does not own the player.
+     */
+    static String testContextWorld(Player player) {
+        if (player == null || !ownsRegion(player)) {
+            return "";
         }
+        try {
+            org.bukkit.Location location = player.getLocation();
+            if (location == null || location.getWorld() == null || location.getWorld().getName() == null) {
+                return "";
+            }
+            return location.getWorld().getName();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static boolean ownsRegion(Player player) {
+        return RegionOwnership.owned(player);
     }
 
     private String redact(String text) {

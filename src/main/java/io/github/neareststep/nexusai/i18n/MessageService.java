@@ -68,7 +68,7 @@ public final class MessageService {
     /**
      * Test/helper constructor without a live plugin instance.
      */
-    MessageService(FileConfiguration primary, FileConfiguration fallback, String locale) {
+    public MessageService(FileConfiguration primary, FileConfiguration fallback, String locale) {
         this.plugin = null;
         this.primary = primary == null ? new YamlConfiguration() : primary;
         this.fallback = fallback == null ? new YamlConfiguration() : fallback;
