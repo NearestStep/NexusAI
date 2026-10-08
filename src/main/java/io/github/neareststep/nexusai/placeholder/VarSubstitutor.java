@@ -13,7 +13,26 @@ import java.util.Objects;
  */
 public final class VarSubstitutor {
 
+    /**
+     * Replaces PlaceholderAPI in tests. Production leaves this unset and calls PlaceholderAPI
+     * after the owning-thread check.
+     */
+    @FunctionalInterface
+    interface Lookup {
+        String apply(Player player, String template);
+    }
+
+    private static volatile Lookup lookup;
+
     private VarSubstitutor() {
+    }
+
+    static void installLookup(Lookup next) {
+        lookup = next;
+    }
+
+    static void resetLookup() {
+        lookup = null;
     }
 
     public static String apply(String answer, Map<String, String> vars, Player player) {
@@ -58,6 +77,11 @@ public final class VarSubstitutor {
         }
         if (!RegionOwnership.owned(player)) {
             return "";
+        }
+        Lookup current = lookup;
+        if (current != null) {
+            String value = current.apply(player, template);
+            return value == null ? "" : value;
         }
         if (Bukkit.getPluginManager() == null
                 || Bukkit.getPluginManager().getPlugin("PlaceholderAPI") == null) {

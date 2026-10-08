@@ -1,6 +1,6 @@
 package io.github.neareststep.nexusai.generate;
 
-import org.bukkit.Bukkit;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
@@ -9,17 +9,7 @@ public final class BukkitRegions implements RegionTasks {
 
     @Override
     public boolean owns(Player player) {
-        if (player == null) {
-            return false;
-        }
-        try {
-            if (Bukkit.getServer() == null) {
-                return false;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return false;
-        }
+        return RegionOwnership.owned(player);
     }
 
     @Override

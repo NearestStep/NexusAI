@@ -32,6 +32,10 @@ public final class RegionPlayerFixture {
     }
 
     public static Player named(String name, String worldName) {
+        return named(name, worldName, null);
+    }
+
+    public static Player named(String name, String worldName, Object scheduler) {
         UUID id = UUID.fromString("11111111-1111-1111-1111-111111111111");
         Block block = (Block) Proxy.newProxyInstance(
                 Block.class.getClassLoader(),
@@ -63,6 +67,7 @@ public final class RegionPlayerFixture {
                     case "getUniqueId" -> id;
                     case "getWorld" -> world;
                     case "getLocation" -> location;
+                    case "getScheduler" -> scheduler;
                     case "isOnline" -> true;
                     case "toString" -> name;
                     default -> defaultValue(method.getReturnType());

@@ -58,6 +58,14 @@ class NaiCommandTest {
     }
 
     @Test
+    void missingServerMeansThePlayerIsNotOwned() {
+        Player player = RegionPlayerFixture.named("Steve", "lobby");
+        assertFalse(RegionOwnership.installed());
+        assertTrue(NaiCommand.deferTestToOwner(player));
+        assertEquals("", NaiCommand.testContextWorld(player));
+    }
+
+    @Test
     void testTraceNamesThePlayerAndTheNotice() {
         UUID player = UUID.fromString("11111111-1111-1111-1111-111111111111");
         CallTrace named = NaiCommand.testTrace(player, GenerationOverrides.none().withNoticeId("rules"));

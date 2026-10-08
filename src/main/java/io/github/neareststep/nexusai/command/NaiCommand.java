@@ -719,17 +719,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     private static boolean ownsRegion(Player player) {
-        if (RegionOwnership.installed()) {
-            return RegionOwnership.owned(player);
-        }
-        try {
-            if (Bukkit.getServer() == null) {
-                return true;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return false;
-        }
+        return RegionOwnership.owned(player);
     }
 
     private String redact(String text) {

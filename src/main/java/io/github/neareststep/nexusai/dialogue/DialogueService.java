@@ -20,6 +20,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.prompt.PromptContext;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
@@ -809,14 +810,7 @@ public final class DialogueService {
     }
 
     private static boolean owns(Player player) {
-        try {
-            if (Bukkit.getServer() == null) {
-                return true;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return true;
-        }
+        return RegionOwnership.owned(player);
     }
 
     private record RecentChat(String text, long at) {

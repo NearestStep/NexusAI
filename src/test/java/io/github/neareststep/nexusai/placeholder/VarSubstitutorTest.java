@@ -19,6 +19,7 @@ class VarSubstitutorTest {
     @AfterEach
     void resetRegionOwnership() {
         RegionOwnership.reset();
+        VarSubstitutor.resetLookup();
     }
 
     @Test
