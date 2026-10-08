@@ -36,6 +36,8 @@ class ApiCompatibilityTest {
         assertMethod(NexusAIApi.class, "bindContextRegistry", void.class, ContextRegistry.class);
         assertMethod(NexusAIApi.class, "isAvailable", boolean.class);
         assertMethod(NexusAIApi.class, "generate", CompletableFuture.class, Plugin.class, GenerationRequest.class);
+        assertMethod(NexusAIApi.class, "generateJson", CompletableFuture.class, Plugin.class, GenerationRequest.class, JsonSchema.class);
+        assertMethod(NexusAIApi.class, "generateJson", CompletableFuture.class, Plugin.class, GenerationRequest.class);
         assertMethod(NexusAIApi.class, "registerPrompt", void.class, Plugin.class, String.class, PromptDefinition.class);
         assertMethod(NexusAIApi.class, "unregisterPrompt", boolean.class, Plugin.class, String.class);
         assertMethod(NexusAIApi.class, "registeredPromptIds", List.class, Plugin.class);

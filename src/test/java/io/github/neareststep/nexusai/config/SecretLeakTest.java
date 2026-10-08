@@ -9,6 +9,7 @@ import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.api.GenerationRequest;
+import io.github.neareststep.nexusai.api.JsonSchema;
 import io.github.neareststep.nexusai.api.GenerationResult;
 import io.github.neareststep.nexusai.api.NexusErrorKind;
 import io.github.neareststep.nexusai.api.ResultSource;
@@ -53,6 +54,7 @@ import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SecretLeakTest {
@@ -171,6 +173,15 @@ class SecretLeakTest {
             PluginConfig.environment = previousEnv;
             PluginConfig.secretsBase = previousBase;
         }
+    }
+
+    @Test
+    void jsonSchemaParseDoesNotEchoTheDocument() {
+        String canary = "schema-canary-" + UUID.randomUUID().toString().replace("-", "");
+        IllegalArgumentException rejected = assertThrows(IllegalArgumentException.class, () -> JsonSchema.parse(
+                "{\"type\":\"object\",\"$ref\":\"" + canary + "\"}"));
+        assertTrue(rejected.getMessage().contains("$ref"));
+        assertFalse(rejected.getMessage().contains(canary));
     }
 
     @Test

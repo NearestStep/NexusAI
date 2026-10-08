@@ -338,6 +338,12 @@ Those four events, plus `NexusProviderErrorEvent` and `NexusModerationFlagEvent`
 
 The order, the threads, and a listener example are in [docs/api.md](docs/api.md). Handlers must be fast. A call slower than 50 ms logs one warning per event class per five minutes, with the listener plugin names.
 
+## Structured JSON
+
+`NexusAIApi.generateJson` asks the model for one JSON object and checks it against a `JsonSchema` before the future succeeds. The schema is a subset: objects, arrays, strings, integers, numbers, booleans, null, `properties`, `required`, `additionalProperties` as true or false, `items`, `enum`, and length or numeric bounds. The root must be an object. A schema larger than 16 KiB, deeper than 5, or with more than 100 properties is rejected, as is any other keyword.
+
+`providers.<id>.structured-output` is optional. Leave it unset for `auto`. The other values are `json-schema`, `json-object`, and `prompt`. `auto` sends `response_format` `json_schema` first. If that provider answers HTTP 400 or 422 and the error names `response_format`, `json_schema`, or `json_object`, the same call is sent as `json_object`, then as a system instruction only. The lower mode is remembered for that provider and model until `/nai reload`. One reply that does not match the schema is retried once on the same model. That retry does not fire a second `NexusPreGenerateEvent`. Values still have to be checked before they go into a command, a name, or a path. The call, the result fields, and a quest example are in [docs/api.md](docs/api.md).
+
 ## Language files
 
 Player-facing command text lives in `plugins/NexusAI/lang/<code>.yml`. On first start NexusAI copies every bundled locale into that folder and does not overwrite a file that is already there. Edit the copy, set `locale:` in `config.yml` (`en`, `ru`, `pt_BR`, …), and run `/nai reload`. Keep the keys and the `{placeholders}`. Quote `yes` and `no` so YAML does not turn them into booleans. A key you delete is filled from the bundled file for that locale, then from bundled English, so an old file still works after an update. A custom `lang/<code>.yml` with no bundled counterpart falls back to English. The language the model writes is set in `prompts.yml` (`system-prompt` and the prompt text), not in these files.

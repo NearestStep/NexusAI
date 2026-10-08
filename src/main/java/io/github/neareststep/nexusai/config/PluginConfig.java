@@ -111,6 +111,7 @@ public final class PluginConfig {
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
     private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
+    private final List<String> structuredOutputWarnings = new ArrayList<>();
     private boolean pluginApiEnabled = true;
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
@@ -136,6 +137,7 @@ public final class PluginConfig {
         missingEnvVars.clear();
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
+        structuredOutputWarnings.clear();
         httpLimitWarnings.clear();
         pluginApiWarnings.clear();
         quotaWarnings.clear();
@@ -415,7 +417,12 @@ public final class PluginConfig {
             boolean active = normalizedId.equals(provider);
             ResolvedKeys resolved = resolveKeys(normalizedId, one, active, legacyKey, envKey);
             loaded.put(normalizedId, new ProviderSettings(
-                    normalizedId, type, url, resolved.keys(), resolved.source()));
+                    normalizedId,
+                    type,
+                    url,
+                    resolved.keys(),
+                    resolved.source(),
+                    structuredOutput(normalizedId, one.getString("structured-output"))));
         }
         return Map.copyOf(loaded);
     }
@@ -1328,6 +1335,32 @@ public final class PluginConfig {
      */
     public List<String> shortKeyWarnings() {
         return List.copyOf(shortKeyWarnings);
+    }
+
+    /** Unknown {@code structured-output} values. Empty when every provider is {@code auto} or a known mode. */
+    public List<String> structuredOutputWarnings() {
+        return List.copyOf(structuredOutputWarnings);
+    }
+
+    /**
+     * {@code null} means {@code auto}. A known mode is returned as written. Anything else is {@code auto}
+     * and one warning is kept for startup and {@code /nai reload}.
+     */
+    private String structuredOutput(String id, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String mode = raw.trim().toLowerCase(Locale.ROOT);
+        if (mode.equals("auto")) {
+            return null;
+        }
+        if (mode.equals("json-schema") || mode.equals("json-object") || mode.equals("prompt")) {
+            return mode;
+        }
+        String shown = mode.length() > 32 ? "value" : mode;
+        structuredOutputWarnings.add(
+                "providers." + id + ".structured-output '" + shown + "' is unknown. Using auto.");
+        return null;
     }
 
     private String substitute(String value) {

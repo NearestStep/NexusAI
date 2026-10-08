@@ -79,7 +79,7 @@ public final class AiCache {
         if (cleaned.isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(new CachedAnswer(cleaned, value.providerId(), value.model()));
+        return Optional.of(new CachedAnswer(cleaned, value.providerId(), value.model(), value.note()));
     }
 
     public void put(String key, String value) {
@@ -87,10 +87,14 @@ public final class AiCache {
     }
 
     public void put(String key, String value, String providerId, String model) {
+        put(key, value, providerId, model, "");
+    }
+
+    public void put(String key, String value, String providerId, String model, String note) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         ttlNanosByKey.remove(key);
-        write(key, new CachedAnswer(value, providerId, model));
+        write(key, new CachedAnswer(value, providerId, model, note));
     }
 
     public void put(String key, String value, Duration ttl) {
@@ -98,11 +102,15 @@ public final class AiCache {
     }
 
     public void put(String key, String value, String providerId, String model, Duration ttl) {
+        put(key, value, providerId, model, ttl, "");
+    }
+
+    public void put(String key, String value, String providerId, String model, Duration ttl, String note) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         Objects.requireNonNull(ttl, "ttl");
         ttlNanosByKey.put(key, Math.max(1L, ttl.toNanos()));
-        write(key, new CachedAnswer(value, providerId, model));
+        write(key, new CachedAnswer(value, providerId, model, note));
     }
 
     private void write(String key, CachedAnswer value) {
@@ -157,11 +165,16 @@ public final class AiCache {
     /**
      * One cached reply. {@code providerId} and {@code model} are empty when the writer did not know them.
      */
-    public record CachedAnswer(String text, String providerId, String model) {
+    public record CachedAnswer(String text, String providerId, String model, String note) {
+        public CachedAnswer(String text, String providerId, String model) {
+            this(text, providerId, model, "");
+        }
+
         public CachedAnswer {
             text = text == null ? "" : text;
             providerId = providerId == null ? "" : providerId;
             model = model == null ? "" : model;
+            note = note == null ? "" : note;
         }
     }
 }

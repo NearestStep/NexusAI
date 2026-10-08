@@ -1194,6 +1194,13 @@ public final class ModelQueue {
         return any;
     }
 
+    /** Queue index for this provider and model, or {@code -1} when the pair is not a queue row. */
+    public synchronized int indexOf(String provider, String model) {
+        String id = provider == null ? "" : provider.trim().toLowerCase(java.util.Locale.ROOT);
+        Slot slot = findQueueSlot(id, model == null ? "" : model);
+        return slot == null ? -1 : slot.index;
+    }
+
     private Slot findQueueSlot(String provider, String model) {
         if (provider == null || model == null) {
             return null;

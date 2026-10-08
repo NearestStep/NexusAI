@@ -18,8 +18,23 @@ public record ModelAnswer(
         String finishReason,
         int attempts,
         boolean fallbackModelUsed,
-        long httpNanos
+        long httpNanos,
+        String structuredMode
 ) {
+
+    public ModelAnswer(
+            String text,
+            Duration cacheTtl,
+            String providerId,
+            String model,
+            ResponseUsage usage,
+            String finishReason,
+            int attempts,
+            boolean fallbackModelUsed,
+            long httpNanos
+    ) {
+        this(text, cacheTtl, providerId, model, usage, finishReason, attempts, fallbackModelUsed, httpNanos, "");
+    }
 
     public ModelAnswer(String text, Duration cacheTtl) {
         this(text, cacheTtl, "", "", ResponseUsage.none(), "", 0, false, 0L);
@@ -42,5 +57,6 @@ public record ModelAnswer(
         if (httpNanos < 0) {
             httpNanos = 0;
         }
+        structuredMode = structuredMode == null ? "" : structuredMode;
     }
 }

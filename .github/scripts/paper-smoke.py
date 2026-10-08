@@ -166,6 +166,8 @@ class MockHandle:
     def __init__(self) -> None:
         self._count = 0
         self._lock = threading.Lock()
+        self._json_invalid_once = False
+        self._json_length_once = False
         self.server: ThreadingHTTPServer | None = None
 
     def add(self) -> int:
@@ -186,7 +188,12 @@ class MockHandle:
 
 def _mock_choice(headers, path: str, name: str, fallback: str | None) -> str | None:
     """Per-request header or query overrides the value passed to ``start_mock``."""
-    header_name = {"usage": "X-Nexus-Mock-Usage", "status": "X-Nexus-Mock-Status"}[name]
+    header_name = {
+        "usage": "X-Nexus-Mock-Usage",
+        "status": "X-Nexus-Mock-Status",
+        "json": "X-Nexus-Mock-Json",
+        "reject": "X-Nexus-Mock-Reject",
+    }[name]
     raw = headers.get(header_name)
     if raw:
         return raw.strip().lower()
@@ -212,20 +219,67 @@ def _usage_object(mode: str | None) -> dict | None:
     return None
 
 
-def _completion_body(usage_mode: str | None) -> bytes:
+QUEST_JSON = '{"title":"Iron nails","goal":"Bring ten iron nails.","reward":12}'
+INVALID_QUEST_JSON = '{"title":"Iron nails","goal":"Bring ten iron nails.","reward":"nope"}'
+FENCED_QUEST_JSON = "```json\n" + QUEST_JSON + "\n```"
+TRUNCATED_QUEST_JSON = '{"title":"Iron'
+
+
+def _completion_body(usage_mode: str | None, content: str = "pong", finish_reason: str = "stop") -> bytes:
     payload = {
         "id": "smoke",
         "object": "chat.completion",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": "pong"},
-            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": finish_reason,
         }],
     }
     usage = _usage_object(usage_mode)
     if usage is not None:
         payload["usage"] = usage
     return json.dumps(payload).encode("utf-8")
+
+
+def _response_format_type(raw: bytes) -> str | None:
+    if not raw:
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    fmt = body.get("response_format")
+    if not isinstance(fmt, dict):
+        return None
+    kind = fmt.get("type")
+    return kind if isinstance(kind, str) else None
+
+
+def _json_reply(handle: MockHandle, mode: str | None) -> tuple[str, str] | None:
+    """Content and finish_reason for a JSON mock mode. None keeps the text reply."""
+    if mode in (None, "", "off"):
+        return None
+    if mode == "valid":
+        return QUEST_JSON, "stop"
+    if mode == "invalid":
+        return INVALID_QUEST_JSON, "stop"
+    if mode == "fenced":
+        return FENCED_QUEST_JSON, "stop"
+    if mode == "invalid-once":
+        with handle._lock:
+            if not handle._json_invalid_once:
+                handle._json_invalid_once = True
+                return INVALID_QUEST_JSON, "stop"
+        return QUEST_JSON, "stop"
+    if mode == "length-once":
+        with handle._lock:
+            if not handle._json_length_once:
+                handle._json_length_once = True
+                return TRUNCATED_QUEST_JSON, "length"
+        return QUEST_JSON, "stop"
+    return None
 
 
 def start_mock(
@@ -245,6 +299,13 @@ def start_mock(
     ``429-once``, ``500``, or ``401``. A request may override either with the header
     ``X-Nexus-Mock-Usage`` / ``X-Nexus-Mock-Status`` or the query ``usage`` / ``status``.
     A status override wins over ``fail_every``. The default response has no ``usage`` key.
+
+    ``X-Nexus-Mock-Json`` or the query ``json`` is ``valid``, ``invalid-once``,
+    ``invalid``, ``fenced``, ``length-once``, ``reject-schema``, or ``reject-object``.
+    ``X-Nexus-Mock-Reject`` or the query ``reject`` is ``json_schema`` or ``json_object``
+    and answers HTTP 400 when the body asks for that ``response_format``. A body that
+    already asks for ``json_schema`` or ``json_object``, and does not set ``json``,
+    is answered with the quest object.
     """
     handle = MockHandle()
     handle._status_once = False
@@ -266,6 +327,15 @@ def start_mock(
             number = handle.add()
             usage_mode = _mock_choice(self.headers, self.path, "usage", usage)
             forced = _mock_choice(self.headers, self.path, "status", status_mode)
+            json_mode = _mock_choice(self.headers, self.path, "json", None)
+            reject_mode = _mock_choice(self.headers, self.path, "reject", None)
+            if json_mode == "reject-schema":
+                reject_mode = "json_schema"
+                json_mode = None
+            elif json_mode == "reject-object":
+                reject_mode = "json_object"
+                json_mode = None
+            response_format = _response_format_type(raw)
             status = 200
             if forced == "429-once":
                 with handle._lock:
@@ -286,8 +356,22 @@ def start_mock(
                 body = b'{"error":{"message":"server error","type":"server_error"}}'
             elif status == 401:
                 body = b'{"error":{"message":"unauthorized","type":"invalid_api_key"}}'
+            elif status == 200 and reject_mode in ("json_schema", "json_object") and response_format == reject_mode:
+                status = 400
+                body = (
+                    '{"error":{"message":"response_format '
+                    + reject_mode
+                    + ' is not supported","type":"invalid_request_error"}}'
+                ).encode("utf-8")
             else:
-                body = _completion_body(usage_mode)
+                chosen = json_mode
+                if chosen is None and response_format in ("json_schema", "json_object"):
+                    chosen = "valid"
+                reply = _json_reply(handle, chosen)
+                if reply is None:
+                    body = _completion_body(usage_mode)
+                else:
+                    body = _completion_body(usage_mode, reply[0], reply[1])
             # The journal is visible before the response bytes, so a client that
             # reads it as soon as the status returns cannot miss the last line.
             if requests_path is not None:
@@ -481,6 +565,7 @@ def boot(
             print(queued_events)
             wait_event_checks(process, log_chunks, min(timeout, 90))
             verify_event_order("".join(log_chunks))
+            verify_json(process, log_chunks, rcon_port, min(timeout, 90))
 
         # 26.2 closes the RCON socket as soon as stop begins, before the response
         # packet is finished. The command still reached the server.
@@ -499,6 +584,25 @@ def boot(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+
+
+def verify_json(process, chunks: list[str], rcon_port: int, timeout: int) -> None:
+    """One generateJson call. Prints JSON OK. A missing line is a failure."""
+    queued = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "naiload json"))
+    print("--- naiload json ---")
+    print(queued)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"server exited during json smoke with code {process.returncode}")
+        text = "".join(chunks)
+        if "NEXUSAI_JSON success=true mode=JSON_SCHEMA" in text:
+            print("JSON OK")
+            return
+        if "NEXUSAI_JSON success=false" in text:
+            raise RuntimeError("generateJson did not return valid JSON")
+        time.sleep(0.5)
+    raise RuntimeError("timed out waiting for NEXUSAI_JSON success=true mode=JSON_SCHEMA")
 
 
 def verify_event_order(text: str) -> None:

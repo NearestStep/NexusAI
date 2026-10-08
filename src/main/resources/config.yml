@@ -65,6 +65,8 @@ providers:
     type: openai-compatible
     url: "https://api.openai.com/v1"
     api-key: ""
+    # auto | json-schema | json-object | prompt
+    # structured-output: auto
     # api-key:
     #   - "${OPENAI_KEY_A}"
     #   - "${OPENAI_KEY_B}"

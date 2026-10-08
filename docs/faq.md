@@ -207,6 +207,12 @@ Capacity is per prompt: `pool.entries[].size` (and `min-threshold` for refill). 
 
 Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so a hologram or a scoreboard can show a ready answer instead of the first-hit fallback. It is not the unique-answer pool (`generate_` / `pool`). Prompts that depend on the player are skipped until a player reads them.
 
+## Why did generateJson fail?
+
+`success()` is false when the reply was not one JSON object that matched the schema, including after the one correction retry. `meta().error().kind()` is `INVALID_JSON`, `validationErrors()` names the paths (at most 10), and `meta().text()` is the fallback. That does not pause the provider. A schema keyword outside the supported subset, or a root that is not an object, throws `IllegalArgumentException` from `JsonSchema.parse` before any HTTP call. The message has the path, not the schema text.
+
+`QUOTA_EXCEEDED`, `LOCAL_LIMIT`, and `PROVIDER_ERROR` are the same kinds as `generate`. HTTP 429 or 5xx on the first attempt walks the model queue and does not use the correction retry. The same errors on the retry complete with that provider error. `request.format()` does not change the JSON call. A cached text answer is not reused as JSON.
+
 ## A scoreboard, a menu, and an NPC
 
 - Shared tip: [examples/placeholders](../examples/placeholders/README.md), then [examples/tab](../examples/tab/README.md), [examples/scoreboard](../examples/scoreboard/README.md), or [examples/deluxemenus](../examples/deluxemenus/README.md).

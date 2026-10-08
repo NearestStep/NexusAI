@@ -9,6 +9,8 @@ import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.ModelAnswer;
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
+import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.ai.SharedCompletion;
 import io.github.neareststep.nexusai.api.CacheMode;
 import io.github.neareststep.nexusai.api.ContextRequest;
@@ -16,7 +18,10 @@ import io.github.neareststep.nexusai.api.GenerationError;
 import io.github.neareststep.nexusai.api.GenerationRequest;
 import io.github.neareststep.nexusai.api.GenerationRequestFacts;
 import io.github.neareststep.nexusai.api.GenerationResult;
+import io.github.neareststep.nexusai.api.JsonGenerationResult;
+import io.github.neareststep.nexusai.api.JsonSchema;
 import io.github.neareststep.nexusai.api.NexusErrorKind;
+import io.github.neareststep.nexusai.api.StructuredMode;
 import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.api.ResultSource;
 import io.github.neareststep.nexusai.api.QuotaStatus;
@@ -35,6 +40,9 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.json.JsonDocuments;
+import io.github.neareststep.nexusai.json.JsonRepair;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
@@ -74,6 +82,7 @@ public final class GenerationService {
     private final PlayerStateReader reader;
     private final GenerationHooks hooks;
     private final ConcurrentHashMap<CompletableFuture<GenerationResult>, CallTrace> pending = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<CompletableFuture<GenerationResult>, JsonSession> jsonSessions = new ConcurrentHashMap<>();
     private volatile GenerationRuntime runtime;
     private volatile QuotaPolicy quotas;
     private volatile boolean closed;
@@ -167,6 +176,58 @@ public final class GenerationService {
     }
 
     public CompletableFuture<GenerationResult> generate(Plugin owner, GenerationRequest request) {
+        return generate(owner, request, null);
+    }
+
+    /**
+     * {@link io.github.neareststep.nexusai.api.NexusAIApi#generateJson(Plugin, GenerationRequest, JsonSchema)}.
+     * The future completes on a NexusAI thread, except {@code NexusAI is not enabled}, which may
+     * complete on the caller.
+     */
+    public CompletableFuture<JsonGenerationResult> generateJson(Plugin owner, GenerationRequest request, JsonSchema schema) {
+        if (owner == null || request == null || schema == null) {
+            throw new IllegalArgumentException("owner, request, and schema are required");
+        }
+        JsonSession session = new JsonSession(schema);
+        CompletableFuture<GenerationResult> inner = generate(owner, request, session);
+        CompletableFuture<JsonGenerationResult> outer = new CompletableFuture<>();
+        inner.whenComplete((result, error) -> {
+            if (error != null) {
+                outer.completeExceptionally(unwrap(error));
+                return;
+            }
+            outer.complete(session.toResult(result));
+        });
+        return outer;
+    }
+
+    /**
+     * Schema from the registered prompt. A prompt with no {@link JsonSchema} completes as
+     * {@link NexusErrorKind#INVALID_REQUEST} and does not call the model.
+     */
+    public CompletableFuture<JsonGenerationResult> generateJson(Plugin owner, GenerationRequest request) {
+        if (owner == null || request == null) {
+            throw new IllegalArgumentException("owner and request are required");
+        }
+        GenerationRuntime current = runtime;
+        if (closed || current == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("NexusAI is not enabled"));
+        }
+        if (request.promptId().isPresent()) {
+            Optional<ApiPromptRegistry.Effective> effective = ApiPromptRegistry.get()
+                    .effective(current.catalog(), request.promptId().get());
+            if (effective.isEmpty()) {
+                return wrap(generate(owner, request, null));
+            }
+            Object stored = effective.get().schema();
+            if (stored instanceof JsonSchema schema) {
+                return generateJson(owner, request, schema);
+            }
+        }
+        return missingSchema(owner, request, current);
+    }
+
+    private CompletableFuture<GenerationResult> generate(Plugin owner, GenerationRequest request, JsonSession session) {
         if (owner == null || request == null) {
             throw new IllegalArgumentException("owner and request are required");
         }
@@ -181,6 +242,9 @@ public final class GenerationService {
                 request.promptId().orElse(""),
                 request.label());
         CompletableFuture<GenerationResult> future = new CompletableFuture<>();
+        if (session != null) {
+            jsonSessions.put(future, session);
+        }
         pending.put(future, trace);
         if (!configured(current)) {
             schedule(future, trace, () -> deliver(
@@ -254,11 +318,18 @@ public final class GenerationService {
             Lookup lookup,
             String prompt
     ) {
-        Prepared prepared = prepare(current, request, lookup, prompt);
+        Prepared prepared = prepare(current, request, lookup, prompt, jsonSessions.get(future));
         if (request.cacheMode() == CacheMode.CACHED) {
             Optional<AiCache.CachedAnswer> hit = current.cache().lookup(prepared.cacheKey);
-            if (hit.isPresent()) {
+            JsonSession session = jsonSessions.get(future);
+            if (hit.isPresent() && (session == null || JsonDocuments.isObject(hit.get().text()))) {
                 AiCache.CachedAnswer cached = hit.get();
+                if (session != null) {
+                    session.json = cached.text();
+                    session.map = JsonDocuments.mapOf(cached.text());
+                    session.mode = modeOf(cached.note());
+                    session.repaired = false;
+                }
                 GenerationResult result = GenerationResult.of(
                         trace,
                         true,
@@ -382,6 +453,12 @@ public final class GenerationService {
                 deliver(future, trace, failure(trace, request, lookup, current, generationError), true);
                 return;
             }
+            JsonSession session = jsonSessions.get(future);
+            if (session != null && finishStructured(
+                    request, current, trace, future, lookup, prepared, shared, admissionKey,
+                    pauseStamp, failureEpoch, session, answer, error)) {
+                return;
+            }
             if (error == null) {
                 String rejection = PlayerInput.rejectionReason(answer == null ? null : answer.text(), prepared.prompt);
                 if (rejection != null) {
@@ -415,7 +492,7 @@ public final class GenerationService {
                     null);
             current.gate().recordSuccess(admissionKey, pauseStamp, failureEpoch, true);
             if (prepared.writeCache) {
-                writeCache(current, prepared, answer, text);
+                writeCache(current, prepared, answer, text, "");
             }
             boolean truncated = LengthCutoff.isLength(answer.finishReason());
             TokenUsage usage = TokenUsage.from(answer.usage());
@@ -453,6 +530,292 @@ public final class GenerationService {
         }
     }
 
+    /**
+     * JSON replies skip the text formatter. Returns true when this method delivered a result
+     * or scheduled the one repair. A provider error on the first attempt returns false so the
+     * normal failure path can run.
+     */
+    private boolean finishStructured(
+            GenerationRequest request,
+            GenerationRuntime current,
+            CallTrace trace,
+            CompletableFuture<GenerationResult> future,
+            Lookup lookup,
+            Prepared prepared,
+            CompletableFuture<SharedCompletion> shared,
+            String admissionKey,
+            long pauseStamp,
+            long failureEpoch,
+            JsonSession session,
+            ModelAnswer answer,
+            Throwable error
+    ) {
+        if (error != null && !session.repairUsed) {
+            return false;
+        }
+        if (error != null) {
+            int attempts = session.firstAttempts + StructuredOutputSupport.attempts(session.repairOverrides);
+            ResponseUsage usage = session.firstUsage;
+            AiRequestException typed = AiErrors.find(error);
+            if (typed != null && typed.usage() != null) {
+                usage = usage.plus(typed.usage());
+            }
+            session.repaired = true;
+            recordHttpFailure(current, admissionKey, error);
+            GenerationError generationError = NexusErrors.fromThrowable(current.config(), error);
+            releaseShared(current, prepared, shared, SharedCompletion.fail(AiErrors.unwrap(error), generationError, session.errors));
+            String provider = answer == null ? "" : answer.providerId();
+            String model = answer == null ? "" : answer.model();
+            deliver(future, trace, failed(trace, request, lookup, current, generationError, attempts, usage, provider, model), true);
+            return true;
+        }
+        session.mode = StructuredOutputSupport.active(prepared.overrides);
+        JsonDocuments.Outcome outcome = JsonDocuments.read(
+                answer == null ? null : answer.text(),
+                session.schema,
+                current.config().allowMarkup(),
+                current.config().configuredSecrets(),
+                prepared.prompt);
+        if (outcome.rejected()) {
+            Throwable rejected = new AiRequestException(AiErrorKind.REJECTED, 0, outcome.rejection(), null);
+            recordHttpFailure(current, admissionKey, rejected);
+            GenerationError generationError = NexusErrors.fromThrowable(current.config(), rejected);
+            releaseShared(current, prepared, shared, SharedCompletion.fail(rejected, generationError));
+            int attempts = answer == null ? session.firstAttempts : session.firstAttempts + answer.attempts();
+            ResponseUsage usage = answer == null ? session.firstUsage : session.firstUsage.plus(answer.usage());
+            String provider = answer == null ? "" : answer.providerId();
+            String model = answer == null ? "" : answer.model();
+            deliver(future, trace, failed(trace, request, lookup, current, generationError, attempts, usage, provider, model), true);
+            return true;
+        }
+        if (!outcome.valid()) {
+            session.errors = outcome.errors();
+            if (!session.repairUsed && answer != null) {
+                session.repairUsed = true;
+                session.errors = outcome.errors();
+                session.firstUsage = answer.usage();
+                session.firstAttempts = answer.attempts();
+                boolean length = JsonRepair.lengthLimited(answer.finishReason());
+                GenerationOverrides repairOverrides = StructuredOutputSupport.repair(
+                        prepared.overrides, answer.text(), outcome.errors(), length);
+                if (length) {
+                    Integer currentTokens = prepared.overrides.maxTokens(StructuredOutputSupport.DEFAULT_MAX_TOKENS);
+                    repairOverrides = repairOverrides.withMaxTokens(JsonRepair.doubledMaxTokens(
+                            currentTokens == null ? StructuredOutputSupport.DEFAULT_MAX_TOKENS : currentTokens));
+                }
+                session.repairOverrides = repairOverrides;
+                if (!reserveRepair(current, trace, prepared.prompt, repairOverrides)) {
+                    GenerationError quota = NexusErrors.of(
+                            current.config(), NexusErrorKind.QUOTA_EXCEEDED, "Quota exceeded", 0, 0L);
+                    releaseShared(current, prepared, shared, SharedCompletion.fail(failureFor(quota), quota, session.errors));
+                    deliver(future, trace, failed(
+                            trace, request, lookup, current, quota, session.firstAttempts, session.firstUsage,
+                            answer.providerId(), answer.model()), true);
+                    return true;
+                }
+                if (!(current.provider() instanceof RoutingProvider routing)) {
+                    return invalidJson(request, current, trace, future, lookup, prepared, shared, session, answer);
+                }
+                Prepared repairPrepared = new Prepared(
+                        prepared.prompt, repairOverrides, prepared.cacheKey, prepared.ttl, prepared.writeCache);
+                routing.repeat(prepared.prompt, repairOverrides, answer.providerId(), answer.model(), trace)
+                        .whenComplete((value, repairError) -> runHttpFinish(
+                                current, repairPrepared, shared, future, trace, () -> finishHttp(
+                                        request, current, trace, future, lookup, repairPrepared, shared,
+                                        admissionKey, pauseStamp, failureEpoch, value, repairError)));
+                return true;
+            }
+            return invalidJson(request, current, trace, future, lookup, prepared, shared, session, answer);
+        }
+        String json = outcome.json();
+        session.json = json;
+        session.map = outcome.map();
+        session.errors = List.of();
+        session.repaired = session.repairUsed;
+        ResponseUsage usage = session.repairUsed ? session.firstUsage.plus(answer.usage()) : answer.usage();
+        int attempts = session.repairUsed ? session.firstAttempts + answer.attempts() : answer.attempts();
+        long nanos = answer.httpNanos();
+        if (session.repairUsed) {
+            nanos = saturatingNanos(nanos, 0L);
+        }
+        EventDispatcher.get().post(
+                trace,
+                json,
+                answer.providerId(),
+                answer.model(),
+                answer.fallbackModelUsed(),
+                TokenUsage.from(usage),
+                answer.finishReason(),
+                attempts,
+                null);
+        current.gate().recordSuccess(admissionKey, pauseStamp, failureEpoch, true);
+        if (prepared.writeCache) {
+            writeCache(current, prepared, answer, json, session.mode.name());
+        }
+        boolean truncated = LengthCutoff.isLength(answer.finishReason());
+        releaseShared(current, prepared, shared, SharedCompletion.ok(new ModelAnswer(
+                json,
+                answer.cacheTtl(),
+                answer.providerId(),
+                answer.model(),
+                usage,
+                answer.finishReason(),
+                attempts,
+                answer.fallbackModelUsed(),
+                nanos,
+                session.mode.name())));
+        GenerationResult result = GenerationResult.of(
+                trace,
+                true,
+                json,
+                ResultSource.MODEL,
+                answer.providerId(),
+                answer.model(),
+                answer.fallbackModelUsed(),
+                TokenUsage.from(usage),
+                answer.finishReason(),
+                truncated,
+                attempts,
+                Duration.ofNanos(Math.max(0L, nanos)),
+                null);
+        deliver(future, trace, result, true);
+        return true;
+    }
+
+    private boolean invalidJson(
+            GenerationRequest request,
+            GenerationRuntime current,
+            CallTrace trace,
+            CompletableFuture<GenerationResult> future,
+            Lookup lookup,
+            Prepared prepared,
+            CompletableFuture<SharedCompletion> shared,
+            JsonSession session,
+            ModelAnswer answer
+    ) {
+        session.repaired = session.repairUsed;
+        if (answer != null && session.repairUsed) {
+            session.errors = session.errors.isEmpty() ? List.of("$: JSON could not be parsed") : session.errors;
+        }
+        GenerationError error = NexusErrors.of(
+                current.config(), NexusErrorKind.INVALID_JSON, "The reply was not valid JSON", 0, 0L);
+        int attempts = answer == null ? session.firstAttempts : session.firstAttempts + answer.attempts();
+        ResponseUsage usage = answer == null ? session.firstUsage : session.firstUsage.plus(answer.usage());
+        String provider = answer == null ? "" : answer.providerId();
+        String model = answer == null ? "" : answer.model();
+        releaseShared(current, prepared, shared, SharedCompletion.fail(
+                new AiRequestException(AiErrorKind.OTHER, 0, error.message(), null), error, session.errors));
+        deliver(future, trace, failed(trace, request, lookup, current, error, attempts, usage, provider, model), true);
+        return true;
+    }
+
+    private boolean reserveRepair(
+            GenerationRuntime current,
+            CallTrace trace,
+            String prompt,
+            GenerationOverrides overrides
+    ) {
+        QuotaPolicy policy = quotas;
+        if (policy == null || trace == null) {
+            return true;
+        }
+        policy.releaseTracked(trace.requestId());
+        long estimate = QuotaEstimates.forCall(current.config(), prompt, overrides, null);
+        QuotaPolicy.Decision decision = policy.tryReserve(QuotaPolicy.Charge.of(trace, estimate, null));
+        if (!decision.allowed()) {
+            return false;
+        }
+        policy.track(trace.requestId(), decision.hold());
+        return true;
+    }
+
+    private GenerationResult failed(
+            CallTrace trace,
+            GenerationRequest request,
+            Lookup lookup,
+            GenerationRuntime current,
+            GenerationError error,
+            int attempts,
+            ResponseUsage usage,
+            String providerId,
+            String model
+    ) {
+        return GenerationResult.of(
+                trace,
+                false,
+                fallbackText(current, request, lookup == null ? null : lookup.named),
+                ResultSource.FALLBACK,
+                providerId,
+                model,
+                false,
+                TokenUsage.from(usage),
+                "",
+                false,
+                attempts,
+                Duration.ZERO,
+                error);
+    }
+
+    private CompletableFuture<JsonGenerationResult> missingSchema(
+            Plugin owner,
+            GenerationRequest request,
+            GenerationRuntime current
+    ) {
+        CallTrace trace = CallTrace.start(
+                RequestOrigin.API,
+                owner.getName(),
+                request.playerId().orElse(null),
+                request.promptId().orElse(""),
+                request.label());
+        CompletableFuture<GenerationResult> future = new CompletableFuture<>();
+        pending.put(future, trace);
+        Lookup lookup = lookup(current, request);
+        GenerationError error = lookup.error == null
+                ? NexusErrors.of(current.config(), NexusErrorKind.INVALID_REQUEST, "prompt has no JSON schema", 0, 0L)
+                : NexusErrors.of(current.config(), lookup.error, lookup.message, 0, 0L);
+        schedule(future, trace, () -> deliver(future, trace, failure(trace, request, lookup, current, error), true));
+        return wrap(future);
+    }
+
+    private static CompletableFuture<JsonGenerationResult> wrap(CompletableFuture<GenerationResult> inner) {
+        CompletableFuture<JsonGenerationResult> outer = new CompletableFuture<>();
+        inner.whenComplete((result, error) -> {
+            if (error != null) {
+                outer.completeExceptionally(unwrap(error));
+                return;
+            }
+            outer.complete(JsonGenerationResult.of(result, "", Map.of(), StructuredMode.JSON_SCHEMA, false, List.of()));
+        });
+        return outer;
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while (current instanceof java.util.concurrent.CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current == null ? error : current;
+    }
+
+    private static StructuredMode modeOf(String name) {
+        if (name == null || name.isBlank()) {
+            return StructuredMode.JSON_SCHEMA;
+        }
+        try {
+            return StructuredMode.valueOf(name);
+        } catch (IllegalArgumentException ex) {
+            return StructuredMode.JSON_SCHEMA;
+        }
+    }
+
+    private static long saturatingNanos(long left, long right) {
+        long sum = left + right;
+        if (sum < 0L) {
+            return Long.MAX_VALUE;
+        }
+        return sum;
+    }
+
     private void deliverJoin(
             CompletableFuture<GenerationResult> future,
             CallTrace trace,
@@ -462,6 +825,13 @@ public final class GenerationService {
             SharedCompletion shared,
             Throwable error
     ) {
+        JsonSession session = jsonSessions.get(future);
+        if (session != null && (shared == null || error != null || !shared.ok())) {
+            if (shared != null) {
+                session.errors = shared.notes();
+            }
+            session.repaired = false;
+        }
         if (shared == null || error != null || !shared.ok()) {
             GenerationError generationError;
             if (shared != null && shared.apiError() != null) {
@@ -480,6 +850,12 @@ public final class GenerationService {
         String text = SecretMask.redact(
                 PlayerInput.stripSectionSigns(answer.text(), current.config().allowMarkup()).trim(),
                 current.config().configuredSecrets());
+        if (session != null) {
+            session.json = text;
+            session.map = JsonDocuments.mapOf(text);
+            session.mode = modeOf(answer.structuredMode());
+            session.repaired = false;
+        }
         GenerationResult result = GenerationResult.of(
                 trace,
                 true,
@@ -521,7 +897,7 @@ public final class GenerationService {
         current.diagnostics().report(kind, AiErrors.detail(error), current.gate().isPaused());
     }
 
-    private void writeCache(GenerationRuntime current, Prepared prepared, ModelAnswer answer, String text) {
+    private void writeCache(GenerationRuntime current, Prepared prepared, ModelAnswer answer, String text, String note) {
         Duration ttl = prepared.ttl;
         if (answer.cacheTtl() != null) {
             Duration normal = ttl != null ? ttl : current.config().getCacheTtl();
@@ -530,9 +906,9 @@ public final class GenerationService {
             }
         }
         if (ttl != null) {
-            current.cache().put(prepared.cacheKey, text, answer.providerId(), answer.model(), ttl);
+            current.cache().put(prepared.cacheKey, text, answer.providerId(), answer.model(), ttl, note);
         } else {
-            current.cache().put(prepared.cacheKey, text, answer.providerId(), answer.model());
+            current.cache().put(prepared.cacheKey, text, answer.providerId(), answer.model(), note);
         }
     }
 
@@ -631,7 +1007,13 @@ public final class GenerationService {
         return new AiRequestException(kind, error.httpStatus(), error.message(), null, retryAfter);
     }
 
-    private Prepared prepare(GenerationRuntime current, GenerationRequest request, Lookup lookup, String prompt) {
+    private Prepared prepare(
+            GenerationRuntime current,
+            GenerationRequest request,
+            Lookup lookup,
+            String prompt,
+            JsonSession session
+    ) {
         PluginConfig config = current.config();
         GenerationOverrides base = lookup.named == null
                 ? ResolvedPrompt.literal(prompt, config).overrides()
@@ -649,7 +1031,9 @@ public final class GenerationService {
         if (request.model().isPresent()) {
             top = top.withModel(request.model().get());
         }
-        if (request.format().isPresent()) {
+        if (session != null && request.format().isPresent()) {
+            logger.fine("Format is ignored for JSON.");
+        } else if (request.format().isPresent()) {
             String raw = request.format().get();
             if (!FormatPresets.known(raw)) {
                 logger.fine("Unknown format '" + clipFormat(raw) + "'. Using " + config.defaultFormatId() + ".");
@@ -671,12 +1055,22 @@ public final class GenerationService {
         }
         KnowledgeComposer.Prepared knowledge = KnowledgeComposer.prepare(
                 merged, config.getSystemPrompt(), current.knowledge(), names);
+        GenerationOverrides overrides = knowledge.overrides();
         String token = PromptAssembly.knowledgeToken(request, knowledge.cacheToken());
-        String model = knowledge.overrides().model(config.getModel());
-        String format = knowledge.overrides().formatOr(config.defaultFormatId());
+        String format = overrides.formatOr(config.defaultFormatId());
+        if (session != null && session.schema != null) {
+            overrides = StructuredOutputSupport.call(overrides, session.schema);
+            if (!overrides.maxTokensSpecified()) {
+                overrides = overrides.withMaxTokens(StructuredOutputSupport.DEFAULT_MAX_TOKENS);
+            }
+            String suffix = "json:" + session.schema.hash();
+            token = token == null || token.isBlank() ? suffix : token + suffix;
+            format = config.defaultFormatId();
+        }
+        String model = overrides.model(config.getModel());
         String cacheKey = current.http().cacheKey(model, prompt, format, token);
         Duration ttl = request.ttl().orElse(lookup.named == null ? null : lookup.named.ttl());
-        return new Prepared(prompt, knowledge.overrides(), cacheKey, ttl, request.cacheMode() == CacheMode.CACHED);
+        return new Prepared(prompt, overrides, cacheKey, ttl, request.cacheMode() == CacheMode.CACHED);
     }
 
     /**
@@ -920,6 +1314,9 @@ public final class GenerationService {
             EventDispatcher.get().fail(trace, result.error().orElse(null), result.attempts(), null);
         }
         releaseQuota(trace);
+        if (future != null) {
+            jsonSessions.remove(future);
+        }
         if (future == null || result == null || pending.remove(future) == null) {
             return;
         }
@@ -984,6 +1381,27 @@ public final class GenerationService {
             return "";
         }
         return raw.length() <= 64 ? raw : raw.substring(0, 64);
+    }
+
+    private static final class JsonSession {
+        private final JsonSchema schema;
+        private volatile boolean repairUsed;
+        private volatile boolean repaired;
+        private volatile StructuredMode mode = StructuredMode.JSON_SCHEMA;
+        private volatile String json = "";
+        private volatile Map<String, Object> map = Map.of();
+        private volatile List<String> errors = List.of();
+        private volatile ResponseUsage firstUsage = ResponseUsage.none();
+        private volatile int firstAttempts;
+        private volatile GenerationOverrides repairOverrides = GenerationOverrides.none();
+
+        private JsonSession(JsonSchema schema) {
+            this.schema = schema;
+        }
+
+        private JsonGenerationResult toResult(GenerationResult meta) {
+            return JsonGenerationResult.of(meta, json, map, mode, repaired, errors);
+        }
     }
 
     private static final class Lookup {
