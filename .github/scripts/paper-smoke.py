@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -53,6 +54,15 @@ THREAD_REGION_ERRORS = (
 REFUSAL_MARKERS = (
     "not marked as supporting Folia",
     "not marked as supporting regionised multithreading",
+)
+# Flat-world startup prints this exact message. A longer line is not exempt.
+EXEMPT_LOG_MESSAGE = "No key layers in MapLike[{}]"
+_LOG_PREFIXES = (
+    re.compile(r"^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] \[[^\[\]]+\]: "),
+    re.compile(r"^\[[0-9]{2}:[0-9]{2}:[0-9]{2} [A-Za-z]+\]: "),
+)
+_THROWABLE_LINE = re.compile(
+    r"(?<![\w$])(?:[\w$]+\.)*[\w$]*(?:Exception|Error|Throwable)(?=\s*:|$)"
 )
 
 
@@ -1212,15 +1222,16 @@ def boot_folia(
 
 def report_folia_startup(text: str, announce: bool = True) -> None:
     """Startup checks: Done is already required. This reports the expected refusal."""
-    refusals, problems = assess_folia_startup(text)
+    refusals, problems, exempted = assess_folia_startup(text)
     if announce:
         for line in refusals:
             print("FOLIA REFUSAL EXPECTED: " + line.strip(), flush=True)
+    print(f"FOLIA EXEMPT LINES: {exempted}", flush=True)
     if problems:
         raise RuntimeError("folia startup checks failed:\n" + "\n".join(problems))
 
 
-def assess_folia_startup(text: str) -> tuple[list[str], list[str]]:
+def assess_folia_startup(text: str) -> tuple[list[str], list[str], int]:
     refusals = expected_refusal_lines(text)
     problems: list[str] = []
     if not refusals:
@@ -1230,10 +1241,11 @@ def assess_folia_startup(text: str) -> tuple[list[str], list[str]]:
     if "Error occurred while enabling NexusAI" in text:
         problems.append("NexusAI threw while enabling")
     problems.extend(thread_region_problems(text))
-    problems.extend(unexpected_log_problems(text))
+    unexpected, exempted = unexpected_log_problems(text)
+    problems.extend(unexpected)
     if len(problems) > 20:
         problems = problems[:20] + [f"... and {len(problems) - 20} more"]
-    return refusals, problems
+    return refusals, problems, exempted
 
 
 def expected_refusal_lines(text: str) -> list[str]:
@@ -1275,22 +1287,49 @@ def refusal_skip_indexes(lines: list[str]) -> set[int]:
     return skip
 
 
-def unexpected_log_problems(text: str) -> list[str]:
-    """Exceptions and NexusAI errors outside the expected Folia refusal.
+def log_message(line: str) -> str:
+    """Text after a ``[time] [thread/LEVEL]:`` or ``[time LEVEL]:`` prefix."""
+    for pattern in _LOG_PREFIXES:
+        match = pattern.match(line)
+        if match:
+            return line[match.end():]
+    return line
 
-    A vanilla ERROR that is not an exception, such as worldgen 'No key layers
-    in MapLike[{}]', does not fail startup. The server still has to reach Done.
+
+def is_exempt_worldgen_line(line: str) -> bool:
+    """True only when the message equals the flat-world line, not a longer one."""
+    return log_message(line) == EXEMPT_LOG_MESSAGE
+
+
+def is_error_level_line(line: str) -> bool:
+    return "/ERROR]" in line or " ERROR]:" in line or "SEVERE" in line
+
+
+def is_throwable_line(line: str) -> bool:
+    """A class name ending in Exception, Error, or Throwable, then ':' or end of line."""
+    return _THROWABLE_LINE.search(line) is not None
+
+
+def unexpected_log_problems(text: str) -> tuple[list[str], int]:
+    """ERROR, SEVERE, and throwable lines outside the NexusAI refusal.
+
+    The refusal and its stack stay skipped. The flat-world line is exempt only
+    when its message is exactly that text, and the exemption does not cover
+    the following lines.
     """
     lines = text.splitlines()
     skip = refusal_skip_indexes(lines)
     problems = []
+    exempted = 0
     for index, line in enumerate(lines):
         if index in skip:
             continue
-        nexus_error = "[NexusAI]" in line and ("ERROR]" in line or "SEVERE" in line)
-        if "Exception" in line or "SEVERE" in line or nexus_error:
+        if is_exempt_worldgen_line(line):
+            exempted += 1
+            continue
+        if is_error_level_line(line) or is_throwable_line(line):
             problems.append("unexpected log: " + line.strip())
-    return problems
+    return problems, exempted
 
 
 def thread_region_problems(text: str) -> list[str]:
@@ -1499,17 +1538,47 @@ def _smoke_self_check() -> None:
         "[01:00:02] [Server thread/INFO]: Preparing spawn area",
         "[01:00:02 ERROR]: No key layers in MapLike[{}]",
     ])
-    refusals, problems = assess_folia_startup(sample)
+    refusals, problems, exempted = assess_folia_startup(sample)
     _need(len(refusals) == 1, f"refusal lines {refusals}")
     _need(not problems, f"clean refusal was flagged: {problems}")
+    _need(exempted == 1, f"expected one exempt worldgen line, got {exempted}")
+    exact_thread = "[01:00:02] [Server thread/ERROR]: " + EXEMPT_LOG_MESSAGE
+    exact_short = "[01:00:02 ERROR]: " + EXEMPT_LOG_MESSAGE
+    for exact in (exact_thread, exact_short):
+        found, count = unexpected_log_problems(exact)
+        _need(not found and count == 1, f"exact worldgen line was not exempt: {exact!r} {found} {count}")
+    longer, count = unexpected_log_problems("[01:00:02 ERROR]: " + EXEMPT_LOG_MESSAGE + " extra")
+    _need(longer and count == 0, f"longer worldgen line was exempt: {longer} {count}")
+    generic, count = unexpected_log_problems("[01:00:06] [Server thread/ERROR]: Failed to save level data")
+    _need(generic and count == 0, f"generic error passed: {generic}")
+    missing, count = unexpected_log_problems("java.lang.NoClassDefFoundError: x")
+    _need(any("NoClassDefFoundError" in item for item in missing) and count == 0, f"NoClassDefFoundError passed: {missing}")
+    version_error, _count = unexpected_log_problems("java.lang.UnsupportedClassVersionError: x")
+    _need(version_error, "UnsupportedClassVersionError passed")
+    hidden = "\n".join([
+        "[01:00:02 ERROR]: " + EXEMPT_LOG_MESSAGE,
+        "java.lang.NoClassDefFoundError: x",
+    ])
+    hidden_problems, hidden_count = unexpected_log_problems(hidden)
+    _need(hidden_count == 1 and any("NoClassDefFoundError" in item for item in hidden_problems),
+          f"exempt line hid the next line: {hidden_problems} {hidden_count}")
+    papi = "\n".join([
+        "[01:00:05] [Server thread/ERROR]: Error occurred while enabling PlaceholderAPI",
+        "java.lang.NoClassDefFoundError: org.bukkit.plugin.Plugin",
+        "\tat me.clip.placeholderapi.PlaceholderAPI.onEnable(PlaceholderAPI.java:1)",
+    ])
+    papi_problems, papi_count = unexpected_log_problems(papi)
+    _need(any("PlaceholderAPI" in item for item in papi_problems), f"enable error passed: {papi_problems}")
+    _need(any("NoClassDefFoundError" in item for item in papi_problems), f"enable stack passed: {papi_problems}")
+    _need(papi_count == 0, f"enable failure was exempt: {papi_count}")
     broken = sample + "\n[01:00:03] [Server thread/ERROR]: Thread failed main thread check: entity"
-    _refusals, problems = assess_folia_startup(broken)
+    _refusals, problems, _exempted = assess_folia_startup(broken)
     _need(any("thread/region" in item for item in problems), f"thread error missed: {problems}")
     other = sample + "\njava.lang.IllegalStateException: boom"
-    _refusals, problems = assess_folia_startup(other)
+    _refusals, problems, _exempted = assess_folia_startup(other)
     _need(any("unexpected log" in item and "boom" in item for item in problems), f"exception missed: {problems}")
     nexus = sample + "\n[01:00:04 ERROR]: [NexusAI] Enabling failed"
-    _refusals, problems = assess_folia_startup(nexus)
+    _refusals, problems, _exempted = assess_folia_startup(nexus)
     _need(any("[NexusAI]" in item for item in problems), f"plugin error missed: {problems}")
     region = "Entity is not owned by the current region"
     _need(thread_region_problems(region), "region ownership message missed")

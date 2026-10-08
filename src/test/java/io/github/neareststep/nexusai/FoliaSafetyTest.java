@@ -11,22 +11,33 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Fails when {@code src/main/java} calls the Bukkit scheduler APIs Folia rejects.
- * Comments are not calls. A call is exempt only on a line with an explicit
- * allowlist comment, {@code // folia-safety-allow: <reason>}, and the reason
- * must be non-blank. The same marker works after {@code /*}. Load-test sources
- * are not scanned.
+ * Comments are not calls. A call is exempt only when the comment text removed
+ * from that same line contains {@code folia-safety-allow:} and a non-blank
+ * reason. A marker inside a string is not a comment. Load-test sources are
+ * not scanned.
  */
 class FoliaSafetyTest {
 
     @Test
     void mainSourcesHaveNoForbiddenSchedulerCalls() throws Exception {
         Path main = mainJava();
-        List<String> hits = scanTree(main);
+        List<Path> files = javaSources(main);
+        assertTrue(files.size() > 0, "scanned .java file count was zero");
+        assertTrue(
+                files.stream().anyMatch(path -> path.getFileName().toString().equals("NexusAI.java")),
+                "NexusAI.java was not scanned"
+        );
+        List<String> hits = new ArrayList<>();
+        for (Path file : files) {
+            String relative = main.relativize(file).toString().replace('\\', '/');
+            hits.addAll(violationsIn(relative, Files.readString(file)));
+        }
         assertTrue(hits.isEmpty(), String.join("\n", hits));
     }
 
@@ -136,6 +147,53 @@ class FoliaSafetyTest {
     }
 
     @Test
+    void allowlistMarkerInsideStringIsNotExempt() {
+        String source = """
+                class Sample {
+                    void go() {
+                        Bukkit.getScheduler(); log("// folia-safety-allow: x");
+                    }
+                }
+                """;
+        List<String> hits = violationsIn("Sample.java", source);
+        assertTrue(hits.stream().anyMatch(hit -> hit.contains("Bukkit.getScheduler")), hits.toString());
+    }
+
+    @Test
+    void bukkitRunTaskMethodsAreReported() {
+        String source = """
+                class Sample {
+                    void go(Plugin plugin) {
+                        runTask(plugin, () -> {});
+                        runTaskLater(plugin, () -> {}, 1L);
+                        runTaskTimer(plugin, () -> {}, 1L, 1L);
+                        runTaskAsynchronously(plugin, () -> {});
+                        runTaskLaterAsynchronously(plugin, () -> {}, 1L);
+                        runTaskTimerAsynchronously(plugin, () -> {}, 1L, 1L);
+                    }
+                }
+                """;
+        List<String> hits = violationsIn("Sample.java", source);
+        List<String> runTaskHits = hits.stream().filter(hit -> hit.endsWith(": runTask")).toList();
+        assertEquals(6, runTaskHits.size(), hits.toString());
+    }
+
+    @Test
+    void localRunTaskSafelyIsNotReported() {
+        String source = """
+                class Sample {
+                    void go() {
+                        runTaskSafely();
+                    }
+
+                    void runTaskSafely() {
+                    }
+                }
+                """;
+        assertTrue(violationsIn("Sample.java", source).isEmpty());
+    }
+
+    @Test
     void patternSplitAcrossLinesIsReported() {
         String source = """
                 class Sample {
@@ -169,18 +227,12 @@ class FoliaSafetyTest {
         return main;
     }
 
-    private static List<String> scanTree(Path root) throws IOException {
-        List<String> hits = new ArrayList<>();
+    private static List<Path> javaSources(Path root) throws IOException {
         try (Stream<Path> walk = Files.walk(root)) {
-            List<Path> files = walk.filter(path -> Files.isRegularFile(path) && path.toString().endsWith(".java"))
+            return walk.filter(path -> Files.isRegularFile(path) && path.toString().endsWith(".java"))
                     .sorted()
                     .toList();
-            for (Path file : files) {
-                String relative = root.relativize(file).toString().replace('\\', '/');
-                hits.addAll(violationsIn(relative, Files.readString(file)));
-            }
         }
-        return hits;
     }
 
     static List<String> violationsIn(String path, String source) {
@@ -189,9 +241,8 @@ class FoliaSafetyTest {
         ScanState state = new ScanState();
         for (int i = 0; i < rawLines.length; i++) {
             String line = rawLines[i].endsWith("\r") ? rawLines[i].substring(0, rawLines[i].length() - 1) : rawLines[i];
-            boolean allowlisted = !state.block && !state.text && isAllowlisted(line);
-            String stripped = stripLine(line, state);
-            codeLines[i] = allowlisted ? "" : stripped;
+            Stripped stripped = stripLine(line, state);
+            codeLines[i] = isAllowlisted(stripped.comments) ? "" : stripped.code;
         }
         String joined = String.join("\n", codeLines);
         List<String> hits = new ArrayList<>();
@@ -216,27 +267,24 @@ class FoliaSafetyTest {
     }
 
     /**
-     * The marker must sit in a comment on the same line, and the reason after the colon
-     * must contain a non-space character.
+     * {@code comments} is only the text a comment strip removed. The reason after
+     * the marker must contain a non-space character.
      */
-    private static boolean isAllowlisted(String line) {
-        int marker = line.indexOf(ALLOWLIST);
+    private static boolean isAllowlisted(String comments) {
+        int marker = comments.indexOf(ALLOWLIST);
         if (marker < 0) {
             return false;
         }
-        String reason = line.substring(marker + ALLOWLIST.length()).trim();
+        String reason = comments.substring(marker + ALLOWLIST.length()).trim();
         if (reason.endsWith("*/")) {
             reason = reason.substring(0, reason.length() - 2).trim();
         }
-        if (reason.isEmpty()) {
-            return false;
-        }
-        String before = line.substring(0, marker);
-        return before.contains("//") || before.contains("/*") || before.stripLeading().startsWith("*");
+        return !reason.isEmpty();
     }
 
-    private static String stripLine(String line, ScanState state) {
+    private static Stripped stripLine(String line, ScanState state) {
         StringBuilder code = new StringBuilder();
+        StringBuilder comments = new StringBuilder();
         int i = 0;
         while (i < line.length()) {
             char current = line.charAt(i);
@@ -245,7 +293,7 @@ class FoliaSafetyTest {
                 int close = line.indexOf("\"\"\"", i);
                 if (close < 0) {
                     code.append(line.substring(i));
-                    return code.toString();
+                    return new Stripped(code.toString(), comments.toString());
                 }
                 code.append(line, i, close + 3);
                 state.text = false;
@@ -253,15 +301,18 @@ class FoliaSafetyTest {
                 continue;
             }
             if (state.block) {
-                if (current == '*' && next == '/') {
-                    state.block = false;
-                    i += 2;
-                    continue;
+                int close = line.indexOf("*/", i);
+                if (close < 0) {
+                    comments.append(line.substring(i));
+                    return new Stripped(code.toString(), comments.toString());
                 }
-                i++;
+                comments.append(line, i, close);
+                state.block = false;
+                i = close + 2;
                 continue;
             }
             if (current == '/' && next == '/') {
+                comments.append(line.substring(i + 2));
                 break;
             }
             if (current == '/' && next == '*') {
@@ -282,7 +333,7 @@ class FoliaSafetyTest {
             code.append(current);
             i++;
         }
-        return code.toString();
+        return new Stripped(code.toString(), comments.toString());
     }
 
     private static int appendQuoted(String line, int start, char quote, StringBuilder code) {
@@ -311,7 +362,7 @@ class FoliaSafetyTest {
             new Rule("getServer().getScheduler", Pattern.compile("getServer\\s*\\(\\s*\\)\\s*\\.\\s*getScheduler\\b")),
             new Rule("BukkitRunnable", Pattern.compile("(?<![A-Za-z0-9_])BukkitRunnable\\b")),
             new Rule("BukkitScheduler", Pattern.compile("(?<![A-Za-z0-9_])BukkitScheduler\\b")),
-            new Rule("runTask", Pattern.compile("(?<![A-Za-z0-9_])runTask"))
+            new Rule("runTask", Pattern.compile("(?<![A-Za-z0-9_])runTask(?:Later|Timer)?(?:Asynchronously)?\\b"))
     );
 
     private record Rule(String name, Pattern pattern) {
@@ -320,5 +371,8 @@ class FoliaSafetyTest {
     private static final class ScanState {
         private boolean block;
         private boolean text;
+    }
+
+    private record Stripped(String code, String comments) {
     }
 }
