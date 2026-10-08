@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.NexusAI;
+import io.github.neareststep.nexusai.budget.QuotaGroups;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.HttpPool;
@@ -265,10 +267,18 @@ public final class DialogueService {
         }
     }
 
+    public void quotas(QuotaPolicy policy) {
+        router.quotas(policy);
+    }
+
     public void quit(UUID player) {
         engine.sessions().close(player);
         if (player != null) {
             talkLabels.remove(player);
+        }
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (policy != null) {
+            policy.forget(player);
         }
     }
 
@@ -387,6 +397,7 @@ public final class DialogueService {
             case TOO_LONG -> messages.send(player, "talk.too-long", Map.of("max", Integer.toString(result.limit())));
             case REPLIES -> messages.send(player, "talk.replies");
             case DAILY -> messages.send(player, "talk.daily");
+            case QUOTA -> messages.send(player, "talk.quota");
             case BUSY -> messages.send(player, "talk.busy");
             case FAILED -> messages.send(player, "talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.send(player, "talk.empty");
@@ -406,6 +417,7 @@ public final class DialogueService {
             case COOLDOWN -> messages.format("talk.cooldown");
             case TOO_LONG -> messages.format("talk.too-long", Map.of("max", Integer.toString(result.limit())));
             case DAILY -> messages.format("talk.daily");
+            case QUOTA -> messages.format("talk.quota");
             case BUSY -> messages.format("talk.busy");
             case FAILED -> messages.format("talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.format("talk.empty");
@@ -475,6 +487,13 @@ public final class DialogueService {
     private Prepared build(Player player, String characterId, String message, boolean sessionChat) {
         PluginConfig config = plugin.getPluginConfig();
         NamedPrompt prompt = plugin.getPromptCatalog().find(characterId).orElse(null);
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (policy != null) {
+            policy.noteName(player.getUniqueId(), player.getName());
+            if (policy.groupsConfigured()) {
+                policy.remember(player.getUniqueId(), QuotaGroups.held(player, policy.groupNames()));
+            }
+        }
         Location location = player.getLocation();
         String world = location.getWorld() == null ? "" : location.getWorld().getName();
         if (prompt == null) {

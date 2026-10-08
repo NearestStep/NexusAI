@@ -440,6 +440,10 @@ def boot(work: Path, version: str, paper: dict, rcon_port: int, mock_port: int, 
             raise RuntimeError(" /nai status did not report PlaceholderAPI as yes")
         if f"127.0.0.1:{mock_port}/v1" not in visible:
             raise RuntimeError(" /nai status did not show the mock base URL")
+        if "Tokens today:" not in visible:
+            raise RuntimeError(" /nai status did not print today's token total")
+        if "Quotas:" not in visible:
+            raise RuntimeError(" /nai status did not print whether quotas are on")
         if check_api:
             if "NexusAI-LoadDriver enabled." not in text:
                 raise RuntimeError("LoadDriver did not enable")

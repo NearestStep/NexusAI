@@ -19,7 +19,11 @@ import io.github.neareststep.nexusai.api.GenerationResult;
 import io.github.neareststep.nexusai.api.NexusErrorKind;
 import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.api.ResultSource;
+import io.github.neareststep.nexusai.api.QuotaStatus;
 import io.github.neareststep.nexusai.api.TokenUsage;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaGroups;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.FormatPresets;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -68,6 +72,7 @@ public final class GenerationService {
     private final GenerationHooks hooks;
     private final ConcurrentHashMap<CompletableFuture<GenerationResult>, CallTrace> pending = new ConcurrentHashMap<>();
     private volatile GenerationRuntime runtime;
+    private volatile QuotaPolicy quotas;
     private volatile boolean closed;
 
     public GenerationService(Plugin plugin, ExecutorService http, ExecutorService scheduler, Logger logger) {
@@ -90,6 +95,23 @@ public final class GenerationService {
         this.regions = regions == null ? new BukkitRegions() : regions;
         this.reader = reader == null ? new BukkitPlayerState() : reader;
         this.hooks = hooks == null ? new GenerationHooks() : hooks;
+    }
+
+    /** Daily caps for API calls. A null policy leaves quotas off. */
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
+    }
+
+    /**
+     * Today's spend and caps for one API plugin. Memory only. Empty caps when quotas are off
+     * or this service has no policy yet.
+     */
+    public QuotaStatus quota(String pluginName) {
+        QuotaPolicy policy = quotas;
+        if (policy == null) {
+            return QuotaStatus.empty(java.time.LocalDate.now());
+        }
+        return policy.consumerStatus(pluginName);
     }
 
     public void publish(GenerationRuntime next) {
@@ -171,10 +193,12 @@ public final class GenerationService {
         if (needsPlayer(request, lookup.named, current)) {
             Player player = GenerationRequestFacts.player(request);
             if (regions.owns(player)) {
+                rememberGroups(player);
                 PlayerFacts facts = read(player, lookup.named, request);
                 schedule(future, trace, () -> pipeline(owner, request, current, trace, future, lookup, facts));
             } else {
                 regions.run(plugin, player, () -> {
+                    rememberGroups(player);
                     PlayerFacts facts = read(player, lookup.named, request);
                     schedule(future, trace, () -> pipeline(owner, request, current, trace, future, lookup, facts));
                 }, () -> schedule(future, trace, () -> deliver(
@@ -278,6 +302,19 @@ public final class GenerationService {
             failShared(current, prepared, shared, error);
             deliver(future, trace, failure(trace, request, lookup, current, error), true);
             return;
+        }
+        QuotaPolicy policy = quotas;
+        if (policy != null) {
+            long estimate = QuotaEstimates.forCall(current.config(), prepared.prompt, prepared.overrides, null);
+            QuotaPolicy.Decision decision = policy.tryReserve(QuotaPolicy.Charge.of(trace, estimate, null));
+            if (!decision.allowed()) {
+                GenerationError error = NexusErrors.of(
+                        current.config(), NexusErrorKind.QUOTA_EXCEEDED, decision.message(), 0, 0L);
+                failShared(current, prepared, shared, error);
+                deliver(future, trace, failure(trace, request, lookup, current, error), true);
+                return;
+            }
+            policy.track(trace.requestId(), decision.hold());
         }
         long pauseStamp = current.gate().pauseStamp();
         long failureEpoch = current.gate().failureEpoch(admissionKey);
@@ -455,7 +492,7 @@ public final class GenerationService {
             logger.fine(PlayerInput.MARKUP_ONLY);
             return;
         }
-        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.LOCAL_QUOTA || kind == AiErrorKind.REJECTED) {
             return;
         }
         AiRequestException typed = AiErrors.find(error);
@@ -515,6 +552,7 @@ public final class GenerationService {
     ) {
         Runnable guarded = () -> {
             if (future.isDone() || closed) {
+                releaseQuota(trace);
                 releaseShared(current, prepared, shared, SharedCompletion.fail(
                         new AiRequestException(AiErrorKind.OTHER, 0, NexusErrors.SHUTDOWN, null),
                         NexusErrors.of(current.config(), NexusErrorKind.SHUTDOWN, NexusErrors.SHUTDOWN, 0, 0L)));
@@ -559,6 +597,7 @@ public final class GenerationService {
         }
         AiErrorKind kind = switch (error.kind()) {
             case LOCAL_LIMIT, PAUSED, BACKOFF -> AiErrorKind.LOCAL_LIMIT;
+            case QUOTA_EXCEEDED -> AiErrorKind.LOCAL_QUOTA;
             case REJECTED -> AiErrorKind.REJECTED;
             case EMPTY_REPLY -> AiErrorKind.EMPTY_REPLY;
             case MARKUP_ONLY -> AiErrorKind.MARKUP_ONLY;
@@ -643,6 +682,10 @@ public final class GenerationService {
             }
         } catch (Throwable thrown) {
             logFailure(current, thrown);
+        }
+        QuotaPolicy policy = quotas;
+        if (policy != null && policy.groupsConfigured()) {
+            return true;
         }
         String template = named == null ? request.template().orElse("") : named.template();
         Set<String> userNames = new HashSet<>();
@@ -844,6 +887,7 @@ public final class GenerationService {
     }
 
     private void deliver(CompletableFuture<GenerationResult> future, CallTrace trace, GenerationResult result, boolean notify) {
+        releaseQuota(trace);
         if (future == null || result == null || pending.remove(future) == null) {
             return;
         }
@@ -857,6 +901,25 @@ public final class GenerationService {
             }
         }
         future.complete(result);
+    }
+
+    private void releaseQuota(CallTrace trace) {
+        QuotaPolicy policy = quotas;
+        if (policy != null && trace != null) {
+            policy.releaseTracked(trace.requestId());
+        }
+    }
+
+    private void rememberGroups(Player player) {
+        QuotaPolicy policy = quotas;
+        if (policy == null || player == null) {
+            return;
+        }
+        policy.noteName(player.getUniqueId(), player.getName());
+        if (!policy.groupsConfigured()) {
+            return;
+        }
+        policy.remember(player.getUniqueId(), QuotaGroups.held(player, policy.groupNames()));
     }
 
     private void logFailure(GenerationRuntime current, Throwable error) {

@@ -27,7 +27,7 @@ public enum NexusErrorKind {
     LOCAL_LIMIT,
     /**
      * A NexusAI token or request quota refused the call, or every model-queue row is at its
-     * daily limit. Quota enforcement is added later; the constant is stable now.
+     * daily limit. No HTTP call was made for a quota refusal.
      */
     QUOTA_EXCEEDED,
     /** The HTTP worker queue is full. */

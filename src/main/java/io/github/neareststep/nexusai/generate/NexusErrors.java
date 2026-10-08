@@ -55,25 +55,37 @@ final class NexusErrors {
         AiRequestException typed = AiErrors.find(error);
         int status = typed == null ? 0 : typed.status();
         long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
-        return of(config, map(kind), AiErrors.detail(error), status, retryAfter);
+        String detail = AiErrors.detail(error);
+        return of(config, map(kind, detail), detail, status, retryAfter);
     }
 
     static NexusErrorKind map(AiErrorKind kind) {
+        return map(kind, null);
+    }
+
+    static NexusErrorKind map(AiErrorKind kind, String detail) {
         if (kind == null) {
             return NexusErrorKind.PROVIDER_ERROR;
         }
-        return switch (kind) {
+        NexusErrorKind mapped = switch (kind) {
             case RATE_LIMIT -> NexusErrorKind.RATE_LIMIT;
             case QUOTA -> NexusErrorKind.PROVIDER_QUOTA;
             case BAD_KEY -> NexusErrorKind.BAD_KEY;
             case UNKNOWN_MODEL -> NexusErrorKind.UNKNOWN_MODEL;
             case TIMEOUT -> NexusErrorKind.TIMEOUT;
             case LOCAL_LIMIT -> NexusErrorKind.LOCAL_LIMIT;
+            case LOCAL_QUOTA -> NexusErrorKind.QUOTA_EXCEEDED;
             case REJECTED -> NexusErrorKind.REJECTED;
             case EMPTY_REPLY -> NexusErrorKind.EMPTY_REPLY;
             case MARKUP_ONLY -> NexusErrorKind.MARKUP_ONLY;
             case OTHER -> NexusErrorKind.PROVIDER_ERROR;
         };
+        if (mapped == NexusErrorKind.LOCAL_LIMIT
+                && detail != null
+                && detail.contains("All model-queue entries are exhausted")) {
+            return NexusErrorKind.QUOTA_EXCEEDED;
+        }
+        return mapped;
     }
 
     static String mask(PluginConfig config, String message) {

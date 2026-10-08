@@ -13,6 +13,8 @@ public enum TalkCode {
     TOO_LONG,
     REPLIES,
     DAILY,
+    /** Today's token or request quota is used up. The line is not stored. */
+    QUOTA,
     BUSY,
     FAILED,
     REPLY,

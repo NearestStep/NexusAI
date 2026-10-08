@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
 import io.github.neareststep.nexusai.budget.MissingUsage;
+import io.github.neareststep.nexusai.budget.QuotaSettings;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
@@ -8,6 +9,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.regex.Pattern;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -113,8 +115,16 @@ public final class PluginConfig {
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
     private final List<String> pluginApiWarnings = new ArrayList<>();
+    private static final Pattern QUOTA_GROUP_NAME = Pattern.compile("[a-z0-9_-]{1,32}");
+    private static final Set<String> QUOTA_FIELDS = Set.of("tokens-per-day", "requests-per-day");
+
     private MissingUsage missingUsage = MissingUsage.ESTIMATE;
     private int tokenSaveIntervalSeconds = 10;
+    private boolean quotasEnabled;
+    private long serverTokensPerDay;
+    private long playerTokensPerDay;
+    private Map<String, QuotaSettings.GroupLimit> quotaGroups = Map.of();
+    private Map<String, QuotaSettings.ConsumerLimit> quotaConsumers = Map.of();
     private final List<String> quotaWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
@@ -243,6 +253,88 @@ public final class PluginConfig {
                     + ". It must be from 1 to 300. Using " + clamped + ".");
         }
         this.tokenSaveIntervalSeconds = clamped;
+        this.quotasEnabled = config.getBoolean("quotas.enabled", false);
+        this.serverTokensPerDay = nonNegativeQuota(config, "quotas.server-tokens-per-day");
+        this.playerTokensPerDay = nonNegativeQuota(config, "quotas.player-tokens-per-day");
+        this.quotaGroups = readQuotaGroups(config.getConfigurationSection("quotas.groups"));
+        this.quotaConsumers = readQuotaConsumers(config.getConfigurationSection("quotas.consumers"));
+    }
+
+    private long nonNegativeQuota(FileConfiguration config, String key) {
+        if (!config.contains(key)) {
+            return 0L;
+        }
+        long value = config.getLong(key, 0L);
+        if (value < 0L) {
+            quotaWarnings.add(key + " is " + value + ". A negative limit is treated as 0.");
+            return 0L;
+        }
+        return value;
+    }
+
+    private Map<String, QuotaSettings.GroupLimit> readQuotaGroups(ConfigurationSection section) {
+        if (section == null) {
+            return Map.of();
+        }
+        Map<String, QuotaSettings.GroupLimit> groups = new LinkedHashMap<>();
+        for (String name : section.getKeys(false)) {
+            if (name == null || !QUOTA_GROUP_NAME.matcher(name).matches()) {
+                quotaWarnings.add("quotas.groups." + name + " is not a valid group name. It was skipped.");
+                continue;
+            }
+            ConfigurationSection one = section.getConfigurationSection(name);
+            if (one == null) {
+                quotaWarnings.add("quotas.groups." + name + " is not a section. It was skipped.");
+                continue;
+            }
+            warnUnknownQuotaKeys(one, "quotas.groups." + name);
+            groups.put(name, new QuotaSettings.GroupLimit(
+                    nonNegativeQuota(one, "tokens-per-day", "quotas.groups." + name + ".tokens-per-day"),
+                    nonNegativeQuota(one, "requests-per-day", "quotas.groups." + name + ".requests-per-day")));
+        }
+        return groups.isEmpty() ? Map.of() : Map.copyOf(groups);
+    }
+
+    private Map<String, QuotaSettings.ConsumerLimit> readQuotaConsumers(ConfigurationSection section) {
+        if (section == null) {
+            return Map.of();
+        }
+        Map<String, QuotaSettings.ConsumerLimit> consumers = new LinkedHashMap<>();
+        for (String name : section.getKeys(false)) {
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            ConfigurationSection one = section.getConfigurationSection(name);
+            if (one == null) {
+                quotaWarnings.add("quotas.consumers." + name + " is not a section. It was skipped.");
+                continue;
+            }
+            warnUnknownQuotaKeys(one, "quotas.consumers." + name);
+            consumers.put(name, new QuotaSettings.ConsumerLimit(
+                    nonNegativeQuota(one, "tokens-per-day", "quotas.consumers." + name + ".tokens-per-day"),
+                    nonNegativeQuota(one, "requests-per-day", "quotas.consumers." + name + ".requests-per-day")));
+        }
+        return consumers.isEmpty() ? Map.of() : Map.copyOf(consumers);
+    }
+
+    private void warnUnknownQuotaKeys(ConfigurationSection section, String path) {
+        for (String key : section.getKeys(false)) {
+            if (key != null && !QUOTA_FIELDS.contains(key)) {
+                quotaWarnings.add("Unknown key " + path + "." + key + ". It was ignored.");
+            }
+        }
+    }
+
+    private long nonNegativeQuota(ConfigurationSection section, String key, String path) {
+        if (!section.contains(key)) {
+            return 0L;
+        }
+        long value = section.getLong(key, 0L);
+        if (value < 0L) {
+            quotaWarnings.add(path + " is " + value + ". A negative limit is treated as 0.");
+            return 0L;
+        }
+        return value;
     }
 
     private void readPluginApi(FileConfiguration config) {
@@ -368,7 +460,8 @@ public final class PluginConfig {
                 continue;
             }
             int limit = Math.max(0, toInt(map.get("daily-request-limit"), 0));
-            entries.add(new QueueEntryConfig(providerId, modelId, limit));
+            int tokenLimit = nonNegativeTokenLimit(map.get("daily-token-limit"), providerId, modelId);
+            entries.add(new QueueEntryConfig(providerId, modelId, limit, tokenLimit));
         }
         if (entries.isEmpty()) {
             return List.of(new QueueEntryConfig(provider, model, 0));
@@ -650,6 +743,38 @@ public final class PluginConfig {
 
     private static int clamp(int value, int min, int max) {
         return Math.min(max, Math.max(min, value));
+    }
+
+    private int nonNegativeTokenLimit(Object value, String providerId, String modelId) {
+        if (value == null) {
+            return 0;
+        }
+        long parsed = toLong(value, 0L);
+        if (parsed < 0L) {
+            quotaWarnings.add("model-queue " + providerId + "/" + modelId
+                    + " daily-token-limit is " + parsed + ". A negative limit is treated as 0.");
+            return 0;
+        }
+        if (parsed > Integer.MAX_VALUE) {
+            quotaWarnings.add("model-queue " + providerId + "/" + modelId
+                    + " daily-token-limit is " + parsed + ". Using " + Integer.MAX_VALUE + ".");
+            return Integer.MAX_VALUE;
+        }
+        return (int) parsed;
+    }
+
+    private static long toLong(Object value, long defaultValue) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Long.parseLong(text.trim());
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
     }
 
     private static int toInt(Object value, int defaultValue) {
@@ -1191,6 +1316,11 @@ public final class PluginConfig {
 
     public List<String> quotaWarnings() {
         return List.copyOf(quotaWarnings);
+    }
+
+    /** Daily caps. Enforcement uses this only when {@link QuotaSettings#enabled()} is true. */
+    public QuotaSettings quotaSettings() {
+        return new QuotaSettings(quotasEnabled, serverTokensPerDay, playerTokensPerDay, quotaGroups, quotaConsumers);
     }
 
     /**

@@ -7,7 +7,11 @@ import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
+import io.github.neareststep.nexusai.ai.ReasoningModels;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -41,6 +45,7 @@ public final class DialogueRouter {
     private final Logger logger;
     private final LongSupplier clock;
     private volatile TokenAccounting accounting = TokenAccounting.none();
+    private volatile QuotaPolicy quotas;
 
     public DialogueRouter(
             Function<String, PluginConfig> config,
@@ -58,6 +63,10 @@ public final class DialogueRouter {
         this.admission = Objects.requireNonNull(admission, "admission");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
     }
 
     /** Counts dialogue HTTP attempts, including a rejected or empty reply the player never sees. */
@@ -88,6 +97,11 @@ public final class DialogueRouter {
                 throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejected.get(), null);
             }
         }
+        QuotaPolicy.Decision admissionDecision = reserveAdmission(current, call);
+        if (admissionDecision != null && !admissionDecision.allowed()) {
+            throw new AiRequestException(AiErrorKind.LOCAL_QUOTA, 0, admissionDecision.message(), null);
+        }
+        try {
         long now = clock.getAsLong();
         // selectable() advances the player-reply round-robin cursor.
         // A summary uses its own cursor. A pin must not take either turn.
@@ -140,6 +154,11 @@ public final class DialogueRouter {
                     last = new AiRequestException(AiErrorKind.OTHER, 0, "API key is not configured", null);
                     break;
                 }
+                QuotaPolicy.Decision rowDecision = reserveRow(current, call, currentQueue, choice, model);
+                if (rowDecision != null && !rowDecision.allowed()) {
+                    break;
+                }
+                try {
                 if (choice.index() >= 0 && !currentQueue.tryConsume(choice.index(), now)) {
                     break;
                 }
@@ -203,6 +222,11 @@ public final class DialogueRouter {
                     currentQueue.markFailure(choice.index(), error, now);
                     break;
                 }
+                } finally {
+                    if (rowDecision != null) {
+                        rowDecision.hold().releaseWith(quotas);
+                    }
+                }
             }
         }
         if (last != null && (last.kind() == AiErrorKind.EMPTY_REPLY || last.kind() == AiErrorKind.MARKUP_ONLY)) {
@@ -217,13 +241,62 @@ public final class DialogueRouter {
         if (fallbackReply != null) {
             return fallbackReply;
         }
-        if (!fallbackRecorded[0] && last != null && last.kind() != AiErrorKind.LOCAL_LIMIT) {
+        if (!fallbackRecorded[0] && last != null
+                && last.kind() != AiErrorKind.LOCAL_LIMIT
+                && last.kind() != AiErrorKind.LOCAL_QUOTA) {
             admission.failure(admissionKey, last);
         }
         if (keepPause && rejected.isPresent()) {
             throw new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejected.get(), null);
         }
         throw currentQueue.explain(last, clock.getAsLong());
+        } finally {
+            if (admissionDecision != null) {
+                admissionDecision.hold().releaseWith(quotas);
+            }
+        }
+    }
+
+    private QuotaPolicy.Decision reserveAdmission(PluginConfig current, DialogueEngine.ModelCall call) {
+        if (quotas == null || current == null || call == null) {
+            return null;
+        }
+        String model = current.getModel();
+        if (call.overrides() != null) {
+            model = call.overrides().model(model);
+        }
+        return quotas.tryReserve(QuotaPolicy.Charge.of(call.trace(), dialogueEstimate(current, call, model), null));
+    }
+
+    private QuotaPolicy.Decision reserveRow(
+            PluginConfig current,
+            DialogueEngine.ModelCall call,
+            ModelQueue currentQueue,
+            ModelQueue.Choice choice,
+            String model
+    ) {
+        if (quotas == null || choice == null || choice.index() < 0) {
+            return null;
+        }
+        return quotas.tryReserveRow(
+                currentQueue.rowStorageId(choice.index()),
+                currentQueue.dailyTokenLimit(choice.index()),
+                dialogueEstimate(current, call, model));
+    }
+
+    private static long dialogueEstimate(PluginConfig current, DialogueEngine.ModelCall call, String model) {
+        int chars = ResponseUsage.chars(call.system());
+        if (call.messages() != null) {
+            for (DialogueProtocol.MemoryLine line : call.messages()) {
+                if (line != null) {
+                    chars += ResponseUsage.chars(line.text());
+                }
+            }
+        }
+        chars += ResponseUsage.chars(call.wrappedUser());
+        GenerationOverrides overrides = call.overrides() == null ? GenerationOverrides.none() : call.overrides();
+        Integer maxTokens = overrides.maxTokens(current == null ? null : current.getMaxTokens());
+        return QuotaEstimates.tokens(chars, maxTokens, ReasoningModels.isReasoning(model));
     }
 
     private static List<String> summarySecrets(PluginConfig current, String key) {

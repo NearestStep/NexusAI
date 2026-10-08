@@ -12,6 +12,7 @@ import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.ServicesManager;
 import org.jetbrains.annotations.ApiStatus;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -199,6 +200,26 @@ public final class NexusAIApi {
             return false;
         }
         return ApiPromptRegistry.get().unregister(owner, localId);
+    }
+
+    /**
+     * Today's token and request spend for {@code owner}, and the daily caps when quotas are on.
+     * <p>
+     * Call from any thread. The numbers are a memory snapshot. No region state is read, including
+     * on Folia. An empty cap means quotas are off or that limit is 0.
+     * When NexusAI is not enabled the status is zero for today and has no caps.
+     *
+     * @throws IllegalArgumentException when {@code owner} is null
+     */
+    public static QuotaStatus quota(Plugin owner) {
+        if (owner == null) {
+            throw new IllegalArgumentException("owner is required");
+        }
+        GenerationService current = generation;
+        if (current == null) {
+            return QuotaStatus.empty(LocalDate.now());
+        }
+        return current.quota(owner.getName());
     }
 
     /** Full ids ({@code quests:intro}) registered by {@code owner}. */

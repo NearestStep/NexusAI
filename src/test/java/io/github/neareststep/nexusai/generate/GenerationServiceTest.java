@@ -23,6 +23,9 @@ import io.github.neareststep.nexusai.api.NexusContextProvider;
 import io.github.neareststep.nexusai.api.NexusErrorKind;
 import io.github.neareststep.nexusai.api.ResultSource;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
+import io.github.neareststep.nexusai.budget.QuotaSettings;
+import io.github.neareststep.nexusai.budget.TokenLedger;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -262,6 +265,31 @@ class GenerationServiceTest {
                 backing.owner, GenerationRequest.template(template).build()).get(5, TimeUnit.SECONDS);
         assertEquals(NexusErrorKind.BACKOFF, backed.error().orElseThrow().kind());
         assertEquals(0, backing.script.calls.get());
+
+        Harness capped = harness(false);
+        TokenLedger ledger = new TokenLedger(LocalDate::now, Logger.getLogger("generation-quota"));
+        QuotaPolicy policy = new QuotaPolicy(
+                ledger, LocalDate::now, System::currentTimeMillis,
+                Logger.getLogger("generation-quota"), List::of);
+        policy.apply(new QuotaSettings(true, 1L, 0L, Map.of(), Map.of()));
+        ledger.record(
+                ResponseUsage.reported(1, 0, 1, null),
+                CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.API, "Quests", null, "", ""),
+                "openai",
+                "",
+                false);
+        capped.service.quotas(policy);
+        GenerationResult quota = capped.service.generate(
+                capped.owner, GenerationRequest.template("quota please").cacheMode(CacheMode.FRESH).build())
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(NexusErrorKind.QUOTA_EXCEEDED, quota.error().orElseThrow().kind());
+        assertEquals(0, capped.script.calls.get());
+        policy.apply(QuotaSettings.off());
+        GenerationResult open = capped.service.generate(
+                capped.owner, GenerationRequest.template("quota off").cacheMode(CacheMode.FRESH).build())
+                .get(5, TimeUnit.SECONDS);
+        assertTrue(open.success());
+        assertEquals(1, capped.script.calls.get());
 
         Harness missing = harness(false);
         GenerationResult unknown = missing.service.generate(

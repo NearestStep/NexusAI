@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -37,6 +39,7 @@ public final class RoutingProvider implements AiProvider {
     private final HttpGate gate;
     private final Map<String, KeyRing> rings = new ConcurrentHashMap<>();
     private volatile TokenAccounting accounting = TokenAccounting.none();
+    private volatile QuotaPolicy quotas;
 
     public RoutingProvider(
             PluginConfig config,
@@ -89,6 +92,11 @@ public final class RoutingProvider implements AiProvider {
     }
 
     /** Counts HTTP attempts. Unset until the plugin attaches the ledger; tests may leave it unset. */
+    /** Row token caps. Server, player, and consumer caps are reserved at the entrance, not here. */
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
+    }
+
     public void tokenAccounting(TokenAccounting accounting) {
         this.accounting = accounting == null ? TokenAccounting.none() : accounting;
     }
@@ -286,33 +294,74 @@ public final class RoutingProvider implements AiProvider {
             return CompletableFuture.completedFuture(null);
         }
         String apiKey = key;
-        return gate.schedule(() -> {
-            long calledAt = clock.getAsLong();
-            boolean consumed = dedicatedFallback
-                    ? queue.tryConsumeFallback(providerId, model, calledAt)
-                    : queue.tryConsume(queueIndex, calledAt);
-            if (!consumed) {
-                return CompletableFuture.completedFuture(null);
-            }
-            last.httpAttempts++;
-            return http.exchangeAsync(prompt, overrides, provider.url(), apiKey, model, trace);
-        }).handle((ChatExchange exchange, Throwable error) -> afterCall(
-                prompt,
-                overrides,
-                probe,
-                providerId,
-                model,
-                queueIndex,
-                dedicatedFallback,
-                last,
-                keyAttempt,
-                attempts,
-                ring,
-                apiKey,
-                exchange,
-                error,
-                trace
-        )).thenCompose(next -> next);
+        QuotaPolicy.Decision rowDecision = reserveRow(prompt, overrides, providerId, model, queueIndex, dedicatedFallback);
+        if (rowDecision != null && !rowDecision.allowed()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            return gate.schedule(() -> {
+                long calledAt = clock.getAsLong();
+                boolean consumed = dedicatedFallback
+                        ? queue.tryConsumeFallback(providerId, model, calledAt)
+                        : queue.tryConsume(queueIndex, calledAt);
+                if (!consumed) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                last.httpAttempts++;
+                return http.exchangeAsync(prompt, overrides, provider.url(), apiKey, model, trace);
+            }).handle((ChatExchange exchange, Throwable error) -> afterCall(
+                    prompt,
+                    overrides,
+                    probe,
+                    providerId,
+                    model,
+                    queueIndex,
+                    dedicatedFallback,
+                    last,
+                    keyAttempt,
+                    attempts,
+                    ring,
+                    apiKey,
+                    exchange,
+                    error,
+                    trace,
+                    rowDecision
+            )).thenCompose(next -> next);
+        } catch (RuntimeException ex) {
+            releaseRow(rowDecision);
+            throw ex;
+        }
+    }
+
+    /**
+     * Reserves the row token cap before the request slot is taken. A dedicated fallback that is not
+     * a queue row has no {@code daily-token-limit}. A denied row is skipped and is not cooled down.
+     */
+    private QuotaPolicy.Decision reserveRow(
+            String prompt,
+            GenerationOverrides overrides,
+            String providerId,
+            String model,
+            int queueIndex,
+            boolean dedicatedFallback
+    ) {
+        QuotaPolicy policy = quotas;
+        if (policy == null) {
+            return null;
+        }
+        long limit = dedicatedFallback ? 0L : queue.dailyTokenLimit(queueIndex);
+        String storageId = dedicatedFallback
+                ? ModelQueue.fallbackStorageId(providerId, model)
+                : queue.rowStorageId(queueIndex);
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        long estimate = QuotaEstimates.forCall(config, prompt, effective, model);
+        return policy.tryReserveRow(storageId, limit, estimate);
+    }
+
+    private void releaseRow(QuotaPolicy.Decision decision) {
+        if (decision != null && quotas != null) {
+            decision.hold().releaseWith(quotas);
+        }
     }
 
     private static ModelAnswer toAnswer(
@@ -349,8 +398,10 @@ public final class RoutingProvider implements AiProvider {
             String key,
             ChatExchange exchange,
             Throwable error,
-            CallTrace trace
+            CallTrace trace,
+            QuotaPolicy.Decision rowDecision
     ) {
+        try {
         if (error == null) {
             if (exchange == null) {
                 return CompletableFuture.completedFuture(null);
@@ -417,6 +468,9 @@ public final class RoutingProvider implements AiProvider {
             fail(queueIndex, dedicatedFallback, providerId, model, typed);
         }
         return CompletableFuture.completedFuture(null);
+        } finally {
+            releaseRow(rowDecision);
+        }
     }
 
     private static AiRequestException asAi(Throwable error) {

@@ -38,6 +38,26 @@ class LocaleFilesTest {
             "command.status-queue-strategy",
             "command.status-moderation",
             "command.status-dialogue-summary",
+            "command.help-usage",
+            "command.status-tokens",
+            "command.status-quotas",
+            "command.usage-limit-suffix",
+            "command.usage-estimated-suffix",
+            "command.usage-on",
+            "command.usage-off",
+            "command.usage-header",
+            "command.usage-server",
+            "command.usage-title-providers",
+            "command.usage-title-rows",
+            "command.usage-title-origins",
+            "command.usage-line",
+            "command.usage-empty",
+            "command.usage-players-header",
+            "command.usage-consumers-header",
+            "command.usage-history-header",
+            "command.usage-history-line",
+            "command.usage-unknown",
+            "command.usage-denied",
             "moderation.notify",
             "common.none",
             "common.yes",
@@ -49,6 +69,7 @@ class LocaleFilesTest {
             "error.unknown-model",
             "error.timeout",
             "error.other",
+            "error.local-quota",
             "command.help-talk",
             "command.help-talk-end",
             "talk.disabled",
@@ -67,6 +88,7 @@ class LocaleFilesTest {
             "talk.replies",
             "talk.daily",
             "talk.busy",
+            "talk.quota",
             "talk.failed",
             "talk.empty",
             "talk.reply"
@@ -87,6 +109,26 @@ class LocaleFilesTest {
             }
             assertTrue(yaml.getString("command.prompts-registered").contains("{prompts}"),
                     file.getFileName() + " prompts-registered {prompts}");
+            assertTrue(yaml.getString("command.status-tokens").contains("{tokens}"), file.getFileName() + " {tokens}");
+            assertTrue(yaml.getString("command.status-tokens").contains("{detail}"), file.getFileName() + " {detail}");
+            assertTrue(yaml.getString("command.status-quotas").contains("{state}"), file.getFileName() + " {state}");
+            assertTrue(yaml.getString("command.usage-limit-suffix").contains("{limit}"), file.getFileName() + " {limit}");
+            assertTrue(yaml.getString("command.usage-estimated-suffix").contains("{percent}"), file.getFileName() + " {percent}");
+            String usageServer = yaml.getString("command.usage-server");
+            for (String token : List.of("{requests}", "{tokens}", "{prompt}", "{completion}", "{estimated}")) {
+                assertTrue(usageServer.contains(token), file.getFileName() + " " + token);
+            }
+            assertTrue(yaml.getString("command.usage-line").contains("{name}"), file.getFileName() + " {name}");
+            assertTrue(yaml.getString("command.usage-history-line").contains("{day}"), file.getFileName() + " {day}");
+            if (file.getFileName().toString().equals("en.yml")) {
+                assertTrue(yaml.getString("talk.quota").contains("Your AI limit for today is used up."),
+                        "en.yml talk.quota");
+            } else {
+                assertFalse(yaml.getString("talk.quota").contains("Your AI limit for today is used up."),
+                        file.getFileName() + " talk.quota still English");
+                assertFalse(yaml.getString("command.help-usage").contains("Show today's token usage"),
+                        file.getFileName() + " help-usage still English");
+            }
             String version = yaml.getString("command.version");
             assertTrue(version != null && version.contains("{version}"), file.getFileName() + " {version}");
             assertTrue(version.contains("{authors}"), file.getFileName() + " {authors}");

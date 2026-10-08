@@ -9,6 +9,7 @@ import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.budget.TokenLedger;
 import io.github.neareststep.nexusai.budget.TokenLedgerStore;
@@ -109,6 +110,7 @@ public final class NexusAI extends JavaPlugin {
     private CachedContextCoordinator contextCoordinator;
     private GenerationService generationService;
     private TokenLedgerStore tokenStore;
+    private QuotaPolicy quotaPolicy;
     private TokenAccounting tokenAccounting = TokenAccounting.none();
 
     @Override
@@ -311,6 +313,34 @@ public final class NexusAI extends JavaPlugin {
                 promptCatalog,
                 knowledgeBase,
                 contextService));
+        wireQuotas(gate);
+    }
+
+    private void wireQuotas(RequestGate gate) {
+        if (quotaPolicy == null || pluginConfig == null) {
+            return;
+        }
+        quotaPolicy.apply(pluginConfig.quotaSettings());
+        quotaPolicy.clearMembership();
+        if (modelQueue != null) {
+            modelQueue.rowTokens(quotaPolicy);
+        }
+        if (aiHttpClient != null) {
+            aiHttpClient.quotas(quotaPolicy);
+        }
+        if (gate != null) {
+            QuotaPolicy policy = quotaPolicy;
+            gate.skipPlayerDay(policy::replacesPlayerDay);
+        }
+        if (dialogueService != null) {
+            dialogueService.quotas(quotaPolicy);
+        }
+        if (generationService != null) {
+            generationService.quotas(quotaPolicy);
+        }
+        if (moderationService != null) {
+            moderationService.quotas(quotaPolicy);
+        }
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
@@ -520,6 +550,10 @@ public final class NexusAI extends JavaPlugin {
         RoutingProvider routing = new RoutingProvider(
                 config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
         routing.tokenAccounting(tokenAccounting);
+        if (quotaPolicy != null) {
+            modelQueue.rowTokens(quotaPolicy);
+            routing.quotas(quotaPolicy);
+        }
         return routing;
     }
 
@@ -539,6 +573,8 @@ public final class NexusAI extends JavaPlugin {
             tokenStore.secrets(pluginConfig::configuredSecrets);
             tokenStore.start(pluginConfig.missingUsage(), pluginConfig.tokenSaveIntervalSeconds());
             tokenAccounting = new TokenAccounting(tokenStore);
+            quotaPolicy = new QuotaPolicy(
+                    ledger, LocalDate::now, System::currentTimeMillis, getLogger(), pluginConfig::configuredSecrets);
             return;
         }
         tokenStore.secrets(pluginConfig::configuredSecrets);
@@ -704,6 +740,19 @@ public final class NexusAI extends JavaPlugin {
         return modelQueue;
     }
 
+    public QuotaPolicy getQuotaPolicy() {
+        return quotaPolicy;
+    }
+
+    /** Today's ledger, or null before the plugin has started accounting. */
+    public TokenLedger.Snapshot tokenSnapshot() {
+        TokenLedgerStore store = tokenStore;
+        if (store == null || store.ledger() == null) {
+            return null;
+        }
+        return store.ledger().snapshot();
+    }
+
     public ContextRegistry getContextRegistry() {
         return contextRegistry;
     }
@@ -763,6 +812,9 @@ public final class NexusAI extends JavaPlugin {
                 getLogger()
         );
         this.moderationService.tokenAccounting(tokenAccounting);
+        if (quotaPolicy != null) {
+            this.moderationService.quotas(quotaPolicy);
+        }
     }
 
     private void registerModerationListener() {

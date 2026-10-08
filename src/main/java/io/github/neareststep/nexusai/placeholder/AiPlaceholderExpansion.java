@@ -6,6 +6,9 @@ import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.api.RequestOrigin;
+import io.github.neareststep.nexusai.budget.QuotaGroups;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
+import io.github.neareststep.nexusai.budget.UsagePlaceholders;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
@@ -19,6 +22,7 @@ import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
+import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -104,6 +108,14 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     @Override
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
+        if (params.startsWith("usage_")) {
+            refreshGroupsIfOwned(player);
+            return UsagePlaceholders.resolve(
+                    params,
+                    player == null ? null : player.getUniqueId(),
+                    plugin.tokenSnapshot(),
+                    plugin.getQuotaPolicy());
+        }
         if (params.startsWith(GENERATE_PREFIX)) {
             return resolveGenerate(player, params.substring(GENERATE_PREFIX.length()));
         }
@@ -212,6 +224,31 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             KnowledgeComposer.Prepared prepared
     ) {
         UUID playerId = player != null ? player.getUniqueId() : null;
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (player != null && policy != null) {
+            policy.noteName(playerId, player.getName());
+        }
+        if (player != null && policy != null && policy.needsGroupRead(playerId) && !Bukkit.isOwnedByCurrentRegion(player)) {
+            player.getScheduler().run(plugin, task -> {
+                policy.remember(playerId, QuotaGroups.held(player, policy.groupNames()));
+                sendPlaceholder(player, raw, resolved, promptText, prepared);
+            }, null);
+            return;
+        }
+        if (player != null && policy != null && policy.needsGroupRead(playerId)) {
+            policy.remember(playerId, QuotaGroups.held(player, policy.groupNames()));
+        }
+        sendPlaceholder(player, raw, resolved, promptText, prepared);
+    }
+
+    private void sendPlaceholder(
+            Player player,
+            String raw,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        UUID playerId = player != null ? player.getUniqueId() : null;
         CallTrace trace = placeholderTrace(playerId, resolved == null ? null : resolved.id());
         CompletionSupport.onComplete(
                 httpClient.requestAsync(
@@ -229,6 +266,18 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                         plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
                     }
                 });
+    }
+
+    private void refreshGroupsIfOwned(Player player) {
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (player == null || policy == null) {
+            return;
+        }
+        policy.noteName(player.getUniqueId(), player.getName());
+        if (!policy.needsGroupRead(player.getUniqueId()) || !Bukkit.isOwnedByCurrentRegion(player)) {
+            return;
+        }
+        policy.remember(player.getUniqueId(), QuotaGroups.held(player, policy.groupNames()));
     }
 
     /**

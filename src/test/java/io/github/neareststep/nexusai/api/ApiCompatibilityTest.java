@@ -40,6 +40,7 @@ class ApiCompatibilityTest {
         assertMethod(NexusAIApi.class, "unregisterPrompt", boolean.class, Plugin.class, String.class);
         assertMethod(NexusAIApi.class, "registeredPromptIds", List.class, Plugin.class);
         assertMethod(NexusAIApi.class, "bindGeneration", void.class, io.github.neareststep.nexusai.generate.GenerationService.class);
+        assertMethod(NexusAIApi.class, "quota", QuotaStatus.class, Plugin.class);
 
         assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bind"));
         assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bindContextRegistry"));
