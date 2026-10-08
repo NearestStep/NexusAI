@@ -1,0 +1,8 @@
+name: nexusai-events-probe
+version: '1.2.0-SNAPSHOT'
+main: io.github.neareststep.nexusai.load.EventsProbePlugin
+api-version: '1.20.6'
+folia-supported: true
+depend: [NexusAI]
+authors: [NearestStep]
+description: Logs NexusAI events for smoke checks. Not part of the release jar.

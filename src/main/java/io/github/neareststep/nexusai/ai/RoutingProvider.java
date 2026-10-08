@@ -9,6 +9,9 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.ProviderSettings;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.GenerationEvents;
+import io.github.neareststep.nexusai.event.PreCancelled;
 
 import java.util.HashSet;
 import java.util.List;
@@ -165,6 +168,10 @@ public final class RoutingProvider implements AiProvider {
         List<ModelQueue.Choice> choices = queue.selectable(now, probe);
         Attempt last = new Attempt();
         Set<Integer> attempted = new HashSet<>();
+        PreCancelled cancelled = openPre(prompt, overrides, choices, trace);
+        if (cancelled != null) {
+            return CompletableFuture.failedFuture(cancelled);
+        }
         return walk(prompt, overrides, probe, choices, 0, attempted, last, trace);
     }
 
@@ -184,7 +191,8 @@ public final class RoutingProvider implements AiProvider {
         ModelQueue.Choice choice = choices.get(index);
         attempted.add(choice.index());
         String model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
-        return tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last, 0, trace)
+        boolean moreAfter = index + 1 < choices.size() || fallbackConfigured(overrides);
+        return tryModel(prompt, overrides, probe, choice.provider(), model, choice.index(), false, last, 0, moreAfter, trace)
                 .thenCompose(answer -> {
                     if (answer != null) {
                         return CompletableFuture.completedFuture(
@@ -218,6 +226,7 @@ public final class RoutingProvider implements AiProvider {
                         plan.dedicated(),
                         last,
                         0,
+                        false,
                         trace
                 ).thenCompose(answer -> {
                     if (answer != null) {
@@ -260,6 +269,7 @@ public final class RoutingProvider implements AiProvider {
             boolean dedicatedFallback,
             Attempt last,
             int keyAttempt,
+            boolean moreAfter,
             CallTrace trace
     ) {
         ProviderSettings provider = config.provider(providerId);
@@ -325,7 +335,8 @@ public final class RoutingProvider implements AiProvider {
                     exchange,
                     error,
                     trace,
-                    rowDecision
+                    rowDecision,
+                    moreAfter
             )).thenCompose(next -> next);
         } catch (RuntimeException ex) {
             releaseRow(rowDecision);
@@ -399,9 +410,13 @@ public final class RoutingProvider implements AiProvider {
             ChatExchange exchange,
             Throwable error,
             CallTrace trace,
-            QuotaPolicy.Decision rowDecision
+            QuotaPolicy.Decision rowDecision,
+            boolean moreAfter
     ) {
         try {
+        if (PreCancelled.find(error) != null) {
+            return CompletableFuture.failedFuture(PreCancelled.find(error));
+        }
         if (error == null) {
             if (exchange == null) {
                 return CompletableFuture.completedFuture(null);
@@ -461,9 +476,11 @@ public final class RoutingProvider implements AiProvider {
                 ? keyAttempt + 1 < attempts
                 : ring.hasAvailable(now));
         if (typed.kind() == AiErrorKind.BAD_KEY && anotherKey) {
+            noteProviderError(trace, providerId, model, typed, true);
             return tryModel(
-                    prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, keyAttempt + 1, trace);
+                    prompt, overrides, probe, providerId, model, queueIndex, dedicatedFallback, last, keyAttempt + 1, moreAfter, trace);
         }
+        noteProviderError(trace, providerId, model, typed, moreAfter);
         if (!probe) {
             fail(queueIndex, dedicatedFallback, providerId, model, typed);
         }
@@ -485,6 +502,60 @@ public final class RoutingProvider implements AiProvider {
                 ? "AI request failed"
                 : current.getMessage();
         return new AiRequestException(AiErrors.classify(current), 0, message, current);
+    }
+
+    private PreCancelled openPre(
+            String prompt,
+            GenerationOverrides overrides,
+            List<ModelQueue.Choice> choices,
+            CallTrace trace
+    ) {
+        if (trace == null || trace.origin() == io.github.neareststep.nexusai.api.RequestOrigin.MODERATION) {
+            return null;
+        }
+        String providerId;
+        String model;
+        if (choices != null && !choices.isEmpty()) {
+            ModelQueue.Choice choice = choices.get(0);
+            providerId = choice.provider();
+            model = overrides.modelOverridden() ? overrides.model(choice.model()) : choice.model();
+        } else if (fallbackConfigured(overrides)) {
+            FallbackModel fallback = overrides.fallbackModel();
+            if (fallback == null || !fallback.configured()) {
+                fallback = config.fallbackModel();
+            }
+            providerId = fallback.provider();
+            model = fallback.model();
+        } else {
+            return null;
+        }
+        String system = overrides.systemPrompt(config.getSystemPrompt());
+        int estimate = GenerationEvents.estimateTokens((system == null ? "" : system) + (prompt == null ? "" : prompt));
+        EventDispatcher.PreOutcome outcome = EventDispatcher.get().pre(trace, providerId, model, estimate);
+        if (!outcome.cancelled()) {
+            return null;
+        }
+        return new PreCancelled(outcome.reason());
+    }
+
+    private boolean fallbackConfigured(GenerationOverrides overrides) {
+        FallbackModel fromCall = overrides == null ? null : overrides.fallbackModel();
+        if (fromCall != null && fromCall.configured()) {
+            return true;
+        }
+        FallbackModel global = config.fallbackModel();
+        return global != null && global.configured();
+    }
+
+    private static void noteProviderError(CallTrace trace, String providerId, String model, Throwable error, boolean willRetry) {
+        if (trace == null || error == null || PreCancelled.find(error) != null) {
+            return;
+        }
+        AiRequestException typed = error instanceof AiRequestException ai ? ai : asAi(error);
+        if (GenerationEvents.providerKind(typed.kind()) == null) {
+            return;
+        }
+        EventDispatcher.get().providerError(trace, providerId, model, typed, willRetry);
     }
 
     private void fail(int queueIndex, boolean dedicatedFallback, String providerId, String model, AiRequestException error) {

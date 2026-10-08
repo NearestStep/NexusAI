@@ -14,6 +14,7 @@ import io.github.neareststep.nexusai.budget.TokenAccounting;
 import io.github.neareststep.nexusai.budget.TokenLedger;
 import io.github.neareststep.nexusai.budget.TokenLedgerStore;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.config.ConfigStartup;
@@ -130,6 +131,7 @@ public final class NexusAI extends JavaPlugin {
         } else {
             this.pluginConfig = new PluginConfig(getConfig());
         }
+        EventDispatcher.install(EventDispatcher.bukkit(getLogger(), () -> pluginConfig.configuredSecrets()));
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
         loadKnowledge();
@@ -197,6 +199,7 @@ public final class NexusAI extends JavaPlugin {
             NexusAIApi.bindGeneration(null);
             generationService = null;
         }
+        EventDispatcher.install(null);
         closeSharedHttpClient();
         shutdownExecutor(httpExecutor);
         if (tokenStore != null) {

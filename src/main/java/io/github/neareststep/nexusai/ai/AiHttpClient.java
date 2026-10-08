@@ -1,8 +1,13 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.api.NexusErrorKind;
+import io.github.neareststep.nexusai.api.TokenUsage;
 import io.github.neareststep.nexusai.budget.QuotaEstimates;
 import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.GenerationEvents;
+import io.github.neareststep.nexusai.event.PreCancelled;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.limit.RateLimiter;
@@ -215,14 +220,17 @@ public final class AiHttpClient {
                 ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.POOL, null, "", "")
                 : trace;
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(null, admissionKey, false);
         if (rejection.isPresent()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.LOCAL_LIMIT, rejection.get());
             return rejected(rejection.get());
         }
         QuotaPolicy.Decision quota = reserve(prompt, effective, call);
         if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
             return quotaRejected(quota.message());
         }
         long pauseStamp = gate.pauseStamp();
@@ -256,15 +264,18 @@ public final class AiHttpClient {
                 ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.TEST, null, "", "")
                 : trace;
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(RateLimiter.SERVER_SENTINEL, prompt, true);
         if (rejection.isPresent()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.LOCAL_LIMIT, rejection.get());
             return rejected(rejection.get());
         }
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         QuotaPolicy.Decision quota = reserve(prompt, effective, call);
         if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
             return quotaRejected(quota.message());
         }
         long pauseStamp = gate.pauseStamp();
@@ -334,6 +345,7 @@ public final class AiHttpClient {
             CallTrace trace
     ) {
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Flight flight = attach(cacheKey);
@@ -343,6 +355,7 @@ public final class AiHttpClient {
         }
         Optional<String> rejection = gate.tryAdmit(playerId, admissionKey, bypassBackoffAndPause);
         if (rejection.isPresent()) {
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.LOCAL_LIMIT, rejection.get());
             completeShared(
                     cacheKey,
                     flight.future(),
@@ -351,6 +364,7 @@ public final class AiHttpClient {
         }
         QuotaPolicy.Decision quota = reserve(prompt, overrides, trace);
         if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
             completeShared(
                     cacheKey,
                     flight.future(),
@@ -402,13 +416,13 @@ public final class AiHttpClient {
         try {
             upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause, quotaHold);
+            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause, quotaHold, trace);
             return;
         }
         upstream.whenComplete((answer, error) -> {
             try {
                 finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
-                        effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold);
+                        effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold, trace);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
                 created.completeExceptionally(thrown);
@@ -442,10 +456,17 @@ public final class AiHttpClient {
             boolean writeCache,
             Duration cacheTtl,
             boolean clearPause,
-            QuotaPolicy.Hold quotaHold
+            QuotaPolicy.Hold quotaHold,
+            CallTrace trace
     ) {
         String value = answer == null ? null : answer.text();
         try {
+            if (PreCancelled.find(error) != null) {
+                PreCancelled cancelled = PreCancelled.find(error);
+                GenerationEvents.failIfNeeded(trace, cancelled);
+                created.complete(SharedCompletion.fail(cancelled, null));
+                return;
+            }
             if (error == null && PlayerInput.emptiedByMarkup(value, config.allowMarkup())) {
                 error = new AiRequestException(AiErrorKind.MARKUP_ONLY, 0, PlayerInput.MARKUP_ONLY, null);
                 value = null;
@@ -455,6 +476,18 @@ public final class AiHttpClient {
                 value = null;
             }
             if (error == null && value != null && !value.isBlank()) {
+                if (trace != null) {
+                    EventDispatcher.get().post(
+                            trace,
+                            value,
+                            answer == null ? "" : answer.providerId(),
+                            answer == null ? "" : answer.model(),
+                            answer != null && answer.fallbackModelUsed(),
+                            TokenUsage.from(answer == null ? null : answer.usage()),
+                            answer == null ? "" : answer.finishReason(),
+                            answer == null ? 0 : answer.attempts(),
+                            null);
+                }
                 if (writeCache && cacheKey != null) {
                     String providerId = answer == null ? "" : answer.providerId();
                     String model = answer == null ? "" : answer.model();
@@ -468,6 +501,7 @@ public final class AiHttpClient {
                 created.complete(SharedCompletion.ok(answer));
             } else if (error != null || value == null || value.isBlank()) {
                 if (AiErrors.localMissingKey(error)) {
+                    GenerationEvents.failIfNeeded(trace, error);
                     created.completeExceptionally(AiErrors.unwrap(error));
                     return;
                 }
@@ -492,6 +526,7 @@ public final class AiHttpClient {
                 } else {
                     logger.log(Level.FINE, "AI request failed", failure);
                 }
+                GenerationEvents.failIfNeeded(trace, failure);
                 created.complete(SharedCompletion.fail(AiErrors.unwrap(failure), null));
             }
         } catch (RuntimeException e) {

@@ -8,7 +8,6 @@ import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.ai.LengthCutoff;
 import io.github.neareststep.nexusai.ai.LengthTrimNotices;
 import io.github.neareststep.nexusai.ai.ReasoningModels;
-import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.budget.ModelQueue;
 import io.github.neareststep.nexusai.budget.QuotaEstimates;
 import io.github.neareststep.nexusai.budget.QuotaPolicy;
@@ -18,6 +17,9 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.ProviderSettings;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.GenerationEvents;
+import io.github.neareststep.nexusai.event.PreCancelled;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -127,9 +129,18 @@ public final class DialogueRouter {
         if (transport.saturated()) {
             throw HttpPool.queueFull(null);
         }
+        GenerationOverrides firstOverrides = call.overrides() == null ? GenerationOverrides.none() : call.overrides();
+        ModelQueue.Choice first = choices.get(0);
+        String firstModel = firstOverrides.modelOverridden() ? firstOverrides.model(first.model()) : first.model();
+        PreCancelled cancelled = beginPre(call, first.provider(), firstModel);
+        if (cancelled != null) {
+            throw cancelled;
+        }
         AiRequestException last = null;
         boolean toolsDropped = false;
-        for (ModelQueue.Choice choice : choices) {
+        for (int choiceAt = 0; choiceAt < choices.size(); choiceAt++) {
+            ModelQueue.Choice choice = choices.get(choiceAt);
+            boolean laterChoice = choiceAt + 1 < choices.size();
             ProviderSettings provider = current.provider(choice.provider());
             if (provider == null) {
                 last = new AiRequestException(AiErrorKind.OTHER, 0, "Unknown provider " + choice.provider(), null);
@@ -216,6 +227,8 @@ public final class DialogueRouter {
                                 + " on " + choice.provider() + " after HTTP " + error.status());
                     }
                     boolean anotherKey = !key.isEmpty() && error.kind() == AiErrorKind.BAD_KEY && ring.hasAvailable(now);
+                    noteDialogueError(call, choice.provider(), model, error,
+                            anotherKey || laterChoice || fallbackMayRun(current, currentQueue, call, error, keepPause));
                     if (anotherKey) {
                         continue;
                     }
@@ -371,6 +384,10 @@ public final class DialogueRouter {
         if (!provider.hasKeys() && !current.providerAllowsKeyless(provider)) {
             return null;
         }
+        PreCancelled cancelled = beginPre(call, plan.provider(), plan.model());
+        if (cancelled != null) {
+            throw cancelled;
+        }
         KeyRing ring = rings.apply(provider.id());
         if (ring == null) {
             ring = new KeyRing(provider.apiKeys());
@@ -447,6 +464,7 @@ public final class DialogueRouter {
                     throw HttpPool.queueFull(tagged);
                 }
                 boolean anotherKey = !key.isEmpty() && tagged.kind() == AiErrorKind.BAD_KEY && ring.hasAvailable(now);
+                noteDialogueError(call, plan.provider(), model, tagged, anotherKey);
                 if (anotherKey) {
                     continue;
                 }
@@ -639,11 +657,14 @@ public final class DialogueRouter {
             ), call.trace());
             accounting.record(
                     result.usage(), call.trace(), providerId, queueIndex, dedicatedFallback, queue.apply(""), model);
+            EventDispatcher.get().noteExchange(
+                    call.trace(), providerId, model, result.usage(), result.finishReason(), dedicatedFallback);
             return new SendOnce(result, false);
         } catch (AiRequestException error) {
             accounting.record(
                     error.usage(), call.trace(), providerId, queueIndex, dedicatedFallback, queue.apply(""), model);
             if (error.unsupportedTools() && tools != null && !tools.isEmpty()) {
+                EventDispatcher.get().providerError(call.trace(), providerId, model, error, true);
                 return new SendOnce(null, true);
             }
             throw error;
@@ -659,6 +680,56 @@ public final class DialogueRouter {
             ResponseUsage usage
     ) {
         return transport.finishText(raw, call.wrappedUser(), call.formatId(), apiKey, finishReason, usage);
+    }
+
+    private PreCancelled beginPre(DialogueEngine.ModelCall call, String providerId, String model) {
+        if (call == null || call.trace() == null) {
+            return null;
+        }
+        StringBuilder body = new StringBuilder(call.system() == null ? "" : call.system());
+        if (call.messages() != null) {
+            for (DialogueProtocol.MemoryLine line : call.messages()) {
+                if (line != null && line.text() != null) {
+                    body.append(line.text());
+                }
+            }
+        }
+        EventDispatcher.PreOutcome outcome = EventDispatcher.get().pre(
+                call.trace(), providerId, model, GenerationEvents.estimateTokens(body.toString()));
+        if (!outcome.cancelled()) {
+            return null;
+        }
+        return new PreCancelled(outcome.reason());
+    }
+
+    private static void noteDialogueError(
+            DialogueEngine.ModelCall call,
+            String providerId,
+            String model,
+            AiRequestException error,
+            boolean willRetry
+    ) {
+        if (call == null || error == null) {
+            return;
+        }
+        EventDispatcher.get().providerError(call.trace(), providerId, model, error, willRetry);
+    }
+
+    private boolean fallbackMayRun(
+            PluginConfig current,
+            ModelQueue currentQueue,
+            DialogueEngine.ModelCall call,
+            AiRequestException error,
+            boolean keepPause
+    ) {
+        if (call.kind() == DialogueEngine.CallKind.SUMMARY || call.summaryPinned()) {
+            return false;
+        }
+        FallbackModel fallback = resolveFallback(current, call);
+        if (fallback == null || !fallback.configured()) {
+            return false;
+        }
+        return keepPause || (error != null && error.kind().pausesProvider()) || queuePaused(currentQueue, clock.getAsLong());
     }
 
     /**

@@ -17,6 +17,7 @@ import io.github.neareststep.nexusai.config.ModerationSettings;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.ProviderSettings;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -193,6 +194,7 @@ public final class ModerationService {
         if (log != null) {
             log.append(playerId, playerName, text, verdict.category(), verdict.reason());
         }
+        EventDispatcher.get().moderationFlag(playerId, playerName, text, verdict.category(), verdict.reason());
         notifier.flagged(playerName == null ? "" : playerName, text, verdict.category(), verdict.reason());
         logger.info("Chat moderation flagged " + (playerName == null ? "a player" : playerName)
                 + " (" + verdict.category() + ")"
@@ -337,6 +339,7 @@ public final class ModerationService {
             return exchange.text();
         } catch (AiRequestException error) {
             accounting.record(error.usage(), trace, providerId, choice.index(), dedicated, queue, model);
+            EventDispatcher.get().providerError(trace, providerId, model, error, false);
             throw error;
         }
     }

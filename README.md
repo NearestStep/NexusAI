@@ -322,11 +322,21 @@ Actions are fixed commands the model may choose by name. `actions.enabled` defau
       permission: nexusai.action.give_iron
 ```
 
-`as` is `player` (the default) or `console`. The model cannot add arguments. `{player}` and `{uuid}` are the only tokens filled in, and the player name must match `[A-Za-z0-9_.]{1,32}` or the action is refused. A newline in the command is refused. Permission, cooldown, and the daily cap are checked before the command runs. A refusal is passed back to the character so it can say why. The command itself runs on the global region scheduler (`console`) or the player's entity scheduler (`player`).
+`as` is `player` (the default) or `console`. The model cannot add arguments. `{player}` and `{uuid}` are the only tokens filled in, and the player name must match `[A-Za-z0-9_.]{1,32}` or the action is refused. A newline in the command is refused. Permission, cooldown, and the daily cap are checked before the command runs. A refusal is passed back to the character so it can say why. The command itself runs on the global region scheduler (`console`) or the player's entity scheduler (`player`). `NexusActionEvent` is fired on that same thread before the command. Cancelling it tells the model `refused: blocked by server` and does not spend the cooldown or the daily counter. If the action task starts after the 5 second wait, the event is not fired and the command does not run.
 
 `actions.max-per-reply` (default 1) is how many actions from one model reply may run. Every attempt is written to the server log as `action player=… character=… action=… result=…`. `actions.log` defaults to true. When it is true, the same line is appended to `plugins/NexusAI/actions.log`.
 
 A console action runs as the server. The model only picks the moment. Put a cooldown and a daily limit on anything that gives items, money, or permissions. An action is not a safe place for a command whose arguments should change.
+
+## Events
+
+Other plugins can listen for generation, character actions, and moderation flags. The classes are in `io.github.neareststep.nexusai.api.event`. With no listeners registered, a request does the same work it did before, apart from the action timeout fix above. `API_VERSION` stays 3.
+
+One real model call fires `NexusPreGenerateEvent`, then zero or more `NexusProviderErrorEvent`, then exactly one of `NexusPostGenerateEvent` or `NexusGenerateFailEvent`. A cache hit, an in-flight join, and a pooled answer do not fire those events. Moderation does not fire them either. A placeholder, `/nai talk` (including a greeting), a pool refill, prewarm, `/nai test`, and a dialogue summary that is refused by a limit, a quota, or a pause fires neither Pre nor Fail. Fail without Pre is allowed only for an API call, and an API call fires Fail for every failure, including one that never reached HTTP. Pre is after admission and before the first HTTP attempt. Post carries the cleaned text and is fired before that text is written to the cache or the future is completed. Cancelling Pre skips HTTP, releases the quota reservation, and completes as `CANCELLED`.
+
+Those four events, plus `NexusProviderErrorEvent` and `NexusModerationFlagEvent`, are asynchronous. They run on a `nexusai-http-*` thread or an `HttpClient` thread, never on a region thread. A handler that blocks holds that worker. `NexusActionEvent` is synchronous on the thread that is about to run the command. On Paper that thread is the main thread, so a listener sees `Bukkit.isPrimaryThread()` as true. A player action on Folia must also see `Bukkit.isOwnedByCurrentRegion(player)`. That Folia check is required in the later Folia smoke (PR9b). `NexusProviderErrorEvent` also fires for a failed moderation HTTP attempt. `NexusModerationFlagEvent` fires after the moderation log line and before the staff notice.
+
+The order, the threads, and a listener example are in [docs/api.md](docs/api.md). Handlers must be fast. A call slower than 50 ms logs one warning per event class per five minutes, with the listener plugin names.
 
 ## Language files
 
@@ -735,6 +745,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `ContextRegistry` / `ContextService` / `ContextSnapshots` — context providers, timeouts, and the `cached_` snapshot used in the cache key
 - `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. Those calls use the Paper region scheduler on Paper and Purpur.
 - `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
+- `api.event` / `EventDispatcher` — Bukkit events for a real model call, a character action, and a moderation flag. An event object is created only when that event has listeners.
 - `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
 
 ## License

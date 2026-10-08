@@ -17,7 +17,7 @@ jobs:
       - name: Load-harness self-check
         run: python3 .github/scripts/paper-load.py --self-check
       - name: Test and build the shaded jar
-        run: chmod +x ./gradlew && ./gradlew test shadowJar loadDriverJar --no-daemon
+        run: chmod +x ./gradlew && ./gradlew test shadowJar loadDriverJar eventsProbeJar --no-daemon
       - uses: actions/upload-artifact@v4
         if: success()
         with:
@@ -28,7 +28,9 @@ jobs:
         if: success()
         with:
           name: NexusAI-LoadDriver
-          path: build/loadtest/NexusAI-LoadDriver.jar
+          path: |
+            build/loadtest/NexusAI-LoadDriver.jar
+            build/loadtest/nexusai-events-probe.jar
           if-no-files-found: error
 
   smoke:

@@ -7,6 +7,8 @@ import io.github.neareststep.nexusai.api.GenerationRequest;
 import io.github.neareststep.nexusai.api.GenerationResult;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.dialogue.ActionExecution;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 import me.clip.placeholderapi.PlaceholderAPI;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -33,11 +35,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * RCON entry points {@code naiload <scenario> <rate> <seconds> <viewers>} and
- * {@code naiload api <prompt|template> <n>}.
+ * RCON entry points {@code naiload <scenario> <rate> <seconds> <viewers>},
+ * {@code naiload api <prompt|template> <n>}, and {@code naiload events}.
  * The command returns immediately. MSPT, call time, and the HTTP pool are sampled on the
  * server thread. The report is {@code plugins/NexusAI-LoadDriver/report.json}.
  */
@@ -100,6 +103,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length > 0 && "api".equals(args[0])) {
             return apiGenerate(sender, args);
+        }
+        if (args.length > 0 && "events".equals(args[0])) {
+            return smokeEvents(sender);
         }
         if (args.length != 4) {
             sender.sendMessage("usage: naiload <scenario> <rate> <seconds> <viewers>");
@@ -186,6 +192,43 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             }
         });
         sender.sendMessage("naiload api queued " + mode + " x" + count);
+        return true;
+    }
+
+    /**
+     * One cached placeholder and one console character action.
+     * The action runs inside the global region task, which is where {@code as: console} runs.
+     * The placeholder text is logged only after the expansion returns the model reply.
+     */
+    private boolean smokeEvents(CommandSender sender) {
+        AtomicInteger polls = new AtomicInteger();
+        Bukkit.getScheduler().runTaskTimer(this, task -> {
+            if (polls.incrementAndGet() > 20 * 45) {
+                getLogger().info("PLACEHOLDER_TEXT timeout");
+                task.cancel();
+                return;
+            }
+            String value;
+            try {
+                value = PlaceholderAPI.setPlaceholders((OfflinePlayer) null, HIT);
+            } catch (Throwable thrown) {
+                getLogger().info("PLACEHOLDER_TEXT error=" + thrown.getClass().getSimpleName());
+                task.cancel();
+                return;
+            }
+            if (value != null && value.contains("pong")) {
+                getLogger().info("PLACEHOLDER_TEXT text=pong");
+                task.cancel();
+            }
+        }, 1L, 10L);
+        getServer().getGlobalRegionScheduler().run(this, scheduled -> {
+            String result = ActionExecution.execute(
+                    new AtomicBoolean(),
+                    () -> EventDispatcher.get().action(null, "smoke", "wave", "say smoke", true, 1L),
+                    () -> "ran");
+            getLogger().info("ACTION_DONE result=" + (result == null ? "null" : result));
+        });
+        sender.sendMessage("naiload events queued");
         return true;
     }
 
