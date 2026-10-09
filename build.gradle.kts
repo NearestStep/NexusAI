@@ -82,6 +82,8 @@ tasks {
     test {
         useJUnitPlatform()
         dependsOn("loadtestTest")
+        minHeapSize = "512m"
+        maxHeapSize = "1g"
     }
 
     compileJava {

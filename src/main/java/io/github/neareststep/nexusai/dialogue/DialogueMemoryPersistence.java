@@ -49,6 +49,7 @@ final class DialogueMemoryPersistence {
 
     private volatile boolean memoryLoadedFromDisk;
     private Thread diskLoader;
+    private MemoryStore.AbsentScan absentScan;
     private volatile long loadStartedAtMillis = Long.MIN_VALUE;
     private volatile boolean loadFinished;
     private boolean savePauseLogged;
@@ -129,10 +130,13 @@ final class DialogueMemoryPersistence {
             // Assigned before start so a second reload sees the in-flight read. start() failing
             // does not run the task, so the task's finally cannot clear this. Drop it here.
             diskLoader = worker;
+            // Keys are read while the load runs, and stop joins that load for one second.
+            absentScan = MemoryStore.startAbsentScan(target);
             try {
                 worker.start();
             } catch (Throwable startFailed) {
                 diskLoader = null;
+                absentScan = null;
                 loadFinished = true;
                 DialogueService.logMemoryLoadFailure(logger, startFailed, secretValues);
             }
@@ -156,8 +160,13 @@ final class DialogueMemoryPersistence {
     void shutdown() {
         try {
             Thread pending;
+            MemoryStore.AbsentScan scan;
             synchronized (this) {
                 pending = diskLoader;
+                scan = absentScan;
+            }
+            if (pending != null && pending.isAlive() && scan == null) {
+                scan = MemoryStore.startAbsentScan(file.get());
             }
             if (pending != null) {
                 try {
@@ -176,7 +185,8 @@ final class DialogueMemoryPersistence {
             if (pending != null && pending.isAlive()) {
                 DialogueSettings current = settings.get();
                 boolean summaries = current != null && current.summaryEnabled();
-                boolean wrote = memory.appendCharactersAbsentFromFile(file.get(), logger, summaries, secretList());
+                boolean wrote = memory.appendCharactersAbsentFromFile(
+                        file.get(), logger, summaries, secretList(), scan);
                 if (!wrote) {
                     noteSkippedSave();
                 }

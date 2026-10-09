@@ -48,6 +48,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
         MemoryStore.fullDocumentAppends.set(0);
+        MemoryStore.eventScans.set(0);
     }
 
     @Test
@@ -492,6 +493,148 @@ class DialogueMemoryReliabilityTest {
                 pending.join(15_000L);
             }
         }
+    }
+
+    @Test
+    void stopReplacesAHandWrittenFormatValue() throws Exception {
+        stopReplacesFormat("format: 1");
+        stopReplacesFormat("format: \"1\"");
+        stopReplacesFormat("format: '1'");
+    }
+
+    @Test
+    void stopDuringAQaSizedSavedLoadStaysNearTheJoinGrace() throws Exception {
+        Fixture fixture = fixture("stop-qa-sized", true);
+        int players = 2_501;
+        int characters = 4;
+        String lineText = "m".repeat(37);
+        String summary = "note";
+        MemoryStore writer = new MemoryStore();
+        for (int p = 0; p < players; p++) {
+            UUID id = qaPlayer(p);
+            for (int c = 0; c < characters; c++) {
+                List<TurnMemory.Line> lines = new ArrayList<>(16);
+                for (int n = 0; n < 16; n++) {
+                    String text = n == 0 ? lineText + "-" + p + "-" + c : lineText;
+                    lines.add(new TurnMemory.Line(n % 2 == 0 ? "user" : "assistant", text));
+                }
+                writer.get(id, "npc_" + c).load(lines, 40L, summary, 40L);
+            }
+        }
+        writer.save(fixture.file.toFile(), null, true);
+        writer = null;
+        long bytes = Files.size(fixture.file);
+        assertTrue(bytes >= 12_000_000L && bytes <= 14_500_000L, "saved file is " + bytes + " bytes");
+        String token = lineText + "-1000-1";
+        assertTrue(Files.readString(fixture.file).contains(token));
+        UUID first = qaPlayer(0);
+        UUID created = UUID.randomUUID();
+        fixture.store.append(first, "npc_0", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(first, "npc_new", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        fixture.store.append(created, "npc_d", "user", "new-player", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "qa-sized load was not released");
+        try {
+            MemoryStore.fullDocumentAppends.set(0);
+            MemoryStore.eventScans.set(0);
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            int cpus = Runtime.getRuntime().availableProcessors();
+            long heap = Runtime.getRuntime().maxMemory();
+            System.out.println("qa-shaped stop " + elapsed + " ms, bytes=" + bytes
+                    + ", cpus=" + cpus + ", heapMax=" + heap
+                    + ", eventScans=" + MemoryStore.eventScans.get()
+                    + ", fullDocumentAppends=" + MemoryStore.fullDocumentAppends.get());
+            assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
+            assertEquals(0, MemoryStore.eventScans.get(), "stop walked every YAML event");
+            assertTrue(elapsed < 2_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
+            String merged = Files.readString(fixture.file);
+            assertTrue(merged.startsWith("format: 2"), merged.substring(0, Math.min(40, merged.length())));
+            assertEquals(1, countOf(merged, "only-in-memory"));
+            assertEquals(1, countOf(merged, "new-player"));
+            assertEquals(1, countOf(merged, token));
+            assertFalse(merged.contains("must-not-overwrite"));
+            Set<String> keys = MemoryStore.scanCharacterKeys(merged);
+            assertTrue(keys != null, "merged file was not scanned");
+            assertEquals(players * characters + 2, keys.size());
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(30_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertEquals(merged, Files.readString(fixture.file));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(30_000L);
+            }
+        }
+    }
+
+    private void stopReplacesFormat(String formatLine) throws Exception {
+        Fixture fixture = fixture("stop-format-" + formatLine.hashCode(), true);
+        UUID player = fixture.player;
+        String originalBody = """
+                %s
+                entries:
+                  %s:
+                    keeper:
+                      updated: 40
+                      lines:
+                      - role: user
+                        text: kept-on-disk
+                """.formatted(formatLine, player);
+        Files.writeString(fixture.file, originalBody, StandardCharsets.UTF_8);
+        fixture.store.append(player, "keeper", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "format load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
+            fixture.files.shutdown();
+            String merged = Files.readString(fixture.file);
+            int formats = 0;
+            for (String line : merged.split("\\R")) {
+                if (line.trim().startsWith("format:")) {
+                    formats++;
+                }
+            }
+            assertEquals(1, formats, formatLine + "\n" + merged);
+            assertEquals(2, yaml(merged).getInt("format"), merged);
+            assertTrue(merged.contains("kept-on-disk"), merged);
+            assertEquals(1, countOf(merged, "only-in-memory"));
+            assertFalse(merged.contains("must-not-overwrite"), merged);
+            assertFalse(merged.contains("format: 1"), merged);
+            assertFalse(merged.contains("format: \"1\""), merged);
+            assertFalse(merged.contains("format: '1'"), merged);
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    private static UUID qaPlayer(int index) {
+        return new UUID(0x4e78000000000000L, index + 1L);
     }
 
     @Test

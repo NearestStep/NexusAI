@@ -13,9 +13,12 @@ import org.yaml.snakeyaml.events.Event;
 import org.yaml.snakeyaml.events.MappingStartEvent;
 import org.yaml.snakeyaml.events.ScalarEvent;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.StringReader;
+import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
@@ -67,6 +70,12 @@ public final class MemoryStore {
      * unchanged. Tests reset it.
      */
     static final AtomicInteger fullDocumentAppends = new AtomicInteger();
+
+    /**
+     * Times the stop path had to walk every YAML event. A file written by {@link #save} is counted
+     * from its keys without that walk. Tests reset it.
+     */
+    static final AtomicInteger eventScans = new AtomicInteger();
 
     /**
      * Replaces the atomic rename of a quarantine copy. Tests use this to stop after the temp file
@@ -532,27 +541,40 @@ public final class MemoryStore {
      * was. An unreadable file is left untouched. Does not take {@link #diskLock}: a load may hold
      * that lock for the whole read, and shutdown has to finish without waiting for it.
      * <p>
-     * Existing character ids are found with a streaming parse, and only the missing characters are
-     * inserted. The characters already in the file are not loaded into a document and are not
-     * rewritten. If that parse cannot read the file, the whole document is loaded and the missing
-     * characters are still appended. If the file still cannot be read, one warning names how many
-     * characters were not saved.
+     * Existing character ids come from {@code prepared} when that scan still matches the file, and
+     * otherwise from a scan started here. Only the missing characters are inserted. The bytes
+     * already in the file are copied unchanged into a temporary file, which replaces {@code file}
+     * after it has been flushed. If that scan cannot read the file, the whole document is loaded
+     * and the missing characters are still appended. If the file still cannot be read, one warning
+     * names how many characters were not saved.
      *
      * @return {@code true} when a merged file was published
      */
     boolean appendCharactersAbsentFromFile(File file, Logger logger, boolean summaries, Iterable<String> secrets) {
+        return appendCharactersAbsentFromFile(file, logger, summaries, secrets, null);
+    }
+
+    boolean appendCharactersAbsentFromFile(
+            File file, Logger logger, boolean summaries, Iterable<String> secrets, AbsentScan prepared) {
         if (saveBlocked || file == null || !file.isFile()) {
             return false;
         }
-        String text;
+        Snapshot snap = prepared == null ? null : prepared.awaitSnapshot();
         try {
-            text = decodeUtf8(Files.readAllBytes(file.toPath()));
+            if (!matches(file, snap)) {
+                snap = readSnapshot(file);
+            }
         } catch (IOException e) {
             warnUnsaved(logger, unsavedCharacterCount(summaries));
             return false;
         }
-        StreamOutline outline = scanEvents(text);
-        if (outline != null) {
+        String text = snap == null ? null : snap.text;
+        StreamOutline outline = snap == null ? null : snap.outline;
+        snap = null;
+        if (prepared != null) {
+            prepared.releaseBytes();
+        }
+        if (text != null && outline != null) {
             Map<String, StoredTranscript> extra;
             synchronized (this) {
                 extra = transcriptsAbsent(outline.characterKeys, summaries);
@@ -560,8 +582,8 @@ public final class MemoryStore {
             if (extra.isEmpty()) {
                 return false;
             }
-            String body = spliceAbsent(text, outline, redactExtra(extra, secrets), summaries);
-            if (body != null && publishBody(file, body, logger, summaries, outline.format2, secrets)) {
+            List<TextEdit> edits = editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
+            if (edits != null && publishEdits(file, text, edits, logger, summaries, outline.format2, secrets)) {
                 return true;
             }
         }
@@ -572,8 +594,23 @@ public final class MemoryStore {
         return false;
     }
 
-    private boolean publishBody(
-            File file, String body, Logger logger, boolean summaries, boolean format2, Iterable<String> secrets) {
+    /**
+     * Reads player and character keys on a daemon thread. Stop starts this when the load starts,
+     * so the read overlaps the load and the one-second join.
+     */
+    static AbsentScan startAbsentScan(File file) {
+        return AbsentScan.start(file);
+    }
+
+    private boolean publishEdits(
+            File file,
+            String text,
+            List<TextEdit> edits,
+            Logger logger,
+            boolean summaries,
+            boolean format2,
+            Iterable<String> secrets
+    ) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
                 return false;
@@ -582,7 +619,7 @@ public final class MemoryStore {
                 return true;
             }
             loaderMustNotPublish = true;
-            boolean published = writeAppended(file, body, logger, summaries, format2, secrets);
+            boolean published = writeAppended(file, text, edits, logger, summaries, format2, secrets);
             if (!published) {
                 loaderMustNotPublish = false;
             }
@@ -642,6 +679,7 @@ public final class MemoryStore {
      * append can splice without rewriting existing text.
      */
     private static StreamOutline scanEvents(String text) {
+        eventScans.incrementAndGet();
         LoaderOptions options = new LoaderOptions();
         options.setCodePointLimit(Integer.MAX_VALUE);
         options.setMaxAliasesForCollections(Integer.MAX_VALUE);
@@ -681,11 +719,39 @@ public final class MemoryStore {
      * Each key is {@code playerId + NUL + characterId}, the same pair {@link YamlConfiguration} reads.
      */
     static Set<String> scanCharacterKeys(String text) {
-        StreamOutline outline = scanEvents(text);
+        StreamOutline outline = scanSavedShape(text);
+        if (outline == null) {
+            outline = scanEvents(text);
+        }
         if (outline == null) {
             return null;
         }
         return Set.copyOf(outline.characterKeys);
+    }
+
+    /**
+     * Keys and splice points for a file {@link #save} can write, without descending into
+     * {@code lines} or summary text. Null when the file is not that block shape.
+     */
+    private static StreamOutline scanSavedShape(String text) {
+        SavedMemoryScan saved = SavedMemoryScan.scan(text);
+        if (saved == null) {
+            return null;
+        }
+        StreamOutline outline = new StreamOutline();
+        outline.format2 = saved.format2;
+        outline.sawFormat = saved.sawFormat;
+        outline.formatValueStart = saved.formatValueStart;
+        outline.formatValueEnd = saved.formatValueEnd;
+        outline.sawEntries = saved.sawEntries;
+        outline.otherRoot = saved.otherRoot;
+        outline.entriesEnd = saved.entriesEnd;
+        outline.playerIndent = saved.playerIndent;
+        outline.playerEnd.putAll(saved.playerEnd);
+        outline.characterIndent.putAll(saved.characterIndent);
+        outline.characterKeys.addAll(saved.characterKeys);
+        outline.utf16Offsets = true;
+        return outline;
     }
 
     private static void onMappingStart(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, MappingStartEvent event) {
@@ -776,6 +842,11 @@ public final class MemoryStore {
         }
         if (parent.kind == ScanKind.ROOT && "format".equals(parent.pendingKey)) {
             outline.format2 = formatNumber(event.getValue()) >= 2;
+            if (event.getStartMark() != null && event.getEndMark() != null) {
+                outline.sawFormat = true;
+                outline.formatValueStart = event.getStartMark().getIndex();
+                outline.formatValueEnd = event.getEndMark().getIndex();
+            }
         } else if (parent.kind == ScanKind.PLAYER && parent.pendingKey != null) {
             outline.characterKeys.add(parent.name + "\u0000" + parent.pendingKey);
             if (parent.childKeyColumn < 0) {
@@ -788,7 +859,7 @@ public final class MemoryStore {
         parent.expectKey = true;
     }
 
-    private static String spliceAbsent(
+    private static List<TextEdit> editsAbsent(
             String text,
             StreamOutline outline,
             Map<String, StoredTranscript> extra,
@@ -809,7 +880,7 @@ public final class MemoryStore {
             return null;
         }
         String nl = text.contains("\r\n") ? "\r\n" : "\n";
-        List<TextInsertion> insertions = new ArrayList<>();
+        List<TextEdit> edits = new ArrayList<>();
         List<Map.Entry<String, StoredTranscript>> newcomers = new ArrayList<>();
         for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : byPlayer.entrySet()) {
             Integer raw = outline.playerEnd.get(player.getKey());
@@ -819,9 +890,9 @@ public final class MemoryStore {
                 }
                 continue;
             }
-            int at = cutPoint(text, raw);
+            int at = cutPoint(text, outline, raw);
             int indent = outline.characterIndent.getOrDefault(player.getKey(), outline.playerIndent + 2);
-            insertions.add(new TextInsertion(at, 1, characterTexts(player.getValue(), summaries, indent, nl)));
+            edits.add(new TextEdit(at, 0, 1, characterTexts(player.getValue(), summaries, indent, nl), true));
         }
         if (!newcomers.isEmpty()) {
             Map<String, List<Map.Entry<String, StoredTranscript>>> fresh = new LinkedHashMap<>();
@@ -845,46 +916,31 @@ public final class MemoryStore {
             if (outline.sawEntries && outline.entriesEnd < 0) {
                 return null;
             }
-            int at = outline.sawEntries ? cutPoint(text, outline.entriesEnd) : text.length();
-            insertions.add(new TextInsertion(at, 2, block.toString()));
+            int at = outline.sawEntries ? cutPoint(text, outline, outline.entriesEnd) : text.length();
+            edits.add(new TextEdit(at, 0, 2, block.toString(), true));
         }
         if (summaries && !outline.format2) {
-            insertions.add(new TextInsertion(0, 0, "format: 2" + nl));
-        }
-        insertions.sort((left, right) -> {
-            int byIndex = Integer.compare(right.at, left.at);
-            return byIndex != 0 ? byIndex : Integer.compare(right.rank, left.rank);
-        });
-        StringBuilder merged = new StringBuilder(text);
-        for (TextInsertion insertion : insertions) {
-            if (insertion.at < 0 || insertion.at > merged.length()) {
-                return null;
-            }
-            String block = insertion.text;
-            if (block == null || block.isEmpty()) {
-                continue;
-            }
-            if (insertion.at > 0) {
-                char previous = merged.charAt(insertion.at - 1);
-                if (previous != '\n' && previous != '\r') {
-                    block = nl + block;
+            if (outline.sawFormat && outline.formatValueEnd > outline.formatValueStart) {
+                int start = toUtf16(text, outline, outline.formatValueStart);
+                int end = toUtf16(text, outline, outline.formatValueEnd);
+                if (start < 0 || end < start || end > text.length()) {
+                    return null;
                 }
+                edits.add(new TextEdit(start, end - start, 0, "2", false));
+            } else {
+                edits.add(new TextEdit(0, 0, 0, "format: 2" + nl, true));
             }
-            if (!block.endsWith("\n")) {
-                block = block + nl;
-            }
-            merged.insert(insertion.at, block);
         }
-        return merged.toString();
+        return edits;
     }
 
     /**
      * SnakeYAML marks are code-point offsets. A block-end mark also sits on the next token, after
      * that line's indent, so the cut moves back to the start of the line and the following key
-     * keeps its indent.
+     * keeps its indent. A saved-shape scan already stores UTF-16 indexes.
      */
-    private static int cutPoint(String text, int codePoints) {
-        int at = utf16Index(text, codePoints);
+    private static int cutPoint(String text, StreamOutline outline, int offset) {
+        int at = toUtf16(text, outline, offset);
         while (at > 0) {
             char previous = text.charAt(at - 1);
             if (previous != ' ' && previous != '\t') {
@@ -893,6 +949,13 @@ public final class MemoryStore {
             at--;
         }
         return at;
+    }
+
+    private static int toUtf16(String text, StreamOutline outline, int offset) {
+        if (outline.utf16Offsets) {
+            return offset;
+        }
+        return utf16Index(text, offset);
     }
 
     private static int utf16Index(String text, int codePoints) {
@@ -965,9 +1028,14 @@ public final class MemoryStore {
 
     private static final class StreamOutline {
         private boolean format2;
+        private boolean sawFormat;
+        private int formatValueStart = -1;
+        private int formatValueEnd = -1;
+        /** Saved-shape offsets are UTF-16. Event offsets are code points. */
+        private boolean utf16Offsets;
         private boolean sawEntries;
         private boolean otherRoot;
-        /** Code-point index of the entries mapping end, or -1 when that mapping was not closed. */
+        /** Index of the entries mapping end, or -1 when that mapping was not closed. */
         private int entriesEnd = -1;
         private int playerIndent = 2;
         private final Map<String, Integer> playerEnd = new LinkedHashMap<>();
@@ -975,7 +1043,11 @@ public final class MemoryStore {
         private final Set<String> characterKeys = new java.util.HashSet<>();
     }
 
-    private record TextInsertion(int at, int rank, String text) {
+    /**
+     * @param pad when true, a missing line break is written around {@code text}. A format replacement
+     *            is not padded.
+     */
+    private record TextEdit(int at, int delete, int rank, String text, boolean pad) {
     }
 
     private static final class ScanFallback extends RuntimeException {
@@ -1030,7 +1102,14 @@ public final class MemoryStore {
     }
 
     private boolean writeAppended(
-            File file, String body, Logger logger, boolean summaries, boolean format2, Iterable<String> secrets) {
+            File file,
+            String text,
+            List<TextEdit> edits,
+            Logger logger,
+            boolean summaries,
+            boolean format2,
+            Iterable<String> secrets
+    ) {
         if (summaries && !format2) {
             try {
                 java.nio.file.Path backup = FileBackup.backup(file.toPath());
@@ -1052,7 +1131,7 @@ public final class MemoryStore {
                 return false;
             }
             AtomicFiles.createPrivate(temporary.toPath());
-            Files.writeString(temporary.toPath(), body, StandardCharsets.UTF_8);
+            writeMerged(temporary.toPath(), text, edits);
             durableReplace(temporary.toPath(), file.toPath());
             return true;
         } catch (IOException e) {
@@ -1064,6 +1143,57 @@ public final class MemoryStore {
             if (temporary.isFile() && !temporary.equals(file)) {
                 temporary.delete();
             }
+        }
+    }
+
+    /**
+     * Copies {@code text} and applies {@code edits} without building a second copy of the file.
+     * Unchanged characters are written through one buffer. The caller flushes and renames.
+     */
+    private static void writeMerged(Path temporary, String text, List<TextEdit> edits) throws IOException {
+        List<TextEdit> ordered = new ArrayList<>(edits);
+        ordered.sort((left, right) -> {
+            int byIndex = Integer.compare(left.at, right.at);
+            return byIndex != 0 ? byIndex : Integer.compare(left.rank, right.rank);
+        });
+        String nl = text.contains("\r\n") ? "\r\n" : "\n";
+        try (Writer writer = new OutputStreamWriter(
+                new BufferedOutputStream(Files.newOutputStream(temporary), 1 << 20),
+                StandardCharsets.UTF_8)) {
+            int cursor = 0;
+            int lastAt = -1;
+            for (TextEdit edit : ordered) {
+                if (edit.at < cursor || edit.at > text.length() || edit.delete < 0) {
+                    throw new IOException("dialogue-memory edit is out of range");
+                }
+                int end = edit.at + edit.delete;
+                if (end > text.length()) {
+                    throw new IOException("dialogue-memory edit is out of range");
+                }
+                writer.write(text, cursor, edit.at - cursor);
+                cursor = end;
+                String block = edit.text == null ? "" : edit.text;
+                if (block.isEmpty()) {
+                    continue;
+                }
+                if (edit.pad) {
+                    boolean boundary = edit.at != lastAt && edit.at > 0
+                            && text.charAt(edit.at - 1) != '\n'
+                            && text.charAt(edit.at - 1) != '\r';
+                    if (boundary && !block.startsWith("\n") && !block.startsWith("\r")) {
+                        writer.write(nl);
+                    }
+                    if (!block.endsWith("\n")) {
+                        block = block + nl;
+                    }
+                }
+                writer.write(block);
+                lastAt = edit.at;
+            }
+            if (cursor > text.length()) {
+                throw new IOException("dialogue-memory edit is out of range");
+            }
+            writer.write(text, cursor, text.length() - cursor);
         }
     }
 
@@ -1499,5 +1629,94 @@ public final class MemoryStore {
 
     private static String key(UUID player, String characterId) {
         return player + "\u0000" + (characterId == null ? "" : characterId);
+    }
+
+    private static boolean matches(File file, Snapshot snap) throws IOException {
+        if (file == null || snap == null || snap.bytes == null || snap.text == null || snap.outline == null) {
+            return false;
+        }
+        if (file.length() != snap.bytes.length) {
+            return false;
+        }
+        return Arrays.equals(snap.bytes, Files.readAllBytes(file.toPath()));
+    }
+
+    private static Snapshot readSnapshot(File file) throws IOException {
+        if (file == null || !file.isFile()) {
+            return Snapshot.EMPTY;
+        }
+        byte[] bytes = Files.readAllBytes(file.toPath());
+        String text;
+        try {
+            text = decodeUtf8(bytes);
+        } catch (CharacterCodingException e) {
+            return new Snapshot(bytes, null, null);
+        }
+        StreamOutline outline = scanSavedShape(text);
+        if (outline == null) {
+            outline = scanEvents(text);
+        }
+        return new Snapshot(bytes, text, outline);
+    }
+
+    private static final class Snapshot {
+        private static final Snapshot EMPTY = new Snapshot(null, null, null);
+        private final byte[] bytes;
+        private final String text;
+        private final StreamOutline outline;
+
+        private Snapshot(byte[] bytes, String text, StreamOutline outline) {
+            this.bytes = bytes;
+            this.text = text;
+            this.outline = outline;
+        }
+    }
+
+    /**
+     * Key scan started when a load starts. The bytes are the file as it was at that moment.
+     * Stop uses them only when the live file is still those bytes.
+     */
+    static final class AbsentScan implements Runnable {
+        private final File file;
+        private final Thread thread;
+        private volatile Snapshot snapshot = Snapshot.EMPTY;
+
+        private AbsentScan(File file) {
+            this.file = file;
+            this.thread = new Thread(this, "nexusai-memory-keys");
+            this.thread.setDaemon(true);
+        }
+
+        private static AbsentScan start(File file) {
+            AbsentScan scan = new AbsentScan(file);
+            scan.thread.start();
+            return scan;
+        }
+
+        private Snapshot awaitSnapshot() {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return snapshot;
+        }
+
+        private void releaseBytes() {
+            Snapshot current = snapshot;
+            if (current == null || current.bytes == null) {
+                return;
+            }
+            snapshot = new Snapshot(null, current.text, current.outline);
+        }
+
+        @Override
+        public void run() {
+            try {
+                snapshot = readSnapshot(file);
+            } catch (Throwable ignored) {
+                snapshot = Snapshot.EMPTY;
+            }
+        }
     }
 }
