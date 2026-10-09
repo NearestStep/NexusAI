@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
@@ -60,6 +61,12 @@ public final class MemoryStore {
     private volatile Supplier<Iterable<String>> secretSource = List::of;
     /** Runs with {@link #diskLock} held, before a load changes the store. Tests pause a load here. */
     static Runnable pauseDuringLoad;
+
+    /**
+     * Times {@link #appendWithFullDocument} ran. A streaming append of a readable file leaves this
+     * unchanged. Tests reset it.
+     */
+    static final AtomicInteger fullDocumentAppends = new AtomicInteger();
 
     /**
      * Replaces the atomic rename of a quarantine copy. Tests use this to stop after the temp file
@@ -588,6 +595,7 @@ public final class MemoryStore {
      * Used only when the streaming parse cannot find a safe place to append.
      */
     private boolean appendWithFullDocument(File file, Logger logger, boolean summaries, Iterable<String> secrets) {
+        fullDocumentAppends.incrementAndGet();
         YamlConfiguration yaml = new YamlConfiguration();
         try {
             yaml.load(file);
@@ -668,13 +676,32 @@ public final class MemoryStore {
         return outline;
     }
 
+    /**
+     * Character keys in {@code text}, or null when the streaming parse cannot splice this file.
+     * Each key is {@code playerId + NUL + characterId}, the same pair {@link YamlConfiguration} reads.
+     */
+    static Set<String> scanCharacterKeys(String text) {
+        StreamOutline outline = scanEvents(text);
+        if (outline == null) {
+            return null;
+        }
+        return Set.copyOf(outline.characterKeys);
+    }
+
     private static void onMappingStart(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, MappingStartEvent event) {
         ScanFrame parent = stack.peek();
         if (parent == null) {
             stack.push(new ScanFrame(ScanKind.ROOT));
             return;
         }
-        if (parent.expectKey || event.isFlow()) {
+        if (event.isFlow()) {
+            throw new ScanFallback();
+        }
+        if (parent.kind == ScanKind.SEQUENCE) {
+            stack.push(new ScanFrame(ScanKind.NESTED));
+            return;
+        }
+        if (parent.expectKey) {
             throw new ScanFallback();
         }
         String key = parent.pendingKey;

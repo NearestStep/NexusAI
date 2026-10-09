@@ -47,6 +47,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
+        MemoryStore.fullDocumentAppends.set(0);
     }
 
     @Test
@@ -406,6 +407,31 @@ class DialogueMemoryReliabilityTest {
     }
 
     @Test
+    void scanEventsReadsSavedCharacterKeys() throws Exception {
+        String[] ids = {"blacksmith", "guide: north", "say \"hi\" and 'bye'", "кузнец"};
+        for (boolean summaries : new boolean[] {false, true}) {
+            Path file = Files.createTempFile("scan-keys-", ".yml");
+            UUID player = UUID.randomUUID();
+            MemoryStore writer = new MemoryStore();
+            for (String id : ids) {
+                writer.append(player, id, "user", "first line of " + id, 40L, 8, 8_000, 0L);
+                writer.append(player, id, "assistant", "second line of " + id, 41L, 8, 8_000, 0L);
+                writer.append(player, id, "user", "third line", 42L, 8, 8_000, 0L);
+                if (summaries) {
+                    var memory = writer.get(player, id);
+                    memory.load(new ArrayList<>(memory.view()), memory.updatedAt(), "сводка " + id, memory.updatedAt());
+                }
+            }
+            writer.save(file.toFile(), null, summaries);
+            String text = Files.readString(file);
+            Set<String> scanned = MemoryStore.scanCharacterKeys(text);
+            assertTrue(scanned != null, summaries ? "summaries" : "plain");
+            assertEquals(keysIn(text), scanned);
+            assertEquals(ids.length, scanned.size());
+        }
+    }
+
+    @Test
     void stopAfterASaveKeepsExistingLinesAndAddsMissingCharacters() throws Exception {
         stopAfterASave(false);
         stopAfterASave(true);
@@ -416,10 +442,13 @@ class DialogueMemoryReliabilityTest {
         Fixture fixture = fixture("stop-large-saved");
         UUID player = fixture.player;
         String text = "alpha beta gamma delta epsilon zeta eta theta iota kappa ".repeat(16);
-        int count = 11_000;
+        String second = "beta gamma delta epsilon zeta eta theta iota kappa lambda ".repeat(16);
+        int count = 5_200;
         MemoryStore writer = new MemoryStore();
         for (int i = 0; i < count; i++) {
-            writer.append(player, "npc_" + i, "user", text, 40L, 4, 8_000, 0L);
+            writer.append(player, "npc_" + i, "user", text, 40L, 8, 8_000, 0L);
+            writer.append(player, "npc_" + i, "assistant", second, 41L, 8, 8_000, 0L);
+            writer.append(player, "npc_" + i, "user", "third line " + i, 42L, 8, 8_000, 0L);
         }
         writer.save(fixture.file.toFile(), null, false);
         long bytes = Files.size(fixture.file);
@@ -434,15 +463,19 @@ class DialogueMemoryReliabilityTest {
         try {
             fixture.files.onReload();
             assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
+            assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
             assertTrue(elapsed < 2_500L, "stop took " + elapsed + "ms");
             String merged = Files.readString(fixture.file);
             assertOriginalLinesRemain(original, merged);
             YamlConfiguration parsed = yaml(merged);
             assertEquals(text, firstText(parsed, player, "npc_0"));
+            assertEquals(3, parsed.getMapList("entries." + player + ".npc_0.lines").size());
             assertEquals("only-in-memory", firstText(parsed, player, "npc_new"));
+            assertEquals(1, countOf(merged, "only-in-memory"));
             assertFalse(merged.contains("must-not-overwrite"));
             release.countDown();
             Thread pending = fixture.files.diskLoader();
@@ -551,10 +584,14 @@ class DialogueMemoryReliabilityTest {
         try {
             fixture.files.onReload();
             assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
             fixture.files.shutdown();
+            assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
             String merged = Files.readString(fixture.file);
             yaml(merged);
             assertOriginalLinesRemain(original, merged);
+            assertEquals(1, countOf(merged, "only-in-memory"));
+            assertEquals(1, countOf(merged, "new-player"));
             assertParsedCharactersMatch(original, merged);
             YamlConfiguration parsed = yaml(merged);
             assertEquals("disk-shared", firstText(parsed, player, "shared"));
@@ -616,17 +653,17 @@ class DialogueMemoryReliabilityTest {
     private static void assertOriginalLinesRemain(String original, String merged) {
         List<String> before = contentLines(original);
         List<String> after = contentLines(merged);
-        int cursor = 0;
+        int position = 0;
         for (String line : before) {
             int found = -1;
-            for (int i = cursor; i < after.size(); i++) {
+            for (int i = position; i < after.size(); i++) {
                 if (line.equals(after.get(i))) {
                     found = i;
                     break;
                 }
             }
             assertTrue(found >= 0, "rewritten line: " + line);
-            cursor = found + 1;
+            position = found + 1;
         }
     }
 
@@ -655,6 +692,34 @@ class DialogueMemoryReliabilityTest {
             }
         }
         return lines;
+    }
+
+    private static Set<String> keysIn(String text) throws Exception {
+        Set<String> keys = new java.util.HashSet<>();
+        ConfigurationSection entries = yaml(text).getConfigurationSection("entries");
+        assertTrue(entries != null, text);
+        for (String playerId : entries.getKeys(false)) {
+            ConfigurationSection characters = entries.getConfigurationSection(playerId);
+            assertTrue(characters != null, playerId);
+            for (String characterId : characters.getKeys(false)) {
+                keys.add(playerId + "\u0000" + characterId);
+            }
+        }
+        return keys;
+    }
+
+    private static int countOf(String text, String needle) {
+        int count = 0;
+        int from = 0;
+        while (from <= text.length() - needle.length()) {
+            int found = text.indexOf(needle, from);
+            if (found < 0) {
+                break;
+            }
+            count++;
+            from = found + needle.length();
+        }
+        return count;
     }
 
     private static boolean hasContinuation(String text) {
