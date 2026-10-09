@@ -50,8 +50,6 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     private static final String GENERATE_PREFIX = "generate_";
     private static final String CACHED_PREFIX = "cached_";
-    /** Off-region aliases kept at once. The eldest is dropped when a new one would pass this. */
-    static final int OFF_THREAD_ALIAS_CAP = 512;
 
     private final NexusAI plugin;
     private final Plugin schedulerPlugin;
@@ -69,7 +67,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
      * Off-region reads cannot fill {@code {player}} or {@code %} vars, so the text they look up
      * is not the text stored after the hop. This maps that caller's key to the resolved cache key.
      * The value is per player. Two players do not share it. An alias is removed when its cache
-     * entry is gone, when that player quits, and when the map is past {@link #OFF_THREAD_ALIAS_CAP}.
+     * entry is gone, when that player quits, and when the map is past the configured cache size.
      */
     private final LinkedHashMap<String, String> offThreadCacheKeys = new LinkedHashMap<>();
     private final Map<UUID, Set<String>> offThreadAliasesByPlayer = new HashMap<>();
@@ -413,11 +411,23 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             if (playerId != null) {
                 offThreadAliasesByPlayer.computeIfAbsent(playerId, ignored -> new HashSet<>()).add(alias);
             }
-            while (offThreadCacheKeys.size() > OFF_THREAD_ALIAS_CAP) {
+            while (offThreadCacheKeys.size() > aliasCap()) {
                 String eldest = offThreadCacheKeys.keySet().iterator().next();
                 dropAlias(eldest);
             }
         }
+    }
+
+    /**
+     * Alias map limit. It follows {@code cache.max-size} so a cyclic off-thread read of every
+     * cached player and prompt still finds the stored answer. Reload replaces {@link #config}.
+     */
+    private int aliasCap() {
+        long configured = config == null ? 1000L : config.getCacheMaxSize();
+        if (configured > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) Math.max(1L, configured);
     }
 
     private void dropAlias(String alias) {

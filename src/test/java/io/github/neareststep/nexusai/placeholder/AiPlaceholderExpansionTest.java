@@ -346,9 +346,10 @@ class AiPlaceholderExpansionTest {
         AtomicInteger calls = new AtomicInteger();
         RegionOwnership.install(player -> inHop.get());
         EntityScheduler scheduler = entityScheduler(inHop, hops);
+        long cacheSize = 80;
         AiPlaceholderExpansion expansion = sharedExpansion(
-                calls, answerForName(), tipCatalog(), Duration.ofMinutes(5), 2_000);
-        int total = AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP + 40;
+                calls, answerForName(), tipCatalog(), Duration.ofMinutes(5), cacheSize);
+        int total = (int) cacheSize + 40;
         Player first = null;
         Player last = null;
         for (int i = 0; i < total; i++) {
@@ -361,9 +362,9 @@ class AiPlaceholderExpansionTest {
                 last = player;
             }
             assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
-            assertTrue(expansion.offThreadAliasCount() <= AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP);
+            assertTrue(expansion.offThreadAliasCount() <= cacheSize);
         }
-        assertEquals(AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP, expansion.offThreadAliasCount());
+        assertEquals(cacheSize, expansion.offThreadAliasCount());
         assertEquals(2, calls.get());
         assertEquals("for-alex", expansion.onPlaceholderRequest(last, "cached_tip"));
         assertEquals(2, calls.get());
@@ -371,7 +372,83 @@ class AiPlaceholderExpansionTest {
         assertEquals(2, calls.get());
         assertEquals("for-steve", expansion.onPlaceholderRequest(first, "cached_tip"));
         assertEquals(2, calls.get());
-        assertTrue(expansion.offThreadAliasCount() <= AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP);
+        assertTrue(expansion.offThreadAliasCount() <= cacheSize);
+    }
+
+    @Test
+    void offRegionAliasesWithinTheCacheSizeStillHit() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        EntityScheduler scheduler = entityScheduler(inHop, hops);
+        long cacheSize = 1_000;
+        AiPlaceholderExpansion expansion = sharedExpansion(
+                calls, prompt -> {
+                    if (prompt.contains("Hint")) {
+                        return "ans-hint";
+                    }
+                    if (prompt.contains("Lore")) {
+                        return "ans-lore";
+                    }
+                    return "ans-tip";
+                }, boardCatalog(), Duration.ofMinutes(5), cacheSize);
+        int players = 200;
+        String[] prompts = {"cached_tip", "cached_hint", "cached_lore"};
+        Player first = null;
+        for (int i = 0; i < players; i++) {
+            Player player = RegionPlayerFixture.named(new UUID(2, i), "Steve", "lobby", scheduler);
+            if (i == 0) {
+                first = player;
+            }
+            for (String prompt : prompts) {
+                assertTrue(expansion.onPlaceholderRequest(player, prompt).startsWith("FB-"));
+            }
+        }
+        assertEquals(players * prompts.length, expansion.offThreadAliasCount());
+        assertTrue(expansion.offThreadAliasCount() > 512);
+        assertTrue(expansion.offThreadAliasCount() < cacheSize);
+        int afterFill = calls.get();
+        assertEquals("ans-tip", expansion.onPlaceholderRequest(first, "cached_tip"));
+        assertEquals("ans-hint", expansion.onPlaceholderRequest(first, "cached_hint"));
+        assertEquals("ans-lore", expansion.onPlaceholderRequest(first, "cached_lore"));
+        Player middle = RegionPlayerFixture.named(new UUID(2, 100), "Steve", "lobby", scheduler);
+        assertEquals("ans-tip", expansion.onPlaceholderRequest(middle, "cached_tip"));
+        assertEquals(afterFill, calls.get());
+    }
+
+    @Test
+    void reloadUsesTheConfiguredCacheSizeAsTheAliasCap() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        EntityScheduler scheduler = entityScheduler(inHop, hops);
+        AiPlaceholderExpansion expansion = sharedExpansion(
+                calls, answerForName(), tipCatalog(), Duration.ofMinutes(5), 4);
+        for (int i = 0; i < 6; i++) {
+            Player player = RegionPlayerFixture.named(new UUID(3, i), "Steve", "lobby", scheduler);
+            assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        }
+        assertEquals(4, expansion.offThreadAliasCount());
+        Logger logger = Logger.getLogger("placeholder-reload-cap");
+        PluginConfig config = chatConfig(20);
+        AiCache fresh = new AiCache(Duration.ofMinutes(5), 20);
+        AiHttpClient http = new AiHttpClient(
+                fresh,
+                prompt -> {
+                    calls.incrementAndGet();
+                    return CompletableFuture.completedFuture(answerForName().apply(prompt));
+                },
+                config,
+                logger);
+        expansion.bind(config, fresh, http, new AiPool(), null, tipCatalog());
+        assertEquals(0, expansion.offThreadAliasCount());
+        for (int i = 0; i < 6; i++) {
+            Player player = RegionPlayerFixture.named(new UUID(4, i), "Steve", "lobby", scheduler);
+            assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        }
+        assertEquals(6, expansion.offThreadAliasCount());
     }
 
     @Test
@@ -509,6 +586,10 @@ class AiPlaceholderExpansionTest {
     }
 
     private static PluginConfig chatConfig() {
+        return chatConfig(1_000);
+    }
+
+    private static PluginConfig chatConfig(long cacheMaxSize) {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("api.provider", "openai");
         yaml.set("api.model", "gpt-4o-mini");
@@ -517,6 +598,7 @@ class AiPlaceholderExpansionTest {
         yaml.set("limits.max-prompt-length", 400);
         yaml.set("limits.requests-per-minute", 30);
         yaml.set("limits.requests-per-day", 1000);
+        yaml.set("cache.max-size", cacheMaxSize);
         yaml.set("pool.enabled", false);
         yaml.set("prewarm.enabled", false);
         yaml.set("fallback", "...");
@@ -543,6 +625,7 @@ class AiPlaceholderExpansionTest {
             long maxSize
     ) {
         Logger logger = Logger.getLogger("placeholder-shared-cache");
+        PluginConfig config = chatConfig(maxSize);
         AiCache cache = new AiCache(ttl, maxSize);
         AiHttpClient http = new AiHttpClient(
                 cache,
@@ -550,11 +633,11 @@ class AiPlaceholderExpansionTest {
                     calls.incrementAndGet();
                     return CompletableFuture.completedFuture(answer.apply(prompt));
                 },
-                chatConfig(),
+                config,
                 logger);
         return new AiPlaceholderExpansion(
                 schedulerPlugin(),
-                chatConfig(),
+                config,
                 cache,
                 http,
                 new AiPool(),
@@ -576,6 +659,20 @@ class AiPlaceholderExpansionTest {
             }
             return "other";
         };
+    }
+
+    private static PromptCatalog boardCatalog() {
+        return PromptCatalog.parse("""
+                tip:
+                  prompt: "Plain tip for {player}"
+                  fallback: "FB-tip"
+                hint:
+                  prompt: "Hint for {player}"
+                  fallback: "FB-hint"
+                lore:
+                  prompt: "Lore for {player}"
+                  fallback: "FB-lore"
+                """).catalog();
     }
 
     private static PromptCatalog tipCatalog() {
