@@ -1,6 +1,55 @@
 # NexusAI plugin API
 
-`NexusAIApi.API_VERSION` is 3. New methods are additive. This page describes `generateJson` and the Bukkit events added for other plugins. `NexusAIApi.generate`, `registerPrompt`, and `quota` are documented on those classes.
+`NexusAIApi.API_VERSION` is 3. New methods are additive. Compile against the plugin jar and set `softdepend: [NexusAI]`. There is no separate API artifact.
+
+Live checks of which provider accepts `json_schema`, and which provider returns `usage.cost`, are not recorded.
+
+## Text generation
+
+`NexusAIApi.generate(plugin, request)` may be called from any thread. The future completes on a NexusAI thread, never on a region thread. It completes exceptionally only when NexusAI is not enabled. A finished call is a `GenerationResult`: text (or the fallback when `success()` is false), source, provider, model, token counts, finish reason, latency, and a `NexusErrorKind` when the model did not answer. Do not join the future on the main thread or a region thread. To send a chat line or change the world, hop first.
+
+When the request names a player, that player's state is read on the thread that owns the player. If the caller already owns the player, the read is immediate. Otherwise NexusAI schedules it. On Paper the owning thread is the main thread. On Folia it is the player's region thread. A request with no player does not read a player.
+
+`CacheMode.CACHED` shares one in-flight provider call with a placeholder of the same cache key. A named prompt shares its backoff key with that placeholder. `talk` and context providers are unchanged.
+
+```java
+NexusAIApi.generate(plugin, GenerationRequest.prompt("quests:intro")
+                .player(player)
+                .var("quest", questName)
+                .label("quest-intro")
+                .build())
+        .thenAccept(result -> player.getScheduler().run(plugin, task -> {
+            player.sendMessage(result.text());
+            if (!result.success()) {
+                plugin.getLogger().fine("AI failed: " + result.error().map(GenerationError::kind).orElse(null));
+            }
+        }, null));
+```
+
+`result.text()` is the fallback when `success()` is false. Check a value again before placing it in a command, a name, or a path.
+
+## Prompt registration
+
+`NexusAIApi.registerPrompt(plugin, localId, definition)` stores a prompt under `namespace:localId`. The namespace is the plugin name in lower case, and any character outside `[a-z0-9_-]` becomes `_`. `localId` matches `[a-z0-9_-]{1,64}`. The same plugin may register that id again to replace it. A second plugin with the same namespace gets `IllegalStateException`. The prompt is not written to a file. `/nai reload` keeps it. Disabling the owner plugin removes it.
+
+A prompt registered from code cannot set `actions`, `dialogue`, or `context`. An admin override with the same id in `prompts.yml` replaces the prompt and can add those fields. The schema stored on the code prompt stays. `PromptDefinition.builder` sets the template, format, token cap, ttl, and fallback. `knowledgeSelect` and `knowledgeKeywords` set the same keys as `knowledge-select` and `knowledge-keywords`.
+
+```java
+@Override
+public void onEnable() {
+    if (getServer().getPluginManager().isPluginEnabled("NexusAI") && NexusAIApi.API_VERSION >= 3) {
+        NexusAIApi.registerPrompt(this, "intro", PromptDefinition.builder(
+                        "Write a two-sentence intro for the quest {quest}.")
+                .format("chat")
+                .maxTokens(120)
+                .ttl(Duration.ofMinutes(30))
+                .fallback("A new quest awaits.")
+                .build());
+    }
+}
+```
+
+`NexusAIApi.quota(plugin)` reads today's tokens and requests for that plugin from memory. It is safe on any thread. The caps are empty when quotas are off or that consumer has no cap.
 
 ## Structured JSON
 
@@ -41,7 +90,7 @@ NexusAIApi.generateJson(plugin, GenerationRequest.template("Invent a short fetch
         });
 ```
 
-Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400.
+Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400. Which live provider accepted `json_schema` or returned `usage.cost` is not recorded.
 
 Events are created only when that event's handler list has listeners. With none registered, a request is unchanged, except that a character-action task which starts after the 5 second wait does not run the command.
 

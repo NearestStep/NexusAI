@@ -1,6 +1,6 @@
 # NexusAI
 
-Plugin for Paper and Purpur. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
+Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
 
 `%ainexus_cached_*%` returns a cached answer. On a miss it starts a background request when requests are allowed, and returns a stored pooled answer without removing it, or the fallback string. `%ainexus_generate_*%` removes one pooled answer, or returns the fallback string.
 
@@ -9,23 +9,31 @@ Plugin for Paper and Purpur. It requests text from an OpenAI-compatible model an
 - [Quick start](docs/quickstart.md) — install, a key, one prompt, `/nai test`, `/nai status`
 - [FAQ](docs/faq.md) — no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
 - [Migration from 1.0.x](docs/migration-1.1.0.md)
+- [Migration to 1.2.0](docs/migration-1.2.0.md)
+- [Plugin API](docs/api.md)
 - [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
 
 ## Requirements
 
-- Paper or Purpur **1.20.6 through 26.2**, Java **21** or newer
-- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6+ (soft-depend)
+- Paper or Purpur **1.20.6 through 26.2**, or Folia **1.21.8, 1.21.11, 26.1.2, or 26.2**, Java **21** or newer
+- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. Folia needs PlaceholderAPI 2.11.7 or newer, because an older PlaceholderAPI does not load on Folia by itself. The plugin does not check that version at runtime. The compile-only dependency is PlaceholderAPI 2.11.6.
 - API key for an OpenAI-compatible provider, unless you use a local endpoint such as Ollama
 
 ## Compatibility
 
-One jar runs on Paper and Purpur from 1.20.6 through 26.2. It is built with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. `api-version` is `1.20.6`: Paper has accepted a minor api-version since 1.20.5, and 1.20.6 is the oldest release this jar is built for. Paper and Purpur from 1.20.6 through 26.2 load that api-version. There is no separate jar per Minecraft version.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only.
 
-Supported servers are Paper and Purpur 1.20.6 through 26.2. Folia is not supported, and `plugin.yml` sets `folia-supported: false`. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
+
+One jar runs on those servers. It is built with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. `api-version` is `1.20.6`: Paper has accepted a minor api-version since 1.20.5, and 1.20.6 is the oldest release this jar is built for. There is no separate jar per Minecraft version. `plugin.yml` sets `folia-supported: true`.
+
+Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+
+`generate` may be called from any thread. The future completes on a NexusAI thread, not on a region thread. Do not join that future on the main thread or a region thread. When the request has a player, NexusAI reads that player's state on the thread that owns the player: immediately when the caller already owns the player, otherwise by scheduling that read. On Paper the owning thread is the main thread. On Folia it is the player's region thread.
 
 ## Installation
 
-1. Put `NexusAI-1.1.2.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.2.jar`. `version` in `build.gradle.kts` is `1.1.2`.
+1. Put `NexusAI-1.2.0-SNAPSHOT.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0-SNAPSHOT.jar`. `version` in `build.gradle.kts` is `1.2.0-SNAPSHOT`. This snapshot is not a published release.
 2. Install PlaceholderAPI
 3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 
@@ -374,6 +382,8 @@ A paragraph is the text between blank lines. A line that starts with `#` is a se
 
 `/nai test` prints `command.test-knowledge` before the request when the prompt lists knowledge, for example `Knowledge: rules#3, faq#1 (keywords)` or `Knowledge: rules, faq (full)`.
 
+Keyword selection runs on the thread that already calls `KnowledgeComposer.prepare`. For a placeholder that is the caller's thread. For `generate` and `generateJson` it is a NexusAI thread. The selection was left on that thread. No load measurement showed it missing the MSPT budget.
+
 Break long files into paragraphs. One paragraph for the whole file is still one candidate, cut at `max-paragraph-chars`.
 
 ## Chat moderation
@@ -467,6 +477,8 @@ welcome:
 ```
 
 `prompt` may be a string, a block scalar (`|`), or a list of lines. A list is joined with newlines. `{biome}` is replaced before the request. `%player_biome%` is resolved for the player who is looking. The cache and the pool use that finished text, so a player in a plains biome never sees a desert player's answer. `welcome` is not prewarmed and is not filled on startup, because the value depends on the player. `survival_tips` has no player-specific vars, so every viewer shares one cache entry.
+
+A `vars:` value that contains `%` is resolved only on the thread that owns the player. The synchronous placeholder call does not wait for a hop. A read off the main thread on Paper (a scoreboard, or another plugin's async task) can leave those `%` variables empty in that immediate result. The cached or background answer is resolved on the owning thread, and so is a pool refill. `generate` and `/nai talk` already read after an ownership check or a hop. A foreign PlaceholderAPI expansion used from `vars:` is called on that owning thread. After the call, the expansion author's own behaviour applies. NexusAI does not make a third-party expansion safe on Folia.
 
 If the id is missing from `prompts.yml` and no plugin has registered it, the placeholder text is sent as a literal prompt, same as before.
 
@@ -747,7 +759,7 @@ The player-input boundary and the output filter reduce prompt-injection risk. Th
 
 ## FAQ
 
-Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, and dialogue summaries. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md). Copy-paste configs are in [examples/](examples/README.md).
+Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md) and [Migration to 1.2.0](docs/migration-1.2.0.md). Copy-paste configs are in [examples/](examples/README.md).
 
 ## Build
 

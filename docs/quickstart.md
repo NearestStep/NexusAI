@@ -4,11 +4,13 @@ About five minutes from an empty `plugins/` folder to the first cached answer. T
 
 ## 1. Install
 
-1. Put `NexusAI-1.1.2.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.2.jar`. The `version` in `build.gradle.kts` is `1.1.2`.
-2. Install [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer.
+1. Put `NexusAI-1.2.0-SNAPSHOT.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0-SNAPSHOT.jar`. The `version` in `build.gradle.kts` is `1.2.0-SNAPSHOT`. This snapshot is not a published release.
+2. Install [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. On Folia, install 2.11.7 or newer. An older PlaceholderAPI does not load on Folia by itself. NexusAI does not check the version.
 3. Start the server once. NexusAI creates `plugins/NexusAI/` (`config.yml`, `prompts.yml`, `lang/`, `knowledge/example.md`). Stop the server before editing those files.
 
-Paper or Purpur **1.20.6 through 26.2**, Java **21** or newer. Folia is not supported.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. `plugin.yml` sets `folia-supported: true`. Other Folia versions may work and are not tested. Paper and Purpur 26.3, Spigot, and CraftBukkit are not supported.
+
+Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
 
 ## 2. Set a key
 

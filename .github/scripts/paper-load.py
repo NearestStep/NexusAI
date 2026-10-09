@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Load harness for NexusAI. Reuses the smoke helpers in paper-smoke.py.
 
-Mode A (no game client) runs S1, S2, S2-over, S3, and the HTTP-pool overflow probe S-pool.
-Mode B (--bots) adds S4 and S5 and needs mineflayer. CI runs mode A only.
+Mode A (no game client) runs S1, S1-keywords, S2, S2-over, S2-probe, S3, S6, and the HTTP-pool overflow probe S-pool.
+Mode B (--bots) adds S4 and S5 and needs mineflayer. CI runs mode A only, without S2-over.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def main() -> int:
     parser.add_argument("--version", default=os.environ.get("MC_VERSION", ""))
     parser.add_argument("--plugins-dir", default=os.environ.get("PLUGIN_DIR", "dist"))
     parser.add_argument("--driver-dir", default=os.environ.get("DRIVER_DIR", "build/loadtest"))
-    parser.add_argument("--scenario", default="S1,S2,S2-over,S3,S-pool")
+    parser.add_argument("--scenario", default="S1,S1-keywords,S2,S2-over,S2-probe,S3,S6,S-pool")
     parser.add_argument("--bots", type=int, default=0)
     parser.add_argument("--mock-latency-ms", type=int, default=300)
     parser.add_argument("--mock-429-every", type=int, default=0)
@@ -76,7 +76,9 @@ def main() -> int:
         return 1
 
 
-SCENARIO_NAMES = {"baseline", "S1", "S2", "S2-over", "S3", "S4", "S5", "S-pool"}
+SCENARIO_NAMES = {
+    "baseline", "S1", "S1-keywords", "S2", "S2-over", "S2-probe", "S3", "S4", "S5", "S6", "S-pool",
+}
 
 
 def run(args, scenarios: list[str]) -> int:
@@ -105,6 +107,7 @@ def run(args, scenarios: list[str]) -> int:
     shutil.copy2(plugin, work / "plugins" / plugin.name)
     shutil.copy2(driver, work / "plugins" / driver.name)
     write_prompts(work / "plugins" / "NexusAI" / "prompts.yml")
+    write_knowledge(work / "plugins" / "NexusAI" / "knowledge" / "rules.md")
 
     mock_port = smoke.free_port()
     requests_path = out / "mock-requests.jsonl"
@@ -266,6 +269,8 @@ def execute_scenario(
             "seconds": seconds_for(args, scenario),
             "queue_full": "HTTP queue is full" in "".join(window),
             "jfr_required": not args.skip_jfr,
+            "mock_latency_ms": args.mock_latency_ms,
+            "token_usage": read_token_usage(work),
         })
         last = {
             "scenario": scenario,
@@ -344,7 +349,7 @@ def judge(scenario: str, report: dict, ctx: dict) -> dict:
     baseline = ctx.get("baseline_mean")
     mean = report.get("mspt", {}).get("mean", 0.0)
     delta = None if baseline is None or scenario == "baseline" else mean - baseline
-    if scenario == "S1":
+    if scenario in {"S1", "S1-keywords"}:
         if delta is None or delta > 1.0:
             reasons.append(f"ΔMSPT {fmt(delta)} > 1.0 ms")
         p99 = report.get("callNanos", {}).get("p99", 10**12)
@@ -352,7 +357,7 @@ def judge(scenario: str, report: dict, ctx: dict) -> dict:
             reasons.append(f"call p99 {p99} ns > 200 µs")
         if report.get("mspt", {}).get("samples", 0) < 10:
             reasons.append("too few MSPT samples")
-    elif scenario == "S2":
+    elif scenario in {"S2", "S2-probe"}:
         reasons.extend(load_budget(delta, report, 2.0))
         if report.get("mspt", {}).get("max", 10**9) > 100:
             reasons.append(f"max tick {report['mspt']['max']:.1f} ms > 100")
@@ -404,6 +409,8 @@ def judge(scenario: str, report: dict, ctx: dict) -> dict:
         talks = report.get("talkCommands", 0)
         if talks <= 0 and ctx.get("bot_messages", 0) <= 0:
             reasons.append("no talk commands and no bot replies")
+    elif scenario == "S6":
+        reasons.extend(s6_reasons(report, ctx))
     elif scenario == "S-pool":
         reasons.extend(queue_bounds(report))
         delta_rejected = report.get("pool", {}).get("rejectedDelta", 0)
@@ -438,6 +445,81 @@ def common_reasons(report: dict, ctx: dict) -> list[str]:
     if ctx.get("oom"):
         reasons.append("OutOfMemoryError")
     return reasons
+
+
+def s6_reasons(report: dict, ctx: dict) -> list[str]:
+    """Quota run. The cap is spent tokens, not the first temporary refusal."""
+    reasons = []
+    delta = None
+    baseline = ctx.get("baseline_mean")
+    mean = report.get("mspt", {}).get("mean", 0.0)
+    if baseline is not None:
+        delta = mean - baseline
+    reasons.extend(load_budget(delta, report, 2.0))
+    p99 = report.get("callNanos", {}).get("p99", 10**12)
+    if p99 > 200_000:
+        reasons.append(f"call p99 {p99} ns > 200 µs")
+    if int(report.get("quotaDenied") or 0) <= 0:
+        reasons.append("quota was never denied")
+    if int(report.get("futuresOpen") or 0) != 0:
+        reasons.append("generate futures still open")
+    if not report.get("drain", {}).get("settled", False):
+        reasons.append("futures still running 30s after stop")
+    limit = int(report.get("quotaLimit") or 0)
+    spent = int(report.get("tokensSpent") or 0)
+    reserved = int(report.get("reservedInFlight") or 0)
+    if limit <= 0:
+        reasons.append("quota limit was not set")
+    overshoot = max(0, spent - limit)
+    if overshoot > reserved:
+        reasons.append(f"token overshoot {overshoot} > in-flight reservation {reserved}")
+    seconds = int(ctx.get("seconds") or 120)
+    offset = report.get("quotaExhaustedOffsetMillis")
+    low = int(seconds * 1000 * 0.25)
+    high = int(seconds * 1000 * 0.75)
+    if not isinstance(offset, (int, float)) or offset < low or offset > high:
+        reasons.append(f"quota exhaustion offset {offset} ms is outside {low}..{high}")
+    exhausted = int(report.get("quotaExhaustedEpochMillis") or 0)
+    latency = int(ctx.get("mock_latency_ms") or 300) / 1000.0
+    if exhausted <= 0:
+        reasons.append("quota exhaustion time was not recorded")
+    else:
+        deadline = exhausted / 1000.0 + latency + 1.0
+        late = [stamp for stamp in (ctx.get("mock_timestamps") or []) if float(stamp) > deadline]
+        if late:
+            reasons.append(f"mock requests after quota exhaustion: {len(late)}")
+    try:
+        parse_token_usage(ctx.get("token_usage") if isinstance(ctx.get("token_usage"), str) else "")
+    except ValueError as error:
+        reasons.append(f"token-usage.yml {error}")
+    return reasons
+
+
+def parse_token_usage(text: str) -> dict:
+    """Top-level `format` and `day` from token-usage.yml. No YAML parser."""
+    if text is None or not str(text).strip():
+        raise ValueError("missing")
+    if "\t" in text:
+        raise ValueError("contains a tab")
+    fields = {}
+    for line in text.splitlines():
+        if not line or line[0] in " \t#-" or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip().strip('"').strip("'")
+    if fields.get("format") != "1":
+        raise ValueError("format")
+    day = fields.get("day", "")
+    if len(day) != 10 or day[4] != "-" or day[7] != "-":
+        raise ValueError("day")
+    return fields
+
+
+def read_token_usage(work: Path) -> str:
+    path = work / "plugins" / "NexusAI" / "token-usage.yml"
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8")
 
 
 def load_budget(delta, report, limit: float) -> list[str]:
@@ -575,13 +657,43 @@ def mock_window(path: Path, started: float, ended: float) -> tuple[list[str], li
     return bodies, stamps
 
 
+# Unique S6 text is 44 characters (11 estimated prompt tokens) plus the reply "pong"
+# (1 token). 50 calls/s and one unique call in five is 10 unique calls/s. 600 of those
+# is 7200 tokens, about 60s into the 120s window. The shared template's first call adds
+# a few tokens on top. A 0 cap is not a cap.
+S6_CONSUMER_TOKENS = 7200
+
+
 def high_limits() -> dict:
-    return {"minute": 100000, "day": 100000, "player_minute": 100000, "player_day": 100000}
+    return {
+        "minute": 100000,
+        "day": 100000,
+        "player_minute": 100000,
+        "player_day": 100000,
+        "quotas_enabled": False,
+        "consumer_tokens": 0,
+    }
 
 
 def limits_for(scenario: str) -> dict:
     if scenario == "S3":
-        return {"minute": 30, "day": 1000, "player_minute": 10, "player_day": 200}
+        return {
+            "minute": 30,
+            "day": 1000,
+            "player_minute": 10,
+            "player_day": 200,
+            "quotas_enabled": False,
+            "consumer_tokens": 0,
+        }
+    if scenario == "S1-keywords":
+        limits = high_limits()
+        limits["quotas_enabled"] = True
+        return limits
+    if scenario == "S6":
+        limits = high_limits()
+        limits["quotas_enabled"] = True
+        limits["consumer_tokens"] = S6_CONSUMER_TOKENS
+        return limits
     return high_limits()
 
 
@@ -597,17 +709,20 @@ def rate_for(scenario: str) -> int:
     return {
         "baseline": 0,
         "S1": 1000,
+        "S1-keywords": 1000,
         "S2": 10,
         "S2-over": 50,
+        "S2-probe": 10,
         "S3": 200,
         "S4": 40,
         "S5": 0,
+        "S6": 50,
         "S-pool": 0,
     }[scenario]
 
 
 def viewers_for(args, scenario: str) -> int:
-    if scenario == "S1":
+    if scenario in {"S1", "S1-keywords"}:
         return 100
     if scenario in {"S4", "S5"}:
         return max(1, args.bots)
@@ -626,6 +741,8 @@ def write_load_config(path: Path, mock_port: int, limits: dict) -> None:
             "  model: load-model",
             f'  base-url: "{url}"',
             f'  key: "{CANARY}"',
+            '  system-prompt: ""',
+            "  max-tokens: 256",
             "providers:",
             "  openai:",
             "    type: openai-compatible",
@@ -665,6 +782,13 @@ def write_load_config(path: Path, mock_port: int, limits: dict) -> None:
             "    max-tokens: 80",
             "context:",
             "  enabled: true",
+            "quotas:",
+            f"  enabled: {'true' if limits['quotas_enabled'] else 'false'}",
+            "  missing-usage: estimate",
+            "  consumers:",
+            "    default:",
+            f"      tokens-per-day: {limits['consumer_tokens']}",
+            "      requests-per-day: 0",
             'fallback: "..."',
             "",
         ]),
@@ -686,6 +810,13 @@ def write_prompts(path: Path) -> None:
             "  context: all",
             "  ttl: 60",
             '  fallback: "..."',
+            "load_kw:",
+            '  prompt: "Reply with the single word pong."',
+            "  knowledge:",
+            "    - rules",
+            "  knowledge-select: keywords",
+            "  ttl: 600",
+            '  fallback: "..."',
             "harbor:",
             '  prompt: "You are Harbor, a dock clerk. Answer in one short sentence."',
             "  format: chat",
@@ -693,6 +824,19 @@ def write_prompts(path: Path) -> None:
             "  dialogue:",
             '    greeting: "The tide is in."',
             "    max-replies: 80",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def write_knowledge(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join([
+            "# Rules",
+            "",
+            "Reply with the single word pong when the load prompt asks for it.",
             "",
         ]),
         encoding="utf-8",
@@ -1117,6 +1261,38 @@ def self_check() -> int:
     skipped["error"] = "S4 needs online players"
     if judge("S4", skipped, ctx)["status"] != "not-run":
         raise SystemExit("skipped S4 should be not-run")
+    if judge("S1-keywords", base, ctx)["status"] != "pass":
+        raise SystemExit(judge("S1-keywords", base, ctx))
+    if judge("S2-probe", base, noisy)["status"] != "pass":
+        raise SystemExit(f"S2-probe should pass the small JFR recording: {judge('S2-probe', base, noisy)}")
+    s6 = dict(base)
+    s6["quotaDenied"] = 4
+    s6["futuresOpen"] = 0
+    s6["tokensSpent"] = 7236
+    s6["quotaLimit"] = 7200
+    s6["reservedInFlight"] = 801
+    s6["quotaExhaustedOffsetMillis"] = 60000
+    s6["quotaExhaustedEpochMillis"] = 1_000_000
+    s6_ctx = dict(ctx)
+    s6_ctx["seconds"] = 120
+    s6_ctx["mock_latency_ms"] = 300
+    s6_ctx["mock_timestamps"] = [999.0]
+    s6_ctx["token_usage"] = 'format: 1\nday: "2026-10-08"\nserver:\n  requests: 1\n'
+    if judge("S6", s6, s6_ctx)["status"] != "pass":
+        raise SystemExit(judge("S6", s6, s6_ctx))
+    late = dict(s6_ctx)
+    late["mock_timestamps"] = [1002.0]
+    if judge("S6", s6, late)["status"] != "fail":
+        raise SystemExit("S6 should fail a mock stamp after the latency slack")
+    over = dict(s6)
+    over["tokensSpent"] = 9000
+    over["reservedInFlight"] = 100
+    if judge("S6", over, s6_ctx)["status"] != "fail":
+        raise SystemExit("S6 should fail when spend passes the in-flight reservation")
+    early = dict(s6)
+    early["quotaExhaustedOffsetMillis"] = 10000
+    if judge("S6", early, s6_ctx)["status"] != "fail":
+        raise SystemExit("S6 should fail when the cap is hit outside the middle of the window")
     print("SELF-CHECK OK")
     return 0
 

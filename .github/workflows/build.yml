@@ -146,7 +146,7 @@ jobs:
           MC_VERSION: ${{ matrix.mc }}
           PLUGIN_DIR: dist
           DRIVER_DIR: driver
-        run: python3 .github/scripts/paper-load.py --version "$MC_VERSION" --plugins-dir dist --driver-dir driver --scenario S1,S2,S3,S-pool --out load-out
+        run: python3 .github/scripts/paper-load.py --version "$MC_VERSION" --plugins-dir dist --driver-dir driver --scenario S1,S1-keywords,S2,S2-probe,S3,S6,S-pool --out load-out
       - uses: actions/upload-artifact@v4
         if: always()
         with:

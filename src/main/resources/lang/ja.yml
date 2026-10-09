@@ -38,6 +38,8 @@ command:
   status-last-error: "&7最後のエラー: &f{last_error}"
   status-provider-pause: "&7プロバイダー一時停止: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7モデルキュー:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7モデレーション: &f{state} &8(本日の検査 {checks}、フラグ {flags})"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &f今日のトークン使用量を表示"

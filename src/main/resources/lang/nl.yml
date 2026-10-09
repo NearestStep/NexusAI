@@ -38,6 +38,8 @@ command:
   status-last-error: "&7Laatste fout: &f{last_error}"
   status-provider-pause: "&7Providerpauze: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7Modelwachtrij:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderatie: &f{state} &8({checks} controles, {flags} meldingen vandaag)"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &fHet tokengebruik van vandaag tonen"

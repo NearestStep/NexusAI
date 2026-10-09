@@ -38,6 +38,8 @@ command:
   status-last-error: "&7Остання помилка: &f{last_error}"
   status-provider-pause: "&7Пауза провайдера: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7Черга моделей:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Модерація: &f{state} &8(перевірок сьогодні: {checks}, спрацювань: {flags})"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &fПоказати витрати токенів за сьогодні"

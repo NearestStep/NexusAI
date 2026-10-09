@@ -38,6 +38,8 @@ command:
   status-last-error: "&7最近错误：&f{last_error}"
   status-provider-pause: "&7提供商暂停：&f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7模型队列："
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7审核: &f{state} &8(今日检查 {checks}，标记 {flags})"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &f显示今日令牌用量"

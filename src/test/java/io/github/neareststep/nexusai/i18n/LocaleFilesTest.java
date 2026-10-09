@@ -37,6 +37,8 @@ class LocaleFilesTest {
             "command.status-last-error",
             "command.status-provider-pause",
             "command.status-queue-strategy",
+            "command.status-queue-header",
+            "command.status-queue-line",
             "command.status-moderation",
             "command.status-dialogue-summary",
             "command.help-usage",
@@ -113,6 +115,11 @@ class LocaleFilesTest {
             assertTrue(yaml.getString("command.status-tokens").contains("{tokens}"), file.getFileName() + " {tokens}");
             assertTrue(yaml.getString("command.status-tokens").contains("{detail}"), file.getFileName() + " {detail}");
             assertTrue(yaml.getString("command.status-quotas").contains("{state}"), file.getFileName() + " {state}");
+            assertTrue(yaml.getString("command.status-queue-line").contains("{entry}"), file.getFileName() + " {entry}");
+            if (!file.getFileName().toString().equals("en.yml")) {
+                assertFalse(yaml.getString("command.status-queue-header").contains("Model queue"),
+                        file.getFileName() + " status-queue-header still English");
+            }
             assertTrue(yaml.getString("command.usage-limit-suffix").contains("{limit}"), file.getFileName() + " {limit}");
             assertTrue(yaml.getString("command.usage-estimated-suffix").contains("{percent}"), file.getFileName() + " {percent}");
             String usageServer = yaml.getString("command.usage-server");

@@ -92,7 +92,7 @@ The stack trace is only at FINE. Re-save the file as UTF-8 and run `/nai reload`
 | Token | Where it is filled |
 |-------|--------------------|
 | `{player}`, `{world}`, `{biome}`, `{time}`, `{weather}` | By NexusAI, without PlaceholderAPI. `{time}` is `morning`, `day`, `evening`, or `night` |
-| `%placeholder%` inside a prompt `vars:` value | PlaceholderAPI, for the player who is looking |
+| `%placeholder%` inside a prompt `vars:` value | PlaceholderAPI, on the thread that owns that player |
 | `{token}` left in a pooled answer | On delivery of `%ainexus_generate_...%`, from that pool entry's `vars` |
 
 NexusAI does not run PlaceholderAPI over the model reply. A reply that contains the literal `%player_name%` stays that way. Ask the model to leave `{player_name}`, and set the pool entry:
@@ -103,6 +103,10 @@ vars:
 ```
 
 The placeholder argument must match `pool.entries[].prompt` (the id or the literal text). A worked pair is [examples/placeholders](../examples/placeholders/README.md).
+
+A placeholder read that does not own the player returns an empty string for a `vars:` value that contains `%`. On Paper that is a read off the main thread, such as a scoreboard or another plugin's async task. The synchronous call does not wait for a scheduler hop, so that immediate result can show the brace token with nothing filled in. The cached or background answer is resolved on the owning thread. Pool refill does the same hop before it stores a value. `generate` and `/nai talk` read after an ownership check, or after a hop onto the player's scheduler when the caller does not already own the player.
+
+NexusAI calls a foreign PlaceholderAPI expansion from `vars:` only on the thread that owns the player. What that expansion does after the call is up to its author. NexusAI does not make a third-party expansion safe on Folia.
 
 `%ainexus_cached_%` shares one answer among players when the prompt has no player-specific vars. `%ainexus_generate_%` removes one pooled answer. A prompt id that is missing from `prompts.yml` is sent as literal text.
 
@@ -189,13 +193,25 @@ The default is **false**. MiniMessage click and hover tags, hex colours, and JSO
 
 ## Java, Paper, and Folia
 
-One jar runs on Paper and Purpur **1.20.6 through 26.2**, Java **21** or newer. It is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. Folia is not supported (`folia-supported: false`). Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. The jar is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. `plugin.yml` sets `folia-supported: true`.
+
+Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
+
+Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+
+On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency stays PlaceholderAPI 2.11.6.
+
+Call `NexusAIApi.generate` and `generateJson` from any thread. Do not join the future on the main thread or a region thread. The future completes on a NexusAI thread. To touch the world from the callback, schedule that work: the player's scheduler for that player, or the global region scheduler when there is no player. On Paper both of those are the main thread. Player state for a request (world, biome, permission groups for quotas, and `%` values in `vars:`) is read on the thread that owns the player. A foreign PlaceholderAPI expansion used from `vars:` is called on that same thread. After that call, the expansion's own thread rules apply. NexusAI does not make a third-party expansion safe on Folia.
+
+CI smoke boots those four Folia versions with PlaceholderAPI 2.12.3 and checks startup, `/nai status`, `/nai test`, `/nai usage`, and that the log has no region-thread error. A manual in-game check on Folia is separate and is not recorded here.
 
 ## Will an upgrade overwrite my config?
 
 Valid `config.yml` keeps the values and comments you wrote. Missing default keys are appended. The log says `Added missing config keys: …`. Before that write, NexusAI copies the file to `<file>.bak`, or `<file>.bak.<timestamp>` when that backup already exists. One startup writes one backup of `config.yml`. `config-version` for a current file is 2.
 
 From 1.0.x to 1.1.0 the appended keys are `model-queue-strategy`, `context.*`, `dialogue.summary.*`, `http.max-in-flight`, and `http.queue-size`. Both HTTP keys are appended as `64`. A `0` or a negative value on either key is treated as 64. Nothing you already set is rewritten. Details and rollback: [Migration to 1.1.0](migration-1.1.0.md).
+
+1.2.0 keeps `config-version` at 2 and appends `plugin-api.*`, `quotas.*` (with `enabled: false`), `knowledge.select`, and `knowledge.keywords.*`. Quotas and keyword selection stay off until you turn them on. Details: [Migration to 1.2.0](migration-1.2.0.md).
 
 If `config.yml` is not valid YAML, startup and `/nai reload` leave the file as it is. Reload reports the failure and keeps the configuration already in memory.
 

@@ -38,6 +38,8 @@ command:
   status-last-error: "&7Letzter Fehler: &f{last_error}"
   status-provider-pause: "&7Anbieter-Pause: &f{provider_pause}"
   status-queue-strategy: "&7Model queue strategy: &f{strategy}"
+  status-queue-header: "&7Modellwarteschlange:"
+  status-queue-line: "&7- &f{entry}"
   status-moderation: "&7Moderation: &f{state} &8({checks} Prüfungen, {flags} Treffer heute)"
   status-dialogue-summary: "&7Dialogue summaries: &f{summary}"
   help-usage: "&7/nai usage [players|consumers|history] &8- &fHeutigen Tokenverbrauch anzeigen"

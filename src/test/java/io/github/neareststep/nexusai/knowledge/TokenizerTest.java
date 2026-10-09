@@ -2,6 +2,10 @@ package io.github.neareststep.nexusai.knowledge;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,6 +26,24 @@ class TokenizerTest {
         assertTrue(tokenizer.stop("dock"));
         assertFalse(tokenizer.tokens("dock fee").contains("dock"));
         assertEquals(List.of("the", "rules"), tokenizer.tokensKeepingStops("the rules"));
+    }
+
+    @Test
+    void russianStopListIsUniqueAndInCodePointOrder() throws Exception {
+        List<String> words = new ArrayList<>();
+        for (String line : Files.readAllLines(Path.of("src/main/resources/knowledge/stopwords-ru.txt"))) {
+            String word = line.trim();
+            if (!word.isEmpty()) {
+                words.add(word);
+            }
+        }
+        assertEquals(308, words.size());
+        assertEquals(words.size(), new HashSet<>(words).size());
+        List<String> sorted = new ArrayList<>(words);
+        sorted.sort(String::compareTo);
+        assertEquals(sorted, words);
+        assertTrue(words.indexOf("всего") < words.indexOf("всём"));
+        assertTrue(words.indexOf("ей") < words.indexOf("её"));
     }
 
     @Test
