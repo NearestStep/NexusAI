@@ -85,6 +85,18 @@ public final class MemoryStore {
      */
     static volatile Runnable beforeReplace;
 
+    /**
+     * Runs on the loader thread when a masked file is about to be rewritten, before any temporary
+     * file is created. Tests hold that rewrite here. A null hook is the production path.
+     */
+    static volatile Runnable beforeLoaderRewrite;
+
+    /**
+     * Runs on the stop thread after the unsaved-character count is taken and before stop waits.
+     * Tests add characters here. A null hook is the production path.
+     */
+    static volatile Runnable afterStopCount;
+
     /** When set, the next stop rename fails and the temporary file is removed. */
     static volatile boolean failNextPublish;
 
@@ -123,10 +135,14 @@ public final class MemoryStore {
     /** Held around a load's file mutation and around a shutdown merge, so the two cannot overlap. */
     final Object publishGate = new Object();
     /**
-     * Set when shutdown has already published a merged file. The in-flight load must not rewrite
-     * or quarantine over that file.
+     * Set when shutdown has already published a merged file, or when stop gave up on the budget.
+     * The in-flight load must not rewrite or quarantine over that file. A give-up sets this without
+     * waiting for a serialization that is already running; the rename checks it under {@link #publishGate}.
      */
     volatile boolean loaderMustNotPublish;
+
+    /** Characters in memory when this stop began. {@code -1} when stop is not running. */
+    private volatile int stopUnsavedCount = -1;
 
     @FunctionalInterface
     interface CorruptMove {
@@ -456,29 +472,42 @@ public final class MemoryStore {
     }
 
     private static boolean rewrite(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets, MemoryStore store) {
-        if (store == null) {
-            return rewriteUnlocked(file, yaml, logger, secrets);
+        Runnable hook = beforeLoaderRewrite;
+        if (store != null && hook != null) {
+            hook.run();
         }
-        synchronized (store.publishGate) {
-            if (store.loaderMustNotPublish) {
-                return false;
-            }
-            return rewriteUnlocked(file, yaml, logger, secrets);
+        if (store != null && store.loaderMustNotPublish) {
+            return false;
         }
-    }
-
-    private static boolean rewriteUnlocked(File file, YamlConfiguration yaml, Logger logger, Iterable<String> secrets) {
+        allowLongSimpleKeys(yaml);
+        String body = yaml.saveToString();
+        if (store != null && store.loaderMustNotPublish) {
+            return false;
+        }
         File parent = file.getParentFile();
         File temporary = new File(parent == null ? new File(".") : parent,
                 file.getName() + "." + UUID.randomUUID() + ".tmp");
         try {
+            if (store != null && store.loaderMustNotPublish) {
+                return false;
+            }
             if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
                 return false;
             }
             AtomicFiles.createPrivate(temporary.toPath());
-            allowLongSimpleKeys(yaml);
-            yaml.save(temporary);
-            durableReplace(temporary.toPath(), file.toPath());
+            if (writeBody(temporary.toPath(), body, store, Long.MAX_VALUE) != BodyWrite.WROTE) {
+                return false;
+            }
+            if (store == null) {
+                durableReplace(temporary.toPath(), file.toPath());
+            } else {
+                synchronized (store.publishGate) {
+                    if (store.loaderMustNotPublish) {
+                        return false;
+                    }
+                    durableReplace(temporary.toPath(), file.toPath());
+                }
+            }
             // The file just held a key. Do not keep a group- or world-readable mode.
             AtomicFiles.restrictOwnerReadWrite(file.toPath());
             return true;
@@ -598,15 +627,23 @@ public final class MemoryStore {
                     return WriteResult.FAILED;
                 }
             }
+            String body;
+            if (containsForcedQuote(yaml)) {
+                body = dumpDocument(configurationMap(yaml));
+            } else {
+                allowLongSimpleKeys(yaml);
+                body = yaml.saveToString();
+            }
+            if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+                return WriteResult.PAST_DEADLINE;
+            }
             File temporary = new File(parent == null ? new File(".") : parent,
                     file.getName() + "." + UUID.randomUUID() + ".tmp");
             try {
             AtomicFiles.createPrivate(temporary.toPath());
-            if (containsForcedQuote(yaml)) {
-                Files.writeString(temporary.toPath(), dumpDocument(configurationMap(yaml)), StandardCharsets.UTF_8);
-            } else {
-                allowLongSimpleKeys(yaml);
-                yaml.save(temporary);
+            BodyWrite wrote = writeBody(temporary.toPath(), body, null, deadlineNanos);
+            if (wrote == BodyWrite.PAST_DEADLINE) {
+                return WriteResult.PAST_DEADLINE;
             }
             WriteResult gate = gateReplace(deadlineNanos);
             if (gate != WriteResult.PUBLISHED) {
@@ -653,11 +690,11 @@ public final class MemoryStore {
      * <p>
      * When {@code prepared} is set, it is the scan stop started. Stop waits for it only until
      * {@code deadlineNanos}. A scan that cannot splice a file does not read that file again when
-     * a load of it is already running; the caller waits for that load instead. A direct call, with
-     * no live load, may still rewrite a readable file the scan cannot splice. A scan that is still
-     * running, that crashed, or that cannot read the file does not publish, and one warning names
-     * how many characters were not saved and why. The deadline also covers the write: a rename is
-     * not started after it has passed.
+     * a load of it is already running; the caller waits for that load instead. Tests in this
+     * package call this directly when no load is running. A scan that is still running, that
+     * crashed, or that cannot read the file does not publish, and one warning names how many
+     * characters were not saved and why. The deadline also covers the write: a rename is not
+     * started after it has passed.
      *
      * @return {@code true} when a merged file was published
      */
@@ -745,6 +782,9 @@ public final class MemoryStore {
             return LiveSplice.WAIT_FOR_LOAD;
         }
         warnFor(kind, logger, summaries);
+        if (kind == PreparedKind.BUDGET) {
+            return LiveSplice.GAVE_UP;
+        }
         return LiveSplice.DONE;
     }
 
@@ -787,6 +827,7 @@ public final class MemoryStore {
             case PUBLISHED -> PreparedKind.PUBLISHED;
             case NOTHING -> PreparedKind.NOTHING;
             case PAST_DEADLINE -> PreparedKind.BUDGET;
+            case NOT_WRITTEN -> PreparedKind.UNWRITTEN;
             case FAILED -> PreparedKind.REFUSED;
         };
     }
@@ -800,7 +841,7 @@ public final class MemoryStore {
             case PUBLISHED, NOTHING, REFUSED -> null;
         };
         if (reason != null) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
+            warnUnsaved(logger, countForWarning(summaries), reason);
         }
     }
 
@@ -811,7 +852,33 @@ public final class MemoryStore {
             case UNREADABLE -> SkipReason.UNREADABLE;
             case UNWRITTEN -> SkipReason.UNWRITTEN;
         };
-        warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
+        warnUnsaved(logger, countForWarning(summaries), reason);
+    }
+
+    /** Stop gave up. The load that is still running must not mask or rename the file. */
+    void forbidLoaderPublish() {
+        loaderMustNotPublish = true;
+    }
+
+    /** Characters that were only in memory when stop began. Later loads do not change the warning. */
+    void beginStopCount(boolean summaries) {
+        stopUnsavedCount = unsavedCharacterCount(summaries);
+        Runnable hook = afterStopCount;
+        if (hook != null) {
+            hook.run();
+        }
+    }
+
+    void endStopCount() {
+        stopUnsavedCount = -1;
+    }
+
+    private int countForWarning(boolean summaries) {
+        int frozen = stopUnsavedCount;
+        if (frozen >= 0) {
+            return frozen;
+        }
+        return unsavedCharacterCount(summaries);
     }
 
     /**
@@ -871,12 +938,12 @@ public final class MemoryStore {
         return switch (wrote) {
             case PUBLISHED -> SpliceResult.PUBLISHED;
             case PAST_DEADLINE -> SpliceResult.PAST_DEADLINE;
-            case FAILED -> SpliceResult.FAILED;
+            case FAILED -> SpliceResult.NOT_WRITTEN;
         };
     }
 
     private enum SpliceResult {
-        NOTHING, PUBLISHED, FAILED, PAST_DEADLINE
+        NOTHING, PUBLISHED, FAILED, PAST_DEADLINE, NOT_WRITTEN
     }
 
     /**
@@ -997,7 +1064,7 @@ public final class MemoryStore {
     }
 
     enum LiveSplice {
-        DONE, WAIT_FOR_LOAD
+        DONE, WAIT_FOR_LOAD, GAVE_UP
     }
 
     private enum PreparedKind {
@@ -1883,13 +1950,15 @@ public final class MemoryStore {
                 return WriteResult.FAILED;
             }
             AtomicFiles.createPrivate(temporary.toPath());
-            writeMerged(temporary.toPath(), text, edits);
+            writeMerged(temporary.toPath(), text, edits, deadlineNanos);
             WriteResult gate = gateReplace(deadlineNanos);
             if (gate != WriteResult.PUBLISHED) {
                 return gate;
             }
             durableReplace(temporary.toPath(), file.toPath());
             return WriteResult.PUBLISHED;
+        } catch (PastDeadline ignored) {
+            return WriteResult.PAST_DEADLINE;
         } catch (IOException e) {
             if (logger != null) {
                 LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
@@ -1905,9 +1974,10 @@ public final class MemoryStore {
     /**
      * Copies {@code text} and applies {@code edits} without building a second copy of the file.
      * Unchanged characters are written through one buffer. The caller syncs the temporary file
-     * and renames it.
+     * and renames it. A deadline that passes mid-copy stops the copy and does not rename.
      */
-    private static void writeMerged(Path temporary, String text, List<TextEdit> edits) throws IOException {
+    private static void writeMerged(Path temporary, String text, List<TextEdit> edits, long deadlineNanos)
+            throws IOException {
         List<TextEdit> ordered = new ArrayList<>(edits);
         ordered.sort((left, right) -> {
             int byIndex = Integer.compare(left.at, right.at);
@@ -1927,7 +1997,7 @@ public final class MemoryStore {
                 if (end > text.length()) {
                     throw new IOException("dialogue-memory edit is out of range");
                 }
-                writer.write(text, copied, edit.at - copied);
+                writeRange(writer, text, copied, edit.at - copied, deadlineNanos);
                 copied = end;
                 String block = edit.text == null ? "" : edit.text;
                 if (block.isEmpty()) {
@@ -1944,13 +2014,69 @@ public final class MemoryStore {
                         block = block + nl;
                     }
                 }
-                writer.write(block);
+                writeRange(writer, block, 0, block.length(), deadlineNanos);
                 lastAt = edit.at;
             }
             if (copied > text.length()) {
                 throw new IOException("dialogue-memory edit is out of range");
             }
-            writer.write(text, copied, text.length() - copied);
+            writeRange(writer, text, copied, text.length() - copied, deadlineNanos);
+        }
+    }
+
+    private enum BodyWrite {
+        WROTE, FORBIDDEN, PAST_DEADLINE
+    }
+
+    /**
+     * Writes {@code body} in chunks. A loader that stop has told not to publish stops without
+     * renaming. A deadline that has passed stops without logging a save failure.
+     */
+    private static BodyWrite writeBody(Path path, String body, MemoryStore store, long deadlineNanos)
+            throws IOException {
+        try (Writer writer = new OutputStreamWriter(
+                new BufferedOutputStream(Files.newOutputStream(path)),
+                StandardCharsets.UTF_8)) {
+            int offset = 0;
+            while (offset < body.length()) {
+                if (store != null && store.loaderMustNotPublish) {
+                    return BodyWrite.FORBIDDEN;
+                }
+                if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+                    return BodyWrite.PAST_DEADLINE;
+                }
+                int end = Math.min(body.length(), offset + 65_536);
+                writer.write(body, offset, end - offset);
+                offset = end;
+            }
+        }
+        if (store != null && store.loaderMustNotPublish) {
+            return BodyWrite.FORBIDDEN;
+        }
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return BodyWrite.PAST_DEADLINE;
+        }
+        return BodyWrite.WROTE;
+    }
+
+    private static void writeRange(Writer writer, String text, int offset, int length, long deadlineNanos)
+            throws IOException {
+        int end = offset + length;
+        int at = offset;
+        while (at < end) {
+            if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+                throw new PastDeadline();
+            }
+            int next = Math.min(end, at + 65_536);
+            writer.write(text, at, next - at);
+            at = next;
+        }
+    }
+
+    /** The stop budget ended while a temporary file was being filled. Not a failed save. */
+    private static final class PastDeadline extends IOException {
+        private PastDeadline() {
+            super("dialogue-memory write passed the stop budget");
         }
     }
 

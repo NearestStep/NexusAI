@@ -168,15 +168,20 @@ final class DialogueMemoryPersistence {
      * cannot splice is not read again while the load is still running: stop waits for that load
      * until the budget ends and, when the load finishes in time, writes the memory it already
      * loaded. The budget includes that write. Stop does not start a write, and does not rename,
-     * after the budget has ended. If the scan is not finished, the scan failed, the file cannot
-     * be read, or the file cannot be written, stop does not replace the file and one warning
-     * names how many characters were not saved and why. A scan that crashes is not described as
-     * the budget. Stop does not also log that saves are paused.
+     * after the budget has ended. When stop gives up on that budget, the load that is still
+     * running does not mask or rename the file afterward. If the scan is not finished, the scan
+     * failed, the file cannot be read, or the file cannot be written, stop does not replace the
+     * file and one warning names how many characters were not saved and why. That count is taken
+     * when stop begins. A scan that crashes is not described as the budget. A splice that cannot
+     * be written is not described as the budget and is not waited out. Stop does not also log
+     * that saves are paused.
      */
     void shutdown() {
+        boolean summaries = summaries();
         Thread pending;
         MemoryStore.AbsentScan scan;
         try {
+            memory.beginStopCount(summaries);
             synchronized (this) {
                 pending = diskLoader;
                 scan = absentScan;
@@ -202,13 +207,14 @@ final class DialogueMemoryPersistence {
                 pending = diskLoader;
             }
             if (pending != null && pending.isAlive()) {
-                boolean summaries = summaries();
                 long deadline = System.nanoTime()
                         + Math.max(0L, shutdownAppendBudgetMillis) * 1_000_000L;
                 MemoryStore.LiveSplice splice = memory.spliceForStop(
                         file.get(), logger, summaries, secretList(), scan, deadline);
                 if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
                     awaitLoaderAndSave(pending, deadline, summaries);
+                } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
+                    memory.forbidLoaderPublish();
                 }
                 return;
             }
@@ -216,6 +222,7 @@ final class DialogueMemoryPersistence {
         } catch (Throwable thrown) {
             logSkipped(thrown);
         } finally {
+            memory.endStopCount();
             MemoryStore.AbsentScan started;
             synchronized (this) {
                 started = absentScan;
@@ -261,6 +268,7 @@ final class DialogueMemoryPersistence {
     }
 
     private void abandonLoad(Thread pending) {
+        memory.forbidLoaderPublish();
         MemoryStore.abandonActiveLoad = true;
         pending.interrupt();
         try {
