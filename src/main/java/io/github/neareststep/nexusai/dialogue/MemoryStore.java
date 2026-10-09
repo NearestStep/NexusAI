@@ -7,9 +7,12 @@ import io.github.neareststep.nexusai.config.SecretMask;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.representer.Representer;
 import org.yaml.snakeyaml.events.MappingStartEvent;
 import org.yaml.snakeyaml.events.ScalarEvent;
 
@@ -519,9 +522,9 @@ public final class MemoryStore {
             File temporary = new File(parent == null ? new File(".") : parent,
                     file.getName() + "." + UUID.randomUUID() + ".tmp");
             try {
-                AtomicFiles.createPrivate(temporary.toPath());
-                yaml.save(temporary);
-                publish.publish(temporary, file);
+            AtomicFiles.createPrivate(temporary.toPath());
+            Files.writeString(temporary.toPath(), dumpDocument(configurationMap(yaml)), StandardCharsets.UTF_8);
+            publish.publish(temporary, file);
             } finally {
                 if (temporary.isFile() && !temporary.equals(file)) {
                     temporary.delete();
@@ -544,9 +547,9 @@ public final class MemoryStore {
      * Existing character ids come from {@code prepared} when that scan still matches the file, and
      * otherwise from a scan started here. Only the missing characters are inserted. The bytes
      * already in the file are copied unchanged into a temporary file, which replaces {@code file}
-     * after it has been flushed. If that scan cannot read the file, the whole document is loaded
-     * and the missing characters are still appended. If the file still cannot be read, one warning
-     * names how many characters were not saved.
+     * after that temporary file has been synced to disk. If that scan cannot read the file, the
+     * whole document is loaded and the missing characters are still appended. If the file still
+     * cannot be read, one warning names how many characters were not saved.
      *
      * @return {@code true} when a merged file was published
      */
@@ -892,7 +895,11 @@ public final class MemoryStore {
             }
             int at = cutPoint(text, outline, raw);
             int indent = outline.characterIndent.getOrDefault(player.getKey(), outline.playerIndent + 2);
-            edits.add(new TextEdit(at, 0, 1, characterTexts(player.getValue(), summaries, indent, nl), true));
+            String texts = characterTexts(player.getValue(), summaries, indent, nl);
+            if (texts == null) {
+                return null;
+            }
+            edits.add(new TextEdit(at, 0, 1, texts, true));
         }
         if (!newcomers.isEmpty()) {
             Map<String, List<Map.Entry<String, StoredTranscript>>> fresh = new LinkedHashMap<>();
@@ -910,8 +917,13 @@ public final class MemoryStore {
                 block.append("entries:").append(nl);
             }
             for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : fresh.entrySet()) {
-                block.append(" ".repeat(playerIndent)).append(yamlKey(player.getKey())).append(':').append(nl);
-                block.append(characterTexts(player.getValue(), summaries, characterIndent, nl));
+                String playerKey = yamlKey(player.getKey());
+                String texts = characterTexts(player.getValue(), summaries, characterIndent, nl);
+                if (playerKey == null || texts == null) {
+                    return null;
+                }
+                block.append(" ".repeat(playerIndent)).append(playerKey).append(':').append(nl);
+                block.append(texts);
             }
             if (outline.sawEntries && outline.entriesEnd < 0) {
                 return null;
@@ -978,8 +990,12 @@ public final class MemoryStore {
         StringBuilder block = new StringBuilder();
         for (Map.Entry<String, StoredTranscript> one : characters) {
             String character = one.getKey().split("\u0000", 2)[1];
-            block.append(String.join(nl, characterBlock(character, one.getValue(), summaries, indent)));
-            if (!block.isEmpty() && block.charAt(block.length() - 1) != '\n') {
+            String text = characterBlock(character, one.getValue(), summaries, indent, nl);
+            if (text == null) {
+                return null;
+            }
+            block.append(text);
+            if (!block.isEmpty() && block.charAt(block.length() - 1) != '\n' && block.charAt(block.length() - 1) != '\r') {
                 block.append(nl);
             }
         }
@@ -1056,10 +1072,14 @@ public final class MemoryStore {
         }
     }
 
-    private static List<String> characterBlock(
-            String characterId, StoredTranscript transcript, boolean summaries, int indent) {
-        YamlConfiguration yaml = new YamlConfiguration();
-        yaml.set("updated", transcript.updatedAt);
+    /**
+     * One character mapping, or null when the id or the text cannot be written as a block that
+     * loads back as the same id and lines. The caller then appends with a full document.
+     */
+    private static String characterBlock(
+            String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("updated", transcript.updatedAt);
         if (!transcript.lines.isEmpty()) {
             List<Map<String, String>> stored = new ArrayList<>();
             for (TurnMemory.Line line : transcript.lines) {
@@ -1068,23 +1088,181 @@ public final class MemoryStore {
                 row.put("text", line.text());
                 stored.add(row);
             }
-            yaml.set("lines", stored);
+            body.put("lines", stored);
         }
         if (summaries && transcript.summary != null && !transcript.summary.isBlank()) {
-            yaml.set("summary", transcript.summary);
-            yaml.set("summary-updated", transcript.summaryUpdatedAt);
+            body.put("summary", transcript.summary);
+            body.put("summary-updated", transcript.summaryUpdatedAt);
         }
-        String dumped = yaml.saveToString().replace("\r\n", "\n").replace("\r", "\n");
-        List<String> block = new ArrayList<>();
-        block.add(" ".repeat(indent) + yamlKey(characterId) + ":");
-        String pad = " ".repeat(indent + 2);
-        for (String line : dumped.split("\n", -1)) {
-            if (line.isBlank()) {
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put(characterId, body);
+        StringBuilder block = new StringBuilder();
+        appendIndented(block, dumpCharacterBody(wrapped), " ".repeat(indent), nl);
+        String text = block.toString();
+        if (!blockRoundTrips(characterId, transcript, summaries, text)) {
+            return null;
+        }
+        return text;
+    }
+
+    /**
+     * Block mapping whose strings stay strings. A plain scalar is used only when YAML 1.1 would
+     * read it back as that same string. Line breaks and controls are escaped inside double quotes.
+     */
+    private static String dumpDocument(Map<String, Object> document) {
+        DumperOptions options = new DumperOptions();
+        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
+        options.setNonPrintableStyle(DumperOptions.NonPrintableStyle.ESCAPE);
+        Representer representer = new Representer(options) {
+            {
+                representers.put(String.class, data -> {
+                    String value = String.valueOf(data);
+                    DumperOptions.ScalarStyle style = needsQuote(value)
+                            ? DumperOptions.ScalarStyle.DOUBLE_QUOTED : null;
+                    return representScalar(Tag.STR, value, style);
+                });
+            }
+        };
+        return new Yaml(representer, options).dump(document);
+    }
+
+    private static String dumpCharacterBody(Map<String, Object> body) {
+        return dumpDocument(body);
+    }
+
+    private static Map<String, Object> configurationMap(YamlConfiguration yaml) {
+        Map<String, Object> root = new LinkedHashMap<>();
+        for (String key : yaml.getKeys(false)) {
+            root.put(key, plainValue(yaml.get(key)));
+        }
+        return root;
+    }
+
+    private static Object plainValue(Object value) {
+        if (value instanceof ConfigurationSection section) {
+            Map<String, Object> map = new LinkedHashMap<>();
+            for (String key : section.getKeys(false)) {
+                map.put(key, plainValue(section.get(key)));
+            }
+            return map;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                copy.put(String.valueOf(entry.getKey()), plainValue(entry.getValue()));
+            }
+            return copy;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = new ArrayList<>();
+            for (Object one : list) {
+                copy.add(plainValue(one));
+            }
+            return copy;
+        }
+        if (value instanceof byte[] bytes) {
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        return value;
+    }
+
+    /**
+     * The emitter already quotes YAML 1.1 booleans and numbers. These characters would instead
+     * become a line break in the middle of a block scalar, so the following key is no longer a key.
+     */
+    private static boolean needsQuote(String value) {
+        if (value.isEmpty() || "...".equals(value) || "---".equals(value) || ".".equals(value)) {
+            return true;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\u0085' || c == '\u2028' || c == '\u2029') {
+                return true;
+            }
+            if (c < 0x20 && c != '\t') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Indents every physical line of a YAML dump. U+0085, U+2028, and U+2029 stay in place
+     * when the dump emits them raw, and the following line still receives {@code pad}.
+     */
+    private static void appendIndented(StringBuilder block, String dumped, String pad, String nl) {
+        int i = 0;
+        int n = dumped.length();
+        boolean atLineStart = true;
+        while (i < n) {
+            char c = dumped.charAt(i);
+            if (c == '\r' || c == '\n') {
+                int next = i + 1;
+                if (c == '\r' && next < n && dumped.charAt(next) == '\n') {
+                    next++;
+                }
+                if (next < n) {
+                    block.append(nl);
+                    atLineStart = true;
+                }
+                i = next;
                 continue;
             }
-            block.add(pad + line);
+            if (c == '\u0085' || c == '\u2028' || c == '\u2029') {
+                block.append(c);
+                atLineStart = true;
+                i++;
+                continue;
+            }
+            if (atLineStart) {
+                block.append(pad);
+                atLineStart = false;
+            }
+            block.append(c);
+            i++;
         }
-        return block;
+    }
+
+    private static boolean blockRoundTrips(
+            String characterId, StoredTranscript transcript, boolean summaries, String block) {
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.loadFromString(block);
+        } catch (InvalidConfigurationException | RuntimeException e) {
+            return false;
+        }
+        if (!yaml.getKeys(false).contains(characterId)) {
+            return false;
+        }
+        Object updated = yaml.get(characterId + ".updated");
+        if (!(updated instanceof Number) || ((Number) updated).longValue() != transcript.updatedAt) {
+            return false;
+        }
+        List<Map<?, ?>> rows = yaml.getMapList(characterId + ".lines");
+        if (rows.size() != transcript.lines.size()) {
+            return false;
+        }
+        for (int i = 0; i < rows.size(); i++) {
+            TurnMemory.Line line = transcript.lines.get(i);
+            Map<?, ?> row = rows.get(i);
+            if (!String.valueOf(line.role()).equals(String.valueOf(row.get("role")))) {
+                return false;
+            }
+            if (!String.valueOf(line.text()).equals(String.valueOf(row.get("text")))) {
+                return false;
+            }
+        }
+        if (summaries && transcript.summary != null && !transcript.summary.isBlank()) {
+            if (!transcript.summary.equals(yaml.getString(characterId + ".summary"))) {
+                return false;
+            }
+            Object summaryUpdated = yaml.get(characterId + ".summary-updated");
+            if (!(summaryUpdated instanceof Number)
+                    || ((Number) summaryUpdated).longValue() != transcript.summaryUpdatedAt) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Map<String, StoredTranscript> redactExtra(Map<String, StoredTranscript> extra, Iterable<String> secrets) {
@@ -1148,7 +1326,8 @@ public final class MemoryStore {
 
     /**
      * Copies {@code text} and applies {@code edits} without building a second copy of the file.
-     * Unchanged characters are written through one buffer. The caller flushes and renames.
+     * Unchanged characters are written through one buffer. The caller syncs the temporary file
+     * and renames it.
      */
     private static void writeMerged(Path temporary, String text, List<TextEdit> edits) throws IOException {
         List<TextEdit> ordered = new ArrayList<>(edits);
@@ -1160,18 +1339,18 @@ public final class MemoryStore {
         try (Writer writer = new OutputStreamWriter(
                 new BufferedOutputStream(Files.newOutputStream(temporary), 1 << 20),
                 StandardCharsets.UTF_8)) {
-            int cursor = 0;
+            int copied = 0;
             int lastAt = -1;
             for (TextEdit edit : ordered) {
-                if (edit.at < cursor || edit.at > text.length() || edit.delete < 0) {
+                if (edit.at < copied || edit.at > text.length() || edit.delete < 0) {
                     throw new IOException("dialogue-memory edit is out of range");
                 }
                 int end = edit.at + edit.delete;
                 if (end > text.length()) {
                     throw new IOException("dialogue-memory edit is out of range");
                 }
-                writer.write(text, cursor, edit.at - cursor);
-                cursor = end;
+                writer.write(text, copied, edit.at - copied);
+                copied = end;
                 String block = edit.text == null ? "" : edit.text;
                 if (block.isEmpty()) {
                     continue;
@@ -1190,21 +1369,32 @@ public final class MemoryStore {
                 writer.write(block);
                 lastAt = edit.at;
             }
-            if (cursor > text.length()) {
+            if (copied > text.length()) {
                 throw new IOException("dialogue-memory edit is out of range");
             }
-            writer.write(text, cursor, text.length() - cursor);
+            writer.write(text, copied, text.length() - copied);
         }
     }
 
+    /**
+     * A single-quoted key, or null when a quoted key would not be a valid simple key.
+     * Plain YAML 1.1 words such as {@code on} and {@code 007} are quoted so a later load keeps
+     * the same character id.
+     */
     private static String yamlKey(String key) {
-        if (key != null && key.matches("[A-Za-z0-9_.-]+")) {
-            return key;
+        if (key == null || key.isEmpty() || key.length() > 1024) {
+            return null;
         }
-        return "'" + (key == null ? "" : key.replace("'", "''")) + "'";
+        for (int i = 0; i < key.length(); i++) {
+            char c = key.charAt(i);
+            if (c < 0x20 || c == 0x7f || c == '\u0085' || c == '\u2028' || c == '\u2029') {
+                return null;
+            }
+        }
+        return "'" + key.replace("'", "''") + "'";
     }
 
-    private static Set<String> characterKeys(YamlConfiguration yaml) {
+    static Set<String> characterKeys(YamlConfiguration yaml) {
         Set<String> keys = new java.util.HashSet<>();
         ConfigurationSection entries = yaml.getConfigurationSection("entries");
         if (entries == null) {
@@ -1653,9 +1843,6 @@ public final class MemoryStore {
             return new Snapshot(bytes, null, null);
         }
         StreamOutline outline = scanSavedShape(text);
-        if (outline == null) {
-            outline = scanEvents(text);
-        }
         return new Snapshot(bytes, text, outline);
     }
 
@@ -1693,6 +1880,10 @@ public final class MemoryStore {
             return scan;
         }
 
+        /**
+         * Waits until this scan has finished. Stop joins the load for one second first, then waits
+         * here when the scan is still running, so a stop can last longer than that join.
+         */
         private Snapshot awaitSnapshot() {
             try {
                 thread.join();

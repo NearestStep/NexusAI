@@ -154,8 +154,9 @@ final class DialogueMemoryPersistence {
 
     /**
      * Stop. A load that is still running after {@link #shutdownLoadGraceMillis} does not block disable
-     * for the rest of the read. Disk characters are kept. Characters that were never in the file are
-     * appended. A failed load does not replace the file.
+     * for the rest of the read. The key scan started with that load is then awaited with no further
+     * timeout, so stop can wait for the scan after the join. Disk characters are kept. Characters
+     * that were never in the file are appended. A failed load does not replace the file.
      */
     void shutdown() {
         try {

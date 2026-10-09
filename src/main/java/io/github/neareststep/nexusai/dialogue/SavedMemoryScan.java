@@ -1,5 +1,9 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import org.yaml.snakeyaml.nodes.NodeId;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.resolver.Resolver;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -7,8 +11,10 @@ import java.util.Set;
 /**
  * Player and character keys in a block-style dialogue-memory file.
  * Lines that belong to a character are skipped by indentation, so a folded or block scalar
- * is not read as another character. A flow collection, a tab, or a quoted scalar that crosses
- * back to the next key returns null and the caller uses another reader.
+ * is not read as another character. A plain key ends at a colon followed by a space or at a
+ * colon at the end of the line; any other colon is part of the key. A plain key that YAML 1.1
+ * would not keep as a string, a tab, a flow collection, or a quoted scalar that crosses back
+ * to the next key returns null and the caller uses another reader.
  * Offsets are UTF-16 indexes into the scanned text.
  */
 final class SavedMemoryScan {
@@ -84,6 +90,7 @@ final class SavedMemoryScan {
         private final Map<String, Integer> playerEnd = new LinkedHashMap<>();
         private final Map<String, Integer> characterIndent = new LinkedHashMap<>();
         private final Set<String> characterKeys = new java.util.HashSet<>();
+        private final Resolver plain = new Resolver();
         private Raw held;
 
         private Parser(String text) {
@@ -95,6 +102,9 @@ final class SavedMemoryScan {
         }
 
         private SavedMemoryScan parse() {
+            if (text.indexOf('\u0085') >= 0 || text.indexOf('\u2028') >= 0 || text.indexOf('\u2029') >= 0) {
+                throw new Reject();
+            }
             skipLeading();
             while (true) {
                 KeyLine line = nextKey();
@@ -243,7 +253,7 @@ final class SavedMemoryScan {
                 if (line == null) {
                     return;
                 }
-                if (!single && !doubled && (line.blank || line.comment)) {
+                if (line.blank || (!single && !doubled && line.comment)) {
                     consume();
                     continue;
                 }
@@ -383,14 +393,16 @@ final class SavedMemoryScan {
                 break;
             }
             int content = i;
-            while (i < n && text.charAt(i) != '\n' && text.charAt(i) != '\r') {
+            while (i < n && !lineBreak(text.charAt(i))) {
                 i++;
             }
             int lineEnd = i;
             if (i < n && text.charAt(i) == '\r') {
                 i++;
-            }
-            if (i < n && text.charAt(i) == '\n') {
+                if (i < n && text.charAt(i) == '\n') {
+                    i++;
+                }
+            } else if (i < n) {
                 i++;
             }
             index = i;
@@ -404,105 +416,124 @@ final class SavedMemoryScan {
         }
 
         private KeyLine parseKey(Raw line) {
-            int cursor = line.content;
+            int pos = line.content;
             int lineEnd = line.lineEnd;
-            if (cursor >= lineEnd) {
+            if (pos >= lineEnd) {
                 throw new Reject();
             }
-            char first = text.charAt(cursor);
+            char first = text.charAt(pos);
             if (first == '-' || first == '?' || first == '{' || first == '[' || first == '&'
-                    || first == '*' || first == '!' || first == '|') {
+                    || first == '*' || first == '!' || first == '|' || first == '>' || first == '@'
+                    || first == '`' || first == '%') {
                 throw new Reject();
             }
             int keyStart;
             int keyEnd;
             if (first == '"' || first == '\'') {
-                int end = closeQuote(cursor, lineEnd, first);
+                int end = closeQuote(pos, lineEnd, first);
                 if (end < 0) {
                     throw new Reject();
                 }
-                keyStart = cursor + 1;
+                keyStart = pos + 1;
                 keyEnd = end;
-                cursor = end + 1;
+                pos = end + 1;
             } else {
-                int colon = plainKeyEnd(cursor, lineEnd);
+                int colon = plainKeyEnd(pos, lineEnd);
                 if (colon < 0) {
                     throw new Reject();
                 }
-                keyStart = cursor;
+                keyStart = pos;
                 keyEnd = colon;
-                cursor = colon;
+                pos = colon;
             }
-            if (cursor >= lineEnd || text.charAt(cursor) != ':') {
+            if (pos >= lineEnd || text.charAt(pos) != ':') {
                 throw new Reject();
             }
-            cursor++;
+            pos++;
             String key = text.substring(keyStart, keyEnd);
             if (first == '\'') {
                 key = key.replace("''", "'");
             } else if (first == '"') {
-                key = unescapeDouble(key);
+                if (key.indexOf('\\') >= 0) {
+                    throw new Reject();
+                }
+            } else {
+                int end = key.length();
+                while (end > 0 && key.charAt(end - 1) == ' ') {
+                    end--;
+                }
+                key = key.substring(0, end);
+                if (!Tag.STR.equals(plain.resolve(NodeId.scalar, key, true))) {
+                    throw new Reject();
+                }
             }
             if (key.isEmpty()) {
                 throw new Reject();
             }
-            while (cursor < lineEnd && text.charAt(cursor) == ' ') {
-                cursor++;
+            while (pos < lineEnd && text.charAt(pos) == ' ') {
+                pos++;
             }
-            if (cursor >= lineEnd || text.charAt(cursor) == '#') {
+            if (pos >= lineEnd || text.charAt(pos) == '#') {
                 return new KeyLine(line, key, -1, -1, false, false, true, false);
             }
-            char valueFirst = text.charAt(cursor);
+            char valueFirst = text.charAt(pos);
             if (valueFirst == '"' || valueFirst == '\'') {
-                int end = closeQuote(cursor, lineEnd, valueFirst);
+                int end = closeQuote(pos, lineEnd, valueFirst);
                 if (end < 0) {
-                    return new KeyLine(line, key, cursor, lineEnd, false, false, false, false);
+                    return new KeyLine(line, key, pos, lineEnd, false, false, false, false);
                 }
                 if (!onlyComment(end + 1, lineEnd)) {
                     throw new Reject();
                 }
-                return new KeyLine(line, key, cursor, end + 1, false, false, true, false);
+                return new KeyLine(line, key, pos, end + 1, false, false, true, false);
             }
             if (valueFirst == '{' || valueFirst == '[') {
-                int end = closeFlow(cursor, lineEnd);
+                int end = closeFlow(pos, lineEnd);
                 if (end < 0) {
-                    return new KeyLine(line, key, cursor, lineEnd, true, false, false, false);
+                    return new KeyLine(line, key, pos, lineEnd, true, false, false, false);
                 }
                 if (!onlyComment(end, lineEnd)) {
                     throw new Reject();
                 }
-                return new KeyLine(line, key, cursor, end, true, true, true, false);
+                return new KeyLine(line, key, pos, end, true, true, true, false);
             }
             if (valueFirst == '|' || valueFirst == '>') {
-                if (!blockHeader(cursor, lineEnd)) {
+                if (!blockHeader(pos, lineEnd)) {
                     throw new Reject();
                 }
-                return new KeyLine(line, key, cursor, lineEnd, false, false, true, true);
+                return new KeyLine(line, key, pos, lineEnd, false, false, true, true);
             }
-            if (valueFirst == '&' || valueFirst == '*' || valueFirst == '!') {
+            if (valueFirst == '&' || valueFirst == '*' || valueFirst == '!' || valueFirst == '\t') {
                 throw new Reject();
             }
             int valueEnd = lineEnd;
-            for (int i = cursor + 1; i < lineEnd; i++) {
+            for (int i = pos + 1; i < lineEnd; i++) {
                 if (text.charAt(i) == '#' && text.charAt(i - 1) == ' ') {
                     valueEnd = i;
                     break;
                 }
             }
-            while (valueEnd > cursor && text.charAt(valueEnd - 1) == ' ') {
+            while (valueEnd > pos && text.charAt(valueEnd - 1) == ' ') {
                 valueEnd--;
             }
-            if (valueEnd <= cursor) {
+            if (valueEnd <= pos) {
                 throw new Reject();
             }
-            return new KeyLine(line, key, cursor, valueEnd, false, false, true, false);
+            return new KeyLine(line, key, pos, valueEnd, false, false, true, false);
+        }
+
+        private static boolean lineBreak(char c) {
+            return c == '\n' || c == '\r' || c == '\u0085' || c == '\u2028' || c == '\u2029';
         }
 
         private boolean blockHeader(int start, int lineEnd) {
             int i = start + 1;
             while (i < lineEnd) {
                 char c = text.charAt(i);
-                if (c != '+' && c != '-' && !Character.isDigit(c)) {
+                if (Character.isDigit(c)) {
+                    throw new Reject();
+                }
+                if (c != '+' && c != '-') {
                     break;
                 }
                 i++;
@@ -518,9 +549,23 @@ final class SavedMemoryScan {
             return i >= lineEnd || text.charAt(i) == '#';
         }
 
+        /**
+         * Index of the colon that ends a plain key. A colon followed by anything other than a
+         * space, a tab, or the end of the line is part of the key.
+         */
         private int plainKeyEnd(int start, int lineEnd) {
             for (int i = start; i < lineEnd; i++) {
-                if (text.charAt(i) == ':') {
+                char c = text.charAt(i);
+                if (c == '#' && i > start && (text.charAt(i - 1) == ' ' || text.charAt(i - 1) == '\t')) {
+                    throw new Reject();
+                }
+                if (c == '\t') {
+                    throw new Reject();
+                }
+                if (c != ':') {
+                    continue;
+                }
+                if (i + 1 >= lineEnd || text.charAt(i + 1) == ' ' || text.charAt(i + 1) == '\t') {
                     return i;
                 }
             }
