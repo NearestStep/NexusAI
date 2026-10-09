@@ -276,8 +276,13 @@ public final class ModelQueue {
      * Stored 404 for this provider and model, or null when that model is not in the hold.
      */
     public synchronized AiRequestException unknownModelError(String provider, String model, long nowMillis) {
-        UnknownModelHold hold = unknownModels.get(unknownModelKey(provider, model));
-        if (hold == null || nowMillis >= hold.untilMillis) {
+        String key = unknownModelKey(provider, model);
+        UnknownModelHold hold = unknownModels.get(key);
+        if (hold == null) {
+            return null;
+        }
+        if (nowMillis >= hold.untilMillis) {
+            unknownModels.remove(key);
             return null;
         }
         return hold.error;

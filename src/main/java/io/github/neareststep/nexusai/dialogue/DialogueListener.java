@@ -61,6 +61,7 @@ public final class DialogueListener implements Listener {
         if (plugin.getQuotaPolicy() != null) {
             plugin.getQuotaPolicy().forget(playerId);
         }
+        plugin.forgetPlaceholderPlayer(playerId);
     }
 
     @EventHandler(ignoreCancelled = true)

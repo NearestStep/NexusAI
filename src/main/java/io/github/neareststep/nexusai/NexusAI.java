@@ -72,6 +72,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -374,6 +375,16 @@ public final class NexusAI extends JavaPlugin {
         }
         if (invalidateCache && aiCache != null) {
             aiCache.invalidateAll();
+        }
+    }
+
+    /**
+     * Drops off-region placeholder aliases for a player who quit. The cached answer stays until
+     * its TTL, and a later read from that player does not reuse another player's alias.
+     */
+    public void forgetPlaceholderPlayer(UUID playerId) {
+        if (placeholderExpansion != null) {
+            placeholderExpansion.forgetPlayer(playerId);
         }
     }
 

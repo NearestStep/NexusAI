@@ -32,9 +32,13 @@ import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -46,6 +50,8 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     private static final String GENERATE_PREFIX = "generate_";
     private static final String CACHED_PREFIX = "cached_";
+    /** Off-region aliases kept at once. The eldest is dropped when a new one would pass this. */
+    static final int OFF_THREAD_ALIAS_CAP = 512;
 
     private final NexusAI plugin;
     private final Plugin schedulerPlugin;
@@ -62,9 +68,11 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     /**
      * Off-region reads cannot fill {@code {player}} or {@code %} vars, so the text they look up
      * is not the text stored after the hop. This maps that caller's key to the resolved cache key.
-     * The value is per player. Two players do not share it.
+     * The value is per player. Two players do not share it. An alias is removed when its cache
+     * entry is gone, when that player quits, and when the map is past {@link #OFF_THREAD_ALIAS_CAP}.
      */
-    private final ConcurrentHashMap<String, String> offThreadCacheKeys = new ConcurrentHashMap<>();
+    private final LinkedHashMap<String, String> offThreadCacheKeys = new LinkedHashMap<>();
+    private final Map<UUID, Set<String>> offThreadAliasesByPlayer = new HashMap<>();
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -164,7 +172,34 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.pool = pool;
         this.poolService = poolService;
         this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
-        this.offThreadCacheKeys.clear();
+        synchronized (offThreadCacheKeys) {
+            this.offThreadCacheKeys.clear();
+            this.offThreadAliasesByPlayer.clear();
+        }
+    }
+
+    /**
+     * Drops aliases for a player who left. The cached answer itself stays until its TTL.
+     */
+    public void forgetPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        synchronized (offThreadCacheKeys) {
+            Set<String> keys = offThreadAliasesByPlayer.remove(playerId);
+            if (keys == null) {
+                return;
+            }
+            for (String key : keys) {
+                offThreadCacheKeys.remove(key);
+            }
+        }
+    }
+
+    int offThreadAliasCount() {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.size();
+        }
     }
 
     @Override
@@ -290,12 +325,13 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     ) {
         String alias = offThreadAlias(player, resolved, promptText, prepared);
         if (alias != null) {
-            String canonical = offThreadCacheKeys.get(alias);
+            String canonical = canonicalFor(alias);
             if (canonical != null) {
                 Optional<String> hit = cache.get(canonical);
                 if (hit.isPresent()) {
                     return hit.get();
                 }
+                forgetAlias(alias);
             }
             if (config.canSendChatRequests()) {
                 startBackground(player, raw, resolved, promptText, prepared);
@@ -331,7 +367,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 knowledge = knowledgeFor(fresh, text);
             }
             if (alias != null) {
-                offThreadCacheKeys.put(alias, httpClient.cacheKey(
+                rememberAlias(alias, httpClient.cacheKey(
                         fresh.model(), text, fresh.formatId(), knowledge.cacheToken()));
             }
             rememberQuota(player, playerId);
@@ -356,6 +392,60 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         String rendered = httpClient.cacheKey(
                 resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
         return player.getUniqueId() + "\u0000" + rendered;
+    }
+
+    private String canonicalFor(String alias) {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.get(alias);
+        }
+    }
+
+    private void forgetAlias(String alias) {
+        synchronized (offThreadCacheKeys) {
+            dropAlias(alias);
+        }
+    }
+
+    private void rememberAlias(String alias, String canonical) {
+        synchronized (offThreadCacheKeys) {
+            offThreadCacheKeys.put(alias, canonical);
+            UUID playerId = playerId(alias);
+            if (playerId != null) {
+                offThreadAliasesByPlayer.computeIfAbsent(playerId, ignored -> new HashSet<>()).add(alias);
+            }
+            while (offThreadCacheKeys.size() > OFF_THREAD_ALIAS_CAP) {
+                String eldest = offThreadCacheKeys.keySet().iterator().next();
+                dropAlias(eldest);
+            }
+        }
+    }
+
+    private void dropAlias(String alias) {
+        offThreadCacheKeys.remove(alias);
+        UUID playerId = playerId(alias);
+        if (playerId == null) {
+            return;
+        }
+        Set<String> keys = offThreadAliasesByPlayer.get(playerId);
+        if (keys == null) {
+            return;
+        }
+        keys.remove(alias);
+        if (keys.isEmpty()) {
+            offThreadAliasesByPlayer.remove(playerId);
+        }
+    }
+
+    private static UUID playerId(String alias) {
+        int split = alias.indexOf('\u0000');
+        if (split <= 0) {
+            return null;
+        }
+        try {
+            return UUID.fromString(alias.substring(0, split));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**

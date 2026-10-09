@@ -24,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -284,6 +285,166 @@ class AiPlaceholderExpansionTest {
     }
 
     @Test
+    void offRegionAliasIsRemovedWhenTheCachedAnswerExpires() throws Exception {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        DeferredHops deferred = new DeferredHops();
+        RegionOwnership.install(player -> inHop.get());
+        Player player = RegionPlayerFixture.named("Steve", "lobby", deferred.scheduler(hops));
+        AiPlaceholderExpansion expansion = sharedExpansion(
+                calls, answerForName(), tipCatalog(), Duration.ofMillis(400), 10);
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(0, expansion.offThreadAliasCount());
+        assertEquals(0, calls.get());
+        deferred.flush(inHop);
+        assertEquals(1, calls.get());
+        assertEquals(1, expansion.offThreadAliasCount());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, calls.get());
+        Thread.sleep(1_000L);
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(0, expansion.offThreadAliasCount());
+        assertEquals(1, calls.get());
+        deferred.flush(inHop);
+        assertEquals(2, calls.get());
+        assertEquals(1, expansion.offThreadAliasCount());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void offRegionAliasesAreRemovedWhenThePlayerQuits() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        EntityScheduler scheduler = entityScheduler(inHop, hops);
+        Player steve = RegionPlayerFixture.named("Steve", "lobby", scheduler);
+        Player alex = RegionPlayerFixture.named(
+                UUID.fromString("22222222-2222-2222-2222-222222222222"),
+                "Alex",
+                "lobby",
+                scheduler);
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, answerForName());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(steve, "cached_tip"));
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(alex, "cached_tip"));
+        assertEquals(2, expansion.offThreadAliasCount());
+        expansion.forgetPlayer(steve.getUniqueId());
+        assertEquals(1, expansion.offThreadAliasCount());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(steve, "cached_tip"));
+        assertEquals("for-alex", expansion.onPlaceholderRequest(alex, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(steve, "cached_tip"));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void offRegionAliasesStayWithinTheCap() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        EntityScheduler scheduler = entityScheduler(inHop, hops);
+        AiPlaceholderExpansion expansion = sharedExpansion(
+                calls, answerForName(), tipCatalog(), Duration.ofMinutes(5), 2_000);
+        int total = AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP + 40;
+        Player first = null;
+        Player last = null;
+        for (int i = 0; i < total; i++) {
+            String name = i == total - 1 ? "Alex" : "Steve";
+            Player player = RegionPlayerFixture.named(new UUID(1, i), name, "lobby", scheduler);
+            if (i == 0) {
+                first = player;
+            }
+            if (i == total - 1) {
+                last = player;
+            }
+            assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+            assertTrue(expansion.offThreadAliasCount() <= AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP);
+        }
+        assertEquals(AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP, expansion.offThreadAliasCount());
+        assertEquals(2, calls.get());
+        assertEquals("for-alex", expansion.onPlaceholderRequest(last, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(first, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(first, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertTrue(expansion.offThreadAliasCount() <= AiPlaceholderExpansion.OFF_THREAD_ALIAS_CAP);
+    }
+
+    @Test
+    void reloadClearsOffRegionAliases() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        Player player = RegionPlayerFixture.named("Steve", "lobby", entityScheduler(inHop, hops));
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, answerForName());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, expansion.offThreadAliasCount());
+        Logger logger = Logger.getLogger("placeholder-reload-cache");
+        PluginConfig config = chatConfig();
+        AiCache fresh = new AiCache(Duration.ofMinutes(5), 10);
+        AiHttpClient http = new AiHttpClient(
+                fresh,
+                prompt -> {
+                    calls.incrementAndGet();
+                    return CompletableFuture.completedFuture(answerForName().apply(prompt));
+                },
+                config,
+                logger);
+        expansion.bind(config, fresh, http, new AiPool(), null, tipCatalog());
+        assertEquals(0, expansion.offThreadAliasCount());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void offRegionReadKeepsTheOldAnswerUntilTheCacheExpires() throws Exception {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger lookups = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<String> health = new AtomicReference<>("20");
+        AtomicReference<String> sent = new AtomicReference<>();
+        VarSubstitutor.installLookup((player, template) -> {
+            lookups.incrementAndGet();
+            assertTrue(inHop.get());
+            return "%player_health%".equals(template) ? health.get() : "";
+        });
+        RegionOwnership.install(player -> inHop.get());
+        Player player = RegionPlayerFixture.named("Steve", "lobby", entityScheduler(inHop, hops));
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, prompt -> {
+            sent.set(prompt);
+            return prompt.contains("99") ? "new-answer" : "old-answer";
+        }, vitalsCatalog(), Duration.ofMillis(400), 10);
+        assertEquals("...", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(1, calls.get());
+        assertEquals(1, lookups.get());
+        assertTrue(sent.get().contains("20"), sent.get());
+        assertEquals("old-answer", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(1, calls.get());
+        assertEquals(1, lookups.get());
+        health.set("99");
+        assertEquals("old-answer", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(1, calls.get());
+        assertEquals(1, lookups.get());
+        Thread.sleep(1_000L);
+        assertEquals("...", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(2, calls.get());
+        assertEquals(2, lookups.get());
+        assertTrue(sent.get().contains("99"), sent.get());
+        assertFalse(sent.get().contains("%player_health%"), sent.get());
+        assertEquals("new-answer", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(2, calls.get());
+        assertEquals(2, lookups.get());
+    }
+
+    @Test
     void promptAfterHopKeepsTheContextSuffix() {
         String original = "Health is .";
         String sent = original + "\n\nPlayer context:\nok";
@@ -371,8 +532,18 @@ class AiPlaceholderExpansionTest {
             Function<String, String> answer,
             PromptCatalog catalog
     ) {
+        return sharedExpansion(calls, answer, catalog, Duration.ofMinutes(5), 10);
+    }
+
+    private AiPlaceholderExpansion sharedExpansion(
+            AtomicInteger calls,
+            Function<String, String> answer,
+            PromptCatalog catalog,
+            Duration ttl,
+            long maxSize
+    ) {
         Logger logger = Logger.getLogger("placeholder-shared-cache");
-        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
+        AiCache cache = new AiCache(ttl, maxSize);
         AiHttpClient http = new AiHttpClient(
                 cache,
                 prompt -> {
@@ -469,6 +640,40 @@ class AiPlaceholderExpansionTest {
                     }
                     return null;
                 });
+    }
+
+    private static final class DeferredHops {
+        private final List<Consumer<?>> queued = new ArrayList<>();
+
+        EntityScheduler scheduler(AtomicInteger hops) {
+            return (EntityScheduler) java.lang.reflect.Proxy.newProxyInstance(
+                    EntityScheduler.class.getClassLoader(),
+                    new Class<?>[]{EntityScheduler.class},
+                    (proxy, method, args) -> {
+                        if ("run".equals(method.getName()) && args != null && args.length >= 2
+                                && args[1] instanceof Consumer<?> consumer) {
+                            hops.incrementAndGet();
+                            queued.add(consumer);
+                        }
+                        if (method.getReturnType() == boolean.class) {
+                            return false;
+                        }
+                        return null;
+                    });
+        }
+
+        void flush(AtomicBoolean inHop) {
+            inHop.set(true);
+            try {
+                List<Consumer<?>> batch = new ArrayList<>(queued);
+                queued.clear();
+                for (Consumer<?> consumer : batch) {
+                    consumer.accept(null);
+                }
+            } finally {
+                inHop.set(false);
+            }
+        }
     }
 
     private static Player offRegion(AtomicBoolean touched) {
