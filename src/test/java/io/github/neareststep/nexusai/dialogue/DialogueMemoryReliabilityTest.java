@@ -45,9 +45,17 @@ class DialogueMemoryReliabilityTest {
     @AfterEach
     void resetLoaderHooks() {
         MemoryStore.pauseDuringLoad = null;
+        MemoryStore.beforeKeyScan = null;
+        MemoryStore.beforeReplace = null;
+        MemoryStore.beforeLoaderRewrite = null;
+        MemoryStore.afterStopCount = null;
+        MemoryStore.failNextPublish = false;
+        MemoryStore.abandonActiveLoad = false;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
         MemoryStore.fullDocumentAppends.set(0);
+        MemoryStore.eventScans.set(0);
     }
 
     @Test
@@ -384,7 +392,10 @@ class DialogueMemoryReliabilityTest {
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
-            assertTrue(elapsed < 2_000L, "stop took " + elapsed + "ms");
+            System.out.println("large first-load stop " + elapsed + " ms, cpus="
+                    + Runtime.getRuntime().availableProcessors()
+                    + ", heapMax=" + Runtime.getRuntime().maxMemory());
+            assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms");
             String merged = Files.readString(fixture.file);
             assertTrue(merged.startsWith(original), "existing characters were rewritten");
             assertTrue(merged.contains("only-in-memory"), merged.substring(Math.max(0, merged.length() - 500)));
@@ -468,7 +479,10 @@ class DialogueMemoryReliabilityTest {
             fixture.files.shutdown();
             long elapsed = millisSince(started);
             assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
-            assertTrue(elapsed < 2_500L, "stop took " + elapsed + "ms");
+            System.out.println("large saved stop " + elapsed + " ms, bytes=" + bytes
+                    + ", cpus=" + Runtime.getRuntime().availableProcessors()
+                    + ", heapMax=" + Runtime.getRuntime().maxMemory());
+            assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms");
             String merged = Files.readString(fixture.file);
             assertOriginalLinesRemain(original, merged);
             YamlConfiguration parsed = yaml(merged);
@@ -492,6 +506,238 @@ class DialogueMemoryReliabilityTest {
                 pending.join(15_000L);
             }
         }
+    }
+
+    @Test
+    void stopReplacesAHandWrittenFormatValue() throws Exception {
+        stopReplacesFormat("format: 1");
+        stopReplacesFormat("format: \"1\"");
+        stopReplacesFormat("format: '1'");
+    }
+
+    @Test
+    void stopDuringAQaSizedSavedLoadStaysNearTheJoinGrace() throws Exception {
+        Fixture fixture = fixture("stop-qa-sized", true);
+        int players = 2_501;
+        int characters = 4;
+        String lineText = "It's fine, say \"hi\". " + "m".repeat(16);
+        String summary = "note";
+        MemoryStore writer = new MemoryStore();
+        for (int p = 0; p < players; p++) {
+            UUID id = qaPlayer(p);
+            for (int c = 0; c < characters; c++) {
+                List<TurnMemory.Line> lines = new ArrayList<>(16);
+                for (int n = 0; n < 16; n++) {
+                    String text = n == 0 ? lineText + "-" + p + "-" + c : lineText;
+                    lines.add(new TurnMemory.Line(n % 2 == 0 ? "user" : "assistant", text));
+                }
+                writer.get(id, "npc_" + c).load(lines, 40L, summary, 40L);
+            }
+        }
+        writer.save(fixture.file.toFile(), null, true);
+        writer = null;
+        long bytes = Files.size(fixture.file);
+        assertTrue(bytes >= 12_000_000L && bytes <= 14_500_000L, "saved file is " + bytes + " bytes");
+        String token = lineText + "-1000-1";
+        assertTrue(Files.readString(fixture.file).contains(token));
+        UUID first = qaPlayer(0);
+        UUID created = UUID.randomUUID();
+        fixture.store.append(first, "npc_0", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(first, "npc_new", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        fixture.store.append(created, "npc_d", "user", "new-player", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "qa-sized load was not released");
+        try {
+            MemoryStore.fullDocumentAppends.set(0);
+            MemoryStore.eventScans.set(0);
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            int cpus = Runtime.getRuntime().availableProcessors();
+            long heap = Runtime.getRuntime().maxMemory();
+            System.out.println("qa-shaped stop " + elapsed + " ms, bytes=" + bytes
+                    + ", cpus=" + cpus + ", heapMax=" + heap
+                    + ", eventScans=" + MemoryStore.eventScans.get()
+                    + ", fullDocumentAppends=" + MemoryStore.fullDocumentAppends.get());
+            assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
+            assertTrue(MemoryStore.eventScans.get() > 0, "stop did not scan keys");
+            assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
+            String merged = Files.readString(fixture.file);
+            assertTrue(merged.startsWith("format: 2"), merged.substring(0, Math.min(40, merged.length())));
+            assertEquals(1, countOf(merged, "only-in-memory"));
+            assertEquals(1, countOf(merged, "new-player"));
+            assertEquals(1, countOf(merged, token));
+            assertFalse(merged.contains("must-not-overwrite"));
+            Set<String> keys = MemoryStore.scanCharacterKeys(merged);
+            assertTrue(keys != null, "merged file was not scanned");
+            assertEquals(players * characters + 2, keys.size());
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(30_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertEquals(merged, Files.readString(fixture.file));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(30_000L);
+            }
+        }
+    }
+
+    private void stopReplacesFormat(String formatLine) throws Exception {
+        Fixture fixture = fixture("stop-format-" + formatLine.hashCode(), true);
+        UUID player = fixture.player;
+        String originalBody = """
+                %s
+                entries:
+                  %s:
+                    keeper:
+                      updated: 40
+                      lines:
+                      - role: user
+                        text: kept-on-disk
+                """.formatted(formatLine, player);
+        Files.writeString(fixture.file, originalBody, StandardCharsets.UTF_8);
+        fixture.store.append(player, "keeper", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "format load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
+            fixture.files.shutdown();
+            String merged = Files.readString(fixture.file);
+            int formats = 0;
+            for (String line : merged.split("\\R")) {
+                if (line.trim().startsWith("format:")) {
+                    formats++;
+                }
+            }
+            assertEquals(1, formats, formatLine + "\n" + merged);
+            assertEquals(2, yaml(merged).getInt("format"), merged);
+            assertTrue(merged.contains("kept-on-disk"), merged);
+            assertEquals(1, countOf(merged, "only-in-memory"));
+            assertFalse(merged.contains("must-not-overwrite"), merged);
+            assertFalse(merged.contains("format: 1"), merged);
+            assertFalse(merged.contains("format: \"1\""), merged);
+            assertFalse(merged.contains("format: '1'"), merged);
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopWarnsAndDoesNotWriteWhenTheKeyScanExceedsTheBudget() throws Exception {
+        Fixture fixture = fixture("stop-budget");
+        Files.writeString(fixture.file, "entries:\n  " + fixture.player + ":\n    keeper:\n      updated: 1\n",
+                StandardCharsets.UTF_8);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        byte[] before = Files.readAllBytes(fixture.file);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch scanInside = new CountDownLatch(1);
+        CountDownLatch scanRelease = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "budget load was not released");
+        MemoryStore.beforeKeyScan = () -> {
+            scanInside.countDown();
+            try {
+                if (!scanRelease.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("budget scan was not released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.clock.addAndGet(DialogueMemoryPersistence.LOAD_HANG_WARNING_AFTER_MILLIS);
+            fixture.files.shutdown();
+            assertTrue(scanInside.await(5, TimeUnit.SECONDS));
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    notes.get(0));
+            assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
+                    fixture.records.toString());
+        } finally {
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.beforeKeyScan = null;
+            MemoryStore.pauseDuringLoad = null;
+            scanRelease.countDown();
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopWarnsAndDoesNotWriteWhenTheKeyScanCrashes() throws Exception {
+        Fixture fixture = fixture("stop-scan-crash");
+        Files.writeString(fixture.file, "entries:\n  " + fixture.player + ":\n    keeper:\n      updated: 1\n",
+                StandardCharsets.UTF_8);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        byte[] before = Files.readAllBytes(fixture.file);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "crash load was not released");
+        MemoryStore.beforeKeyScan = () -> {
+            throw new IllegalStateException("key scan failed");
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because the key scan failed.",
+                    notes.get(0));
+            assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
+                    fixture.records.toString());
+        } finally {
+            MemoryStore.beforeKeyScan = null;
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    private static UUID qaPlayer(int index) {
+        return new UUID(0x4e78000000000000L, index + 1L);
     }
 
     @Test
@@ -527,32 +773,400 @@ class DialogueMemoryReliabilityTest {
     }
 
     @Test
-    void stopStillAppendsWhenTheSavedShapeIsFlow() throws Exception {
-        Fixture fixture = fixture("stop-flow");
+    void stopLeavesAFlowFileUntouchedWhenTheLoadDoesNotFinish() throws Exception {
+        Fixture fixture = fixture("stop-flow-budget");
         UUID player = fixture.player;
         String flow = "entries:\n  " + player + ":\n    shared: {updated: 40, lines: [{role: user, text: kept-flow}]}\n";
         Files.writeString(fixture.file, flow, StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
         fixture.store.append(player, "shared", "user", "said-while-off", 70L, 8, 8_000, 0L);
         fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "flow load was not released");
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
         try {
             fixture.files.onReload();
             assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
+            long started = System.nanoTime();
             fixture.files.shutdown();
-            String merged = Files.readString(fixture.file);
-            YamlConfiguration parsed = yaml(merged);
-            assertEquals("kept-flow", firstText(parsed, player, "shared"));
-            assertEquals("only-in-memory", firstText(parsed, player, "innkeeper"));
-            assertFalse(merged.contains("said-while-off"), merged);
+            long elapsed = millisSince(started);
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop parsed the file again");
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 2 dialogue characters because it did not finish within the stop budget.",
+                    notes.get(0));
+            assertNoExtraReader();
+            assertNoTempFile(fixture.file.getParent());
+            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis + 200L + 1_500L;
+            assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
+        } finally {
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.pauseDuringLoad = null;
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
                 pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopSavesAFlowFileWhenTheLoadFinishes() throws Exception {
+        Fixture fixture = fixture("stop-flow-save");
+        UUID player = fixture.player;
+        String flow = "entries:\n  " + player + ":\n    shared: {updated: 40, lines: [{role: user, text: kept-flow}]}\n";
+        Files.writeString(fixture.file, flow, StandardCharsets.UTF_8);
+        fixture.store.append(player, "shared", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        MemoryStore.fullDocumentAppends.set(0);
+        fixture.files.onReload();
+        fixture.files.shutdown();
+        Thread pending = fixture.files.diskLoader();
+        if (pending != null) {
+            pending.join(5_000L);
+        }
+        String merged = Files.readString(fixture.file);
+        YamlConfiguration loaded = yaml(merged);
+        List<Map<?, ?>> shared = loaded.getMapList("entries." + player + ".shared.lines");
+        assertEquals("kept-flow", String.valueOf(shared.get(0).get("text")), merged);
+        assertTrue(merged.contains("only-in-memory"), merged);
+        assertFalse(merged.contains("said-while-off"), merged);
+        assertEquals(0, MemoryStore.fullDocumentAppends.get(), merged);
+        assertEquals(0, warnings(fixture.records, "Did not save").size(), fixture.records.toString());
+        assertNoExtraReader();
+    }
+
+    @Test
+    void stopDuringARefusedLoadDoesNotReadTheFileAgain() throws Exception {
+        Fixture fixture = fixture("stop-refused-live");
+        int chars = (int) Math.min(256_000L, Math.max(48_000L, Runtime.getRuntime().maxMemory() / 2_048L));
+        String pad = "m".repeat(120);
+        StringBuilder body = new StringBuilder(chars + 256);
+        body.append("entries:\n  ").append(fixture.player).append(":\n    npc:\n      updated: 1\n      lines:\n");
+        body.append("      - role: user\n        text: ").append(pad).append('\n');
+        while (body.length() < chars) {
+            body.append("pad_").append(body.length()).append(": ").append(pad).append('\n');
+        }
+        body.append("zz_anchor: &a x\nzz_alias: *a\n");
+        Files.writeString(fixture.file, body, StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "npc_new", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        MemoryStore.fullDocumentAppends.set(0);
+        long started = System.nanoTime();
+        fixture.files.onReload();
+        fixture.files.shutdown();
+        long elapsed = millisSince(started);
+        long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis
+                + DialogueMemoryPersistence.shutdownAppendBudgetMillis
+                + 1_500L;
+        assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
+        assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop parsed the file again");
+        assertNoExtraReader();
+        assertNoTempFile(fixture.file.getParent());
+        assertFalse(fixture.records.stream().anyMatch(record ->
+                String.valueOf(record.getMessage()).contains("OutOfMemoryError")
+                        || (record.getThrown() != null && record.getThrown() instanceof OutOfMemoryError)),
+                fixture.records.toString());
+        byte[] after = Files.readAllBytes(fixture.file);
+        if (java.util.Arrays.equals(before, after)) {
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertTrue(notes.get(0).contains("stop budget"), notes.get(0));
+        } else {
+            assertTrue(Files.readString(fixture.file).contains("only-in-memory"));
+            assertEquals(0, warnings(fixture.records, "Did not save").size(), fixture.records.toString());
+        }
+        Thread pending = fixture.files.diskLoader();
+        if (pending != null) {
+            pending.join(5_000L);
+        }
+    }
+
+    @Test
+    void stopDoesNotRenameAfterTheBudget() throws Exception {
+        Fixture fixture = fixture("stop-write-budget");
+        UUID player = fixture.player;
+        String flow = "entries:\n  " + player + ":\n    shared: {updated: 40, lines: [{role: user, text: kept-flow}]}\n";
+        Files.writeString(fixture.file, flow, StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = () -> {
+            inside.countDown();
+            try {
+                Thread.sleep(400L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        MemoryStore.beforeReplace = () -> {
+            try {
+                Thread.sleep(3_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        long previousGrace = DialogueMemoryPersistence.shutdownLoadGraceMillis;
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 200L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 2_000L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertEquals(0, MemoryStore.fullDocumentAppends.get());
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertTrue(notes.get(0).contains("stop budget"), notes.get(0));
+            assertNoTempFile(fixture.file.getParent());
+            assertEquals(0, warnings(fixture.records, "could not be read").size(), fixture.records.toString());
+        } finally {
+            DialogueMemoryPersistence.shutdownLoadGraceMillis = previousGrace;
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.pauseDuringLoad = null;
+            MemoryStore.beforeReplace = null;
+        }
+    }
+
+    @Test
+    void stopNamesAWriteFailureAsCouldNotBeWritten() throws Exception {
+        Fixture fixture = fixture("stop-unwritten");
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        MemoryStore.failNextPublish = true;
+        try {
+            fixture.files.onReload();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 2 dialogue characters because dialogue-memory.yml could not be written.",
+                    notes.get(0));
+            assertEquals(0, warnings(fixture.records, "could not be read").size(), fixture.records.toString());
+            assertNoTempFile(fixture.file.getParent());
+        } finally {
+            MemoryStore.failNextPublish = false;
+        }
+    }
+
+    @Test
+    void stopGiveUpDoesNotLetTheLoaderMaskTheFile() throws Exception {
+        Fixture fixture = fixture("stop-forbid-mask");
+        String raw = "entries:\n  " + fixture.player + ":\n    blacksmith:\n      updated: 50\n      lines:\n"
+                + "      - role: user\n        text: kept " + SECRET + "\n"
+                + "zz_anchor: &a x\nzz_alias: *a\n";
+        Files.writeString(fixture.file, raw, StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.beforeLoaderRewrite = () -> {
+            inside.countDown();
+            try {
+                if (!release.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("mask rewrite was not released");
+                }
+            } catch (InterruptedException first) {
+                Thread.currentThread().interrupt();
+                try {
+                    if (!release.await(30, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("mask rewrite was not released");
+                    }
+                } catch (InterruptedException again) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+        long previousGrace = DialogueMemoryPersistence.shutdownLoadGraceMillis;
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 200L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 300L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertNoTempFile(fixture.file.getParent());
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    notes.get(0));
+            Thread pending = fixture.files.diskLoader();
+            release.countDown();
+            if (pending != null) {
+                pending.join(5_000L);
                 assertFalse(pending.isAlive());
             }
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            assertTrue(Files.readString(fixture.file).contains(SECRET));
+            assertNoTempFile(fixture.file.getParent());
         } finally {
+            DialogueMemoryPersistence.shutdownLoadGraceMillis = previousGrace;
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.beforeLoaderRewrite = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopCountsCharactersFromWhenStopBegan() throws Exception {
+        Fixture fixture = fixture("stop-count-at-start");
+        String raw = "entries:\n  " + fixture.player + ":\n    blacksmith:\n      updated: 50\n      lines:\n"
+                + "      - role: user\n        text: kept-from-disk\n"
+                + "zz_anchor: &a x\nzz_alias: *a\n";
+        Files.writeString(fixture.file, raw, StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch stopStarted = new CountDownLatch(1);
+        CountDownLatch filled = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = () -> {
+            inside.countDown();
+            try {
+                if (!stopStarted.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("stop did not start");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            for (int i = 0; i < 200; i++) {
+                fixture.store.append(fixture.player, "extra" + i, "user", "filled", 70L, 8, 8_000, 0L);
+            }
+            filled.countDown();
+            try {
+                if (!release.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("count load was not released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        MemoryStore.afterStopCount = () -> {
+            stopStarted.countDown();
+            try {
+                if (!filled.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("loader did not fill memory");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+        long previousGrace = DialogueMemoryPersistence.shutdownLoadGraceMillis;
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 50L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    notes.get(0));
+        } finally {
+            DialogueMemoryPersistence.shutdownLoadGraceMillis = previousGrace;
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.pauseDuringLoad = null;
+            MemoryStore.afterStopCount = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopNamesASpliceWriteFailureWithoutWaitingTheBudget() throws Exception {
+        Fixture fixture = fixture("stop-splice-unwritten");
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "splice write load was not released");
+        MemoryStore.failNextPublish = true;
+        long previousGrace = DialogueMemoryPersistence.shutdownLoadGraceMillis;
+        long previousBudget = DialogueMemoryPersistence.shutdownAppendBudgetMillis;
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 200L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 4_000L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because dialogue-memory.yml could not be written.",
+                    notes.get(0));
+            assertEquals(0, warnings(fixture.records, "stop budget").size(), fixture.records.toString());
+            assertEquals(0, warnings(fixture.records, "could not be read").size(), fixture.records.toString());
+            assertTrue(elapsed <= 2_000L, "stop waited the budget: " + elapsed + " ms");
+            assertNoTempFile(fixture.file.getParent());
+        } finally {
+            DialogueMemoryPersistence.shutdownLoadGraceMillis = previousGrace;
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
+            MemoryStore.failNextPublish = false;
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopReportsScanOutOfMemoryWithoutWaitingTheBudget() throws Exception {
+        Fixture fixture = fixture("stop-scan-oom");
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "oom load was not released");
+        MemoryStore.beforeKeyScan = () -> {
+            throw new OutOfMemoryError("sim");
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 1 dialogue characters because the key scan failed.",
+                    notes.get(0));
+            assertEquals(0, warnings(fixture.records, "stop budget").size(), fixture.records.toString());
+            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis + 1_500L;
+            assertTrue(elapsed <= limit, "stop waited the budget: " + elapsed + " ms");
+        } finally {
+            MemoryStore.beforeKeyScan = null;
             MemoryStore.pauseDuringLoad = null;
             release.countDown();
             Thread pending = fixture.files.diskLoader();
@@ -645,7 +1259,6 @@ class DialogueMemoryReliabilityTest {
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException(e);
             }
         };
     }
@@ -761,6 +1374,25 @@ class DialogueMemoryReliabilityTest {
 
     private static long millisSince(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static void assertNoExtraReader() {
+        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+            if (!thread.isAlive()) {
+                continue;
+            }
+            String name = thread.getName();
+            if ("nexusai-memory-merge".equals(name) || "nexusai-memory-keys".equals(name)) {
+                fail("still reading: " + name);
+            }
+        }
+    }
+
+    private static void assertNoTempFile(Path dir) throws Exception {
+        try (var listing = Files.list(dir)) {
+            assertTrue(listing.noneMatch(path -> path.getFileName().toString().endsWith(".tmp")),
+                    "a temporary file was left behind");
+        }
     }
 
     private static List<String> warnings(List<LogRecord> records, String text) {

@@ -82,6 +82,8 @@ tasks {
     test {
         useJUnitPlatform()
         dependsOn("loadtestTest")
+        minHeapSize = System.getenv("NEXUS_TEST_MIN_HEAP") ?: "512m"
+        maxHeapSize = System.getenv("NEXUS_TEST_MAX_HEAP") ?: "1g"
     }
 
     compileJava {

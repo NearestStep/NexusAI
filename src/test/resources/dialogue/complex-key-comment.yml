@@ -1,0 +1,24 @@
+entries:
+  071d10bc-ebb9-6239-02dc-ce241d8ca792:
+    ? '
+
+      --Nullhttps://exam/p?q=1#f'
+   # comment: 'x "y
+    : updated: 1003
+      lines:
+        - role: user
+          text: 'Hello, it''s 917 o''clock; "quoted" and plain: text # not a comment'
+        - role: assistant
+          text: "ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab\
+          \ cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab cd ab\
+          \ cd ab cd ab cd ab cd ab cd ab cd ab cd \a﻿"
+        - role: user
+          text: https://ex.am/p?q=1#f
+        - role: assistant
+          text: é}\>190:20:30---
+    "yes\e=":
+      updated: 1000
+      lines:
+        - role: user
+          text: '   Привет, мир!  Привет, мир!  Привет, мир!  Привет, мир!  Привет,
+          мир!  Привет, мир!  Привет, мир!  Привет, мир!  Привет, мир!  Привет, мир! '
