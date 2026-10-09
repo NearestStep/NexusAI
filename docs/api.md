@@ -2,7 +2,7 @@
 
 `NexusAIApi.API_VERSION` is 3. New methods are additive. Compile against the plugin jar and set `softdepend: [NexusAI]`. There is no separate API artifact.
 
-Live checks of which provider accepts `json_schema`, and which provider returns `usage.cost`, are not recorded.
+A manual Groq check on 2026-10-09 is recorded in Structured JSON. OpenRouter, OpenAI, and Ollama are not recorded.
 
 ## Text generation
 
@@ -90,7 +90,18 @@ NexusAIApi.generateJson(plugin, GenerationRequest.template("Invent a short fetch
         });
 ```
 
-Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400. Which live provider accepted `json_schema` or returned `usage.cost` is not recorded.
+Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400. The Groq rows below are a manual run on 2026-10-09. OpenRouter, OpenAI, and Ollama are not recorded.
+
+| Provider | Model | structured-output | Result (1.2.0, 2026-10-09) |
+|---|---|---|---|
+| Groq | openai/gpt-oss-20b | auto | `json_schema` with `strict: true` accepted; valid JSON on the first attempt. Usage reported (incl. reasoning tokens), no cost field. |
+| Groq | openai/gpt-oss-20b | json-object / prompt | Works. `json-object` needed one repair retry in our run. |
+| Groq | qwen/qwen3.8-27b | auto | `json_schema` with `strict: true` accepted; valid JSON. |
+| Groq | allam-2-7b | auto | 400 "does not support response format `json_schema`" → downgraded to `json_object` (logged once, kept until `/nai reload`). Output often fails the schema; use a stronger model for JSON. |
+| Groq | allam-2-7b | json-schema | 400, no downgrade in manual mode (expected). |
+| OpenRouter | — | — | Not recorded. |
+| OpenAI | — | — | Not recorded. |
+| Ollama | — | — | Not recorded. |
 
 Events are created only when that event's handler list has listeners. With none registered, a request is unchanged, except that a character-action task which starts after the 5 second wait does not run the command.
 
@@ -120,7 +131,7 @@ Placeholder, `/nai talk` (including a greeting), a pool refill, prewarm, `/nai t
 
 `NexusPreGenerateEvent`, `NexusPostGenerateEvent`, `NexusGenerateFailEvent`, `NexusProviderErrorEvent`, and `NexusModerationFlagEvent` are asynchronous. They run on a `nexusai-http-*` thread or on an `HttpClient` thread. They do not run on a region thread. A handler that needs the world schedules that work itself. A handler that blocks holds the worker and delays other requests on it.
 
-`NexusActionEvent` is not asynchronous. `as: console` fires it on the global region thread. `as: player` fires it on the player's region thread. On Paper both are the main thread, so the handler may read the region, the world, and the player's permissions directly. A listener can record `Bukkit.isPrimaryThread()`. When the player is online it can also record `Bukkit.isOwnedByCurrentRegion(player)`. Paper smoke checks `primary=true` for a console action. Folia smoke checks region ownership for a player action. Cancelling the event skips the command. The model is told `refused: blocked by server`. The action cooldown and the daily counter are not spent. The action log records that fact. It does not name a plugin, because Bukkit does not report which listener cancelled the event.
+`NexusActionEvent` is not asynchronous. On Folia, `as: console` fires it on the global region thread. That thread does not own the player, so `Bukkit.isOwnedByCurrentRegion(player)` is false. `as: player` fires it on the player's region thread, where `Bukkit.isOwnedByCurrentRegion(player)` is true. On Paper both run on the main thread, which owns the player, so the handler may read the region, the world, and the player's permissions directly. A listener can record `Bukkit.isPrimaryThread()`. When the player is online it can also record `Bukkit.isOwnedByCurrentRegion(player)`. Paper smoke checks `primary=true` for a console action. Folia smoke checks region ownership for a player action. Cancelling the event skips the command. The model is told `refused: blocked by server`. The action cooldown and the daily counter are not spent. The action log records that fact. It does not name a plugin, because Bukkit does not report which listener cancelled the event.
 
 While the server is stopping, shutdown does not fire Fail. While NexusAI is disabling and the server is still running, an unfinished API request fires Fail with `SHUTDOWN` when the handler list can still be used.
 

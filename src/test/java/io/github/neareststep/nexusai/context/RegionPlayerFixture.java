@@ -36,7 +36,10 @@ public final class RegionPlayerFixture {
     }
 
     public static Player named(String name, String worldName, Object scheduler) {
-        UUID id = UUID.fromString("11111111-1111-1111-1111-111111111111");
+        return named(UUID.fromString("11111111-1111-1111-1111-111111111111"), name, worldName, scheduler);
+    }
+
+    public static Player named(UUID id, String name, String worldName, Object scheduler) {
         Block block = (Block) Proxy.newProxyInstance(
                 Block.class.getClassLoader(),
                 new Class<?>[]{Block.class},

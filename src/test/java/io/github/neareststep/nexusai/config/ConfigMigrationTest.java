@@ -663,6 +663,11 @@ class ConfigMigrationTest {
         assertEquals(10, yaml.getInt("quotas.save-interval-seconds"));
         assertEquals(0, yaml.getInt("quotas.consumers.default.tokens-per-day"));
         assertEquals(0, yaml.getInt("quotas.consumers.default.requests-per-day"));
+        assertTrue(outcome.addedKeys().contains("quotas.groups"), outcome.addedKeys().toString());
+        assertTrue(written.contains("groups: {}"), written);
+        assertEquals(1, written.split("groups:", -1).length - 1, written);
+        assertTrue(yaml.isConfigurationSection("quotas.groups"));
+        assertTrue(yaml.getConfigurationSection("quotas.groups").getKeys(false).isEmpty());
 
         ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(again.addedKeys().isEmpty());

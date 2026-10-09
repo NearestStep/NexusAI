@@ -563,19 +563,26 @@ public final class PromptCatalog {
     }
 
     private static void warnCollisions(Map<String, NamedPrompt> loaded, List<String> warnings) {
+        Map<String, List<String>> byCache = new LinkedHashMap<>();
         Map<String, List<String>> byText = new LinkedHashMap<>();
         for (NamedPrompt prompt : loaded.values()) {
             if (prompt.playerDependent()) {
                 continue;
             }
             String text = prompt.render(value -> value);
+            String identity = text
+                    + "\u0000" + String.valueOf(prompt.knowledgeSelect())
+                    + "\u0000" + prompt.knowledge()
+                    + "\u0000" + prompt.knowledgeKeywords();
+            byCache.computeIfAbsent(identity, ignored -> new ArrayList<>()).add(prompt.id());
             byText.computeIfAbsent(text, ignored -> new ArrayList<>()).add(prompt.id());
         }
-        for (Map.Entry<String, List<String>> entry : byText.entrySet()) {
-            if (entry.getValue().size() > 1) {
-                warnings.add("Prompt ids " + entry.getValue()
-                        + " resolve to the same text and will share a cache entry.");
+        for (List<String> ids : byCache.values()) {
+            if (ids.size() > 1) {
+                warnings.add("Prompt ids " + ids + " resolve to the same text and will share a cache entry.");
             }
+        }
+        for (Map.Entry<String, List<String>> entry : byText.entrySet()) {
             NamedPrompt colliding = loaded.get(entry.getKey());
             if (colliding != null && !entry.getValue().contains(colliding.id())) {
                 warnings.add("Prompt id '" + colliding.id() + "' collides with the text of prompt "

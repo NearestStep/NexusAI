@@ -43,6 +43,8 @@ public final class ModelQueue {
     /** Spent plus reserved tokens for a row. {@link RowTokens#NONE} leaves token caps unenforced. */
     private volatile RowTokens rowTokens = RowTokens.NONE;
     private final Map<String, Slot> fallbackSlots = new LinkedHashMap<>();
+    /** {@code provider + model} that returned HTTP 404 {@code model_not_found}. Does not cool other models. */
+    private final Map<String, UnknownModelHold> unknownModels = new LinkedHashMap<>();
     private final Map<String, AtomicInteger> providerCounts = new LinkedHashMap<>();
     private final int remainingThreshold;
     private final long errorCooldownMillis;
@@ -232,6 +234,58 @@ public final class ModelQueue {
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
         return selectFrom(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    /**
+     * {@link #selectable(long, boolean)}, plus rows whose only hold is {@code model_not_found}
+     * on a different model. {@code overrideModel} is the {@code model(...)} value, or null when
+     * the call uses the row's own model. The failed model stays blocked.
+     */
+    public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown, String overrideModel) {
+        return addUnknownModelOverride(selectFrom(nowMillis, ignoreCooldown, roundRobinCursor), overrideModel, nowMillis);
+    }
+
+    /**
+     * Rows cooled only because their configured model was not found, when {@code overrideModel}
+     * is a different model that has not itself failed that way.
+     */
+    public synchronized List<Choice> addUnknownModelOverride(List<Choice> ready, String overrideModel, long nowMillis) {
+        if (overrideModel == null || overrideModel.isBlank() || ready == null) {
+            return ready == null ? List.of() : ready;
+        }
+        List<Choice> extra = new ArrayList<>();
+        for (Slot slot : slots) {
+            if (choiceListed(ready, slot.index) || !blockedOnlyByUnknownModel(slot, nowMillis)) {
+                continue;
+            }
+            if (unknownModelActive(slot.provider, overrideModel, nowMillis)) {
+                continue;
+            }
+            extra.add(slot.choice());
+        }
+        if (extra.isEmpty()) {
+            return ready;
+        }
+        List<Choice> merged = new ArrayList<>(ready.size() + extra.size());
+        merged.addAll(ready);
+        merged.addAll(extra);
+        return List.copyOf(merged);
+    }
+
+    /**
+     * Stored 404 for this provider and model, or null when that model is not in the hold.
+     */
+    public synchronized AiRequestException unknownModelError(String provider, String model, long nowMillis) {
+        String key = unknownModelKey(provider, model);
+        UnknownModelHold hold = unknownModels.get(key);
+        if (hold == null) {
+            return null;
+        }
+        if (nowMillis >= hold.untilMillis) {
+            unknownModels.remove(key);
+            return null;
+        }
+        return hold.error;
     }
 
     /**
@@ -541,12 +595,33 @@ public final class ModelQueue {
     }
 
     public synchronized void markFailure(int index, AiRequestException error, long nowMillis) {
-        markSlotFailure(slot(index), error, nowMillis);
+        markFailure(index, null, error, nowMillis);
+    }
+
+    /**
+     * {@code requestedModel} is the model that was called. When it differs from the row's model,
+     * a {@code model_not_found} failure is stored for that model only and the row stays selectable.
+     */
+    public synchronized void markFailure(int index, String requestedModel, AiRequestException error, long nowMillis) {
+        Slot slot = slot(index);
+        String failed = requestedModel == null || requestedModel.isBlank()
+                ? (slot == null ? "" : slot.model)
+                : requestedModel;
+        if (slot != null && error != null && error.kind() == AiErrorKind.UNKNOWN_MODEL) {
+            rememberUnknownModel(slot.provider, failed, error, nowMillis);
+            if (!slot.model.equals(failed)) {
+                return;
+            }
+        }
+        markSlotFailure(slot, error, nowMillis);
     }
 
     public synchronized void markFallbackFailure(String provider, String model, AiRequestException error, long nowMillis) {
         if (provider == null || model == null) {
             return;
+        }
+        if (error != null && error.kind() == AiErrorKind.UNKNOWN_MODEL) {
+            rememberUnknownModel(provider, model, error, nowMillis);
         }
         markSlotFailure(fallbackSlot(provider, model), error, nowMillis);
     }
@@ -928,6 +1003,55 @@ public final class ModelQueue {
         save();
     }
 
+    private void rememberUnknownModel(String provider, String model, AiRequestException error, long nowMillis) {
+        if (provider == null || provider.isBlank() || model == null || model.isBlank() || error == null) {
+            return;
+        }
+        long until = nowMillis + errorCooldownMillis;
+        String key = unknownModelKey(provider, model);
+        UnknownModelHold previous = unknownModels.get(key);
+        if (previous != null && previous.untilMillis > until) {
+            return;
+        }
+        unknownModels.put(key, new UnknownModelHold(until, error));
+    }
+
+    private boolean unknownModelActive(String provider, String model, long nowMillis) {
+        return unknownModelError(provider, model, nowMillis) != null;
+    }
+
+    private static String unknownModelKey(String provider, String model) {
+        return (provider == null ? "" : provider) + "\u0000" + (model == null ? "" : model);
+    }
+
+    private static boolean choiceListed(List<Choice> ready, int index) {
+        for (Choice choice : ready) {
+            if (choice.index() == index) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The row is out only because its own model returned {@code model_not_found}. */
+    private boolean blockedOnlyByUnknownModel(Slot slot, long nowMillis) {
+        if (slot == null || isSelectable(slot, nowMillis, false)) {
+            return false;
+        }
+        if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
+            return false;
+        }
+        if (tokenBlocked(slot, true)) {
+            return false;
+        }
+        if (slot.hold == Hold.DAILY || slot.hold == Hold.HEADER) {
+            return false;
+        }
+        return slot.lastError != null
+                && slot.lastError.kind() == AiErrorKind.UNKNOWN_MODEL
+                && nowMillis < slot.unavailableUntil;
+    }
+
     private boolean isSelectable(Slot slot, long nowMillis, boolean ignoreCooldown) {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
             return false;
@@ -1257,6 +1381,16 @@ public final class ModelQueue {
             int rejected,
             String state
     ) {
+    }
+
+    private static final class UnknownModelHold {
+        private final long untilMillis;
+        private final AiRequestException error;
+
+        private UnknownModelHold(long untilMillis, AiRequestException error) {
+            this.untilMillis = untilMillis;
+            this.error = error;
+        }
     }
 
     private static final class Slot {

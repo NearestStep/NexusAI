@@ -32,7 +32,12 @@ import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -58,6 +63,14 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private AiPool pool;
     private PoolService poolService;
     private PromptCatalog prompts;
+    /**
+     * Off-region reads cannot fill {@code {player}} or {@code %} vars, so the text they look up
+     * is not the text stored after the hop. This maps that caller's key to the resolved cache key.
+     * The value is per player. Two players do not share it. An alias is removed when its cache
+     * entry is gone, when that player quits, and when the map is past the configured cache size.
+     */
+    private final LinkedHashMap<String, String> offThreadCacheKeys = new LinkedHashMap<>();
+    private final Map<UUID, Set<String>> offThreadAliasesByPlayer = new HashMap<>();
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -157,6 +170,34 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.pool = pool;
         this.poolService = poolService;
         this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
+        synchronized (offThreadCacheKeys) {
+            this.offThreadCacheKeys.clear();
+            this.offThreadAliasesByPlayer.clear();
+        }
+    }
+
+    /**
+     * Drops aliases for a player who left. The cached answer itself stays until its TTL.
+     */
+    public void forgetPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        synchronized (offThreadCacheKeys) {
+            Set<String> keys = offThreadAliasesByPlayer.remove(playerId);
+            if (keys == null) {
+                return;
+            }
+            for (String key : keys) {
+                offThreadCacheKeys.remove(key);
+            }
+        }
+    }
+
+    int offThreadAliasCount() {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.size();
+        }
     }
 
     @Override
@@ -280,6 +321,21 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             String promptText,
             KnowledgeComposer.Prepared prepared
     ) {
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
+        if (alias != null) {
+            String canonical = canonicalFor(alias);
+            if (canonical != null) {
+                Optional<String> hit = cache.get(canonical);
+                if (hit.isPresent()) {
+                    return hit.get();
+                }
+                forgetAlias(alias);
+            }
+            if (config.canSendChatRequests()) {
+                startBackground(player, raw, resolved, promptText, prepared);
+            }
+            return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
+        }
         String key = httpClient.cacheKey(resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
             if (config.canSendChatRequests()) {
@@ -298,6 +354,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     ) {
         UUID playerId = player != null ? player.getUniqueId() : null;
         boolean readOnOwner = player != null && !RegionOwnership.owned(player);
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
         runOnOwner(player, () -> {
             ResolvedPrompt fresh = resolved;
             String text = promptText;
@@ -307,9 +364,113 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 text = promptAfterHop(resolved == null ? "" : resolved.text(), promptText, fresh.text());
                 knowledge = knowledgeFor(fresh, text);
             }
+            if (alias != null) {
+                rememberAlias(alias, httpClient.cacheKey(
+                        fresh.model(), text, fresh.formatId(), knowledge.cacheToken()));
+            }
             rememberQuota(player, playerId);
             sendPlaceholder(player, raw, fresh, text, knowledge);
         });
+    }
+
+    /**
+     * Key an off-region caller can rebuild. Null when this thread already owns the player, or when
+     * the prompt has no {@code {player}} / {@code %} var, so the rendered text is already final.
+     * {@code %} vars are not resolved here.
+     */
+    private String offThreadAlias(
+            Player player,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        if (!defersPlayerText(player, resolved)) {
+            return null;
+        }
+        String rendered = httpClient.cacheKey(
+                resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
+        return player.getUniqueId() + "\u0000" + rendered;
+    }
+
+    private String canonicalFor(String alias) {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.get(alias);
+        }
+    }
+
+    private void forgetAlias(String alias) {
+        synchronized (offThreadCacheKeys) {
+            dropAlias(alias);
+        }
+    }
+
+    private void rememberAlias(String alias, String canonical) {
+        synchronized (offThreadCacheKeys) {
+            offThreadCacheKeys.put(alias, canonical);
+            UUID playerId = playerId(alias);
+            if (playerId != null) {
+                offThreadAliasesByPlayer.computeIfAbsent(playerId, ignored -> new HashSet<>()).add(alias);
+            }
+            while (offThreadCacheKeys.size() > aliasCap()) {
+                String eldest = offThreadCacheKeys.keySet().iterator().next();
+                dropAlias(eldest);
+            }
+        }
+    }
+
+    /**
+     * Alias map limit. It follows {@code cache.max-size} so a cyclic off-thread read of every
+     * cached player and prompt still finds the stored answer. Reload replaces {@link #config}.
+     */
+    private int aliasCap() {
+        long configured = config == null ? 1000L : config.getCacheMaxSize();
+        if (configured > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) Math.max(1L, configured);
+    }
+
+    private void dropAlias(String alias) {
+        offThreadCacheKeys.remove(alias);
+        UUID playerId = playerId(alias);
+        if (playerId == null) {
+            return;
+        }
+        Set<String> keys = offThreadAliasesByPlayer.get(playerId);
+        if (keys == null) {
+            return;
+        }
+        keys.remove(alias);
+        if (keys.isEmpty()) {
+            offThreadAliasesByPlayer.remove(playerId);
+        }
+    }
+
+    private static UUID playerId(String alias) {
+        int split = alias.indexOf('\u0000');
+        if (split <= 0) {
+            return null;
+        }
+        try {
+            return UUID.fromString(alias.substring(0, split));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * True when a later hop can change the prompt text. Built-ins and {@code %} vars are left
+     * unresolved on this thread, so the lookup key would not match the stored answer.
+     */
+    private boolean defersPlayerText(Player player, ResolvedPrompt resolved) {
+        if (player == null || RegionOwnership.owned(player) || resolved == null) {
+            return false;
+        }
+        if (resolved.id() != null && !resolved.id().isBlank()) {
+            NamedPrompt named = visiblePrompts().find(resolved.id()).orElse(null);
+            return named != null && named.playerDependent();
+        }
+        return ContextVariables.usesBuiltIn(resolved.text(), java.util.Set.of());
     }
 
     /**
