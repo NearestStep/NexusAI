@@ -912,6 +912,11 @@ def reload_plugin(smoke, rcon_port: int, chunks: list[str], process) -> None:
     wait_marker(process, chunks, start, "NexusAI reloaded", 40)
 
 
+def bot_report_paths(work: Path, out: Path) -> tuple[str, str]:
+    """Absolute paths. load-bots.mjs runs with cwd under work/bots, so a relative --out would miss."""
+    return str((out / "bots.json").resolve()), str((work / "talk.flag").resolve())
+
+
 def start_bots(args, server_port: int, work: Path, out: Path):
     node = shutil.which("node")
     npm = shutil.which("npm")
@@ -934,14 +939,14 @@ def start_bots(args, server_port: int, work: Path, out: Path):
     )
     if install.returncode != 0:
         return None, "npm install mineflayer failed: " + (install.stderr or install.stdout)[-500:]
-    report = out / "bots.json"
+    report, talk_flag = bot_report_paths(work, out)
     env = os.environ.copy()
     env.update({
         "HOST": "127.0.0.1",
         "PORT": str(server_port),
         "BOTS": str(args.bots),
-        "TALK_FLAG": str(work / "talk.flag"),
-        "BOT_REPORT": str(report),
+        "TALK_FLAG": talk_flag,
+        "BOT_REPORT": report,
         "MC_VERSION": "",
     })
     proc = subprocess.Popen(
@@ -1172,6 +1177,16 @@ def self_check() -> int:
     ]
     if bots_online(sample_log) != 1:
         raise SystemExit(f"bot count {bots_online(sample_log)}")
+    for relative_out in (Path("load-out-bots"), Path("..") / "load-b"):
+        report, flag = bot_report_paths(Path("work"), relative_out)
+        if not Path(report).is_absolute() or not Path(flag).is_absolute():
+            raise SystemExit(f"bot paths must be absolute: {report} {flag}")
+        if Path(report).name != "bots.json" or Path(flag).name != "talk.flag":
+            raise SystemExit(f"bot path names {report} {flag}")
+        if Path(report) != (relative_out / "bots.json").resolve():
+            raise SystemExit(report)
+        if Path(flag) != (Path("work") / "talk.flag").resolve():
+            raise SystemExit(flag)
     if not rate_exceeded([0, 0, 0], 1, 1):
         raise SystemExit("rate window did not trip")
     if rate_exceeded([0, 10, 70], 2, 1):

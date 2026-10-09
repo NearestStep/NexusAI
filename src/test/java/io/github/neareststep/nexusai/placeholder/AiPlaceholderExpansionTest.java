@@ -37,10 +37,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -201,6 +203,87 @@ class AiPlaceholderExpansionTest {
     }
 
     @Test
+    void offRegionCachedPlaceholderReturnsFallbackThenTheStoredAnswer() throws Exception {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        Player player = RegionPlayerFixture.named("Steve", "lobby", entityScheduler(inHop, hops));
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, answerForName());
+        assertFalse(RegionOwnership.owned(player));
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, calls.get());
+        assertEquals(1, hops.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, calls.get());
+        assertEquals(1, hops.get());
+    }
+
+    @Test
+    void offRegionCachedPlaceholderDoesNotShareAnEntryBetweenPlayers() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> inHop.get());
+        EntityScheduler scheduler = entityScheduler(inHop, hops);
+        Player steve = RegionPlayerFixture.named("Steve", "lobby", scheduler);
+        Player alex = RegionPlayerFixture.named(
+                UUID.fromString("22222222-2222-2222-2222-222222222222"),
+                "Alex",
+                "lobby",
+                scheduler);
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, answerForName());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(steve, "cached_tip"));
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(alex, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(steve, "cached_tip"));
+        assertEquals("for-alex", expansion.onPlaceholderRequest(alex, "cached_tip"));
+        assertEquals(2, calls.get());
+        assertNotEquals("for-steve", expansion.onPlaceholderRequest(alex, "cached_tip"));
+    }
+
+    @Test
+    void offRegionPercentVarReturnsTheCachedAnswerOnALaterRead() {
+        AtomicBoolean inHop = new AtomicBoolean();
+        AtomicInteger hops = new AtomicInteger();
+        AtomicInteger lookups = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<String> sent = new AtomicReference<>();
+        VarSubstitutor.installLookup((player, template) -> {
+            lookups.incrementAndGet();
+            assertTrue(inHop.get());
+            return "%player_health%".equals(template) ? "20" : "";
+        });
+        RegionOwnership.install(player -> inHop.get());
+        Player player = RegionPlayerFixture.named("Steve", "lobby", entityScheduler(inHop, hops));
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, prompt -> {
+            sent.set(prompt);
+            return "pong";
+        }, vitalsCatalog());
+        assertEquals("...", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(1, calls.get());
+        assertEquals(1, hops.get());
+        assertEquals(1, lookups.get());
+        assertTrue(sent.get().contains("20"), sent.get());
+        assertFalse(sent.get().contains("%player_health%"), sent.get());
+        assertEquals("pong", expansion.onPlaceholderRequest(player, "cached_vitals"));
+        assertEquals(1, calls.get());
+        assertEquals(1, lookups.get());
+    }
+
+    @Test
+    void owningRegionCachedPlaceholderStillReturnsTheStoredAnswer() {
+        AtomicInteger calls = new AtomicInteger();
+        RegionOwnership.install(player -> true);
+        Player player = RegionPlayerFixture.named("Steve", "lobby");
+        AiPlaceholderExpansion expansion = sharedExpansion(calls, answerForName());
+        assertEquals("FB-tip", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, calls.get());
+        assertEquals("for-steve", expansion.onPlaceholderRequest(player, "cached_tip"));
+        assertEquals(1, calls.get());
+    }
+
+    @Test
     void promptAfterHopKeepsTheContextSuffix() {
         String original = "Health is .";
         String sent = original + "\n\nPlayer context:\nok";
@@ -277,6 +360,59 @@ class AiPlaceholderExpansionTest {
         yaml.set("prewarm.enabled", false);
         yaml.set("fallback", "...");
         return new PluginConfig(yaml);
+    }
+
+    private AiPlaceholderExpansion sharedExpansion(AtomicInteger calls, Function<String, String> answer) {
+        return sharedExpansion(calls, answer, tipCatalog());
+    }
+
+    private AiPlaceholderExpansion sharedExpansion(
+            AtomicInteger calls,
+            Function<String, String> answer,
+            PromptCatalog catalog
+    ) {
+        Logger logger = Logger.getLogger("placeholder-shared-cache");
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
+        AiHttpClient http = new AiHttpClient(
+                cache,
+                prompt -> {
+                    calls.incrementAndGet();
+                    return CompletableFuture.completedFuture(answer.apply(prompt));
+                },
+                chatConfig(),
+                logger);
+        return new AiPlaceholderExpansion(
+                schedulerPlugin(),
+                chatConfig(),
+                cache,
+                http,
+                new AiPool(),
+                null,
+                catalog,
+                KnowledgeBase.empty(),
+                null,
+                null,
+                logger);
+    }
+
+    private static Function<String, String> answerForName() {
+        return prompt -> {
+            if (prompt.contains("Alex")) {
+                return "for-alex";
+            }
+            if (prompt.contains("Steve")) {
+                return "for-steve";
+            }
+            return "other";
+        };
+    }
+
+    private static PromptCatalog tipCatalog() {
+        return PromptCatalog.parse("""
+                tip:
+                  prompt: "Plain tip for {player}"
+                  fallback: "FB-tip"
+                """).catalog();
     }
 
     private static PromptCatalog vitalsCatalog() {

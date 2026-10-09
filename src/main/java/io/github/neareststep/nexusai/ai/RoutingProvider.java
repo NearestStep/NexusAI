@@ -166,7 +166,8 @@ public final class RoutingProvider implements AiProvider {
             CallTrace trace
     ) {
         long now = clock.getAsLong();
-        List<ModelQueue.Choice> choices = queue.selectable(now, probe);
+        String overrideModel = overrides.modelOverridden() ? overrides.model("") : null;
+        List<ModelQueue.Choice> choices = queue.selectable(now, probe, overrideModel);
         Attempt last = new Attempt();
         Set<Integer> attempted = new HashSet<>();
         PreCancelled cancelled = openPre(prompt, overrides, choices, trace);
@@ -280,6 +281,13 @@ public final class RoutingProvider implements AiProvider {
                 fail(queueIndex, dedicatedFallback, providerId, model, last.error);
             }
             return CompletableFuture.completedFuture(null);
+        }
+        if (!probe) {
+            AiRequestException held = queue.unknownModelError(providerId, model, clock.getAsLong());
+            if (held != null) {
+                last.error = held;
+                return CompletableFuture.completedFuture(null);
+            }
         }
         KeyRing ring = rings.computeIfAbsent(provider.id(), ignored -> new KeyRing(provider.apiKeys()));
         int attempts = Math.max(1, ring.keys().size());
@@ -640,7 +648,7 @@ public final class RoutingProvider implements AiProvider {
         if (dedicatedFallback) {
             queue.markFallbackFailure(providerId, model, error, now);
         } else {
-            queue.markFailure(queueIndex, error, now);
+            queue.markFailure(queueIndex, model, error, now);
         }
     }
 

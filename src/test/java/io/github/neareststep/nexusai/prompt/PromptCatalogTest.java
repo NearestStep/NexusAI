@@ -154,6 +154,25 @@ class PromptCatalogTest {
     }
 
     @Test
+    void differentKnowledgeSelectDoesNotShareACacheWarning() {
+        PromptCatalog.Parsed parsed = PromptCatalog.parse("""
+                kw:
+                  prompt: "same lore"
+                  knowledge-select: keywords
+                kwfull:
+                  prompt: "same lore"
+                  knowledge-select: full
+                same1: "same text"
+                same2: "same text"
+                """);
+        String warnings = String.join("\n", parsed.warnings());
+        assertFalse(warnings.contains("[kw, kwfull]"), warnings);
+        assertFalse(warnings.contains("[kwfull, kw]"), warnings);
+        assertTrue(warnings.contains("[same1, same2]"), warnings);
+        assertTrue(warnings.contains("share a cache entry"), warnings);
+    }
+
+    @Test
     void invalidYamlDoesNotLoadPrompts() {
         PromptCatalog.Parsed parsed = PromptCatalog.parse("prompts: [\n");
         assertFalse(parsed.valid());

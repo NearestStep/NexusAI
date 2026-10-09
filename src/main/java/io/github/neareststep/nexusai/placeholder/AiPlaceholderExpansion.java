@@ -34,6 +34,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -58,6 +59,12 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private AiPool pool;
     private PoolService poolService;
     private PromptCatalog prompts;
+    /**
+     * Off-region reads cannot fill {@code {player}} or {@code %} vars, so the text they look up
+     * is not the text stored after the hop. This maps that caller's key to the resolved cache key.
+     * The value is per player. Two players do not share it.
+     */
+    private final ConcurrentHashMap<String, String> offThreadCacheKeys = new ConcurrentHashMap<>();
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -157,6 +164,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.pool = pool;
         this.poolService = poolService;
         this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
+        this.offThreadCacheKeys.clear();
     }
 
     @Override
@@ -280,6 +288,20 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             String promptText,
             KnowledgeComposer.Prepared prepared
     ) {
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
+        if (alias != null) {
+            String canonical = offThreadCacheKeys.get(alias);
+            if (canonical != null) {
+                Optional<String> hit = cache.get(canonical);
+                if (hit.isPresent()) {
+                    return hit.get();
+                }
+            }
+            if (config.canSendChatRequests()) {
+                startBackground(player, raw, resolved, promptText, prepared);
+            }
+            return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
+        }
         String key = httpClient.cacheKey(resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
             if (config.canSendChatRequests()) {
@@ -298,6 +320,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     ) {
         UUID playerId = player != null ? player.getUniqueId() : null;
         boolean readOnOwner = player != null && !RegionOwnership.owned(player);
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
         runOnOwner(player, () -> {
             ResolvedPrompt fresh = resolved;
             String text = promptText;
@@ -307,9 +330,47 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
                 text = promptAfterHop(resolved == null ? "" : resolved.text(), promptText, fresh.text());
                 knowledge = knowledgeFor(fresh, text);
             }
+            if (alias != null) {
+                offThreadCacheKeys.put(alias, httpClient.cacheKey(
+                        fresh.model(), text, fresh.formatId(), knowledge.cacheToken()));
+            }
             rememberQuota(player, playerId);
             sendPlaceholder(player, raw, fresh, text, knowledge);
         });
+    }
+
+    /**
+     * Key an off-region caller can rebuild. Null when this thread already owns the player, or when
+     * the prompt has no {@code {player}} / {@code %} var, so the rendered text is already final.
+     * {@code %} vars are not resolved here.
+     */
+    private String offThreadAlias(
+            Player player,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        if (!defersPlayerText(player, resolved)) {
+            return null;
+        }
+        String rendered = httpClient.cacheKey(
+                resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
+        return player.getUniqueId() + "\u0000" + rendered;
+    }
+
+    /**
+     * True when a later hop can change the prompt text. Built-ins and {@code %} vars are left
+     * unresolved on this thread, so the lookup key would not match the stored answer.
+     */
+    private boolean defersPlayerText(Player player, ResolvedPrompt resolved) {
+        if (player == null || RegionOwnership.owned(player) || resolved == null) {
+            return false;
+        }
+        if (resolved.id() != null && !resolved.id().isBlank()) {
+            NamedPrompt named = visiblePrompts().find(resolved.id()).orElse(null);
+            return named != null && named.playerDependent();
+        }
+        return ContextVariables.usesBuiltIn(resolved.text(), java.util.Set.of());
     }
 
     /**

@@ -389,6 +389,66 @@ class RoutingProviderTest {
         assertEquals(0, calls.get());
     }
 
+    @Test
+    void unknownModelBlocksOnlyThatModel() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AtomicInteger calls = new AtomicInteger();
+        List<String> models = new ArrayList<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            models.add(model);
+            if ("llama-3.1-8b-instant".equals(model)) {
+                throw new AiRequestException(
+                        AiErrorKind.UNKNOWN_MODEL,
+                        404,
+                        "HTTP 404 unknown model: model_not_found llama-3.1-8b-instant",
+                        null);
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(List.of(entry("groq", "llama-3.1-8b-instant", 0)), clock, http);
+        AiRequestException first = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, first.kind());
+        assertTrue(first.getMessage().contains("llama-3.1-8b-instant"), first.getMessage());
+        assertEquals(1, calls.get());
+
+        String other = harness.provider().complete(
+                "ping", GenerationOverrides.none().withModel("openai/gpt-oss-20b"), false).join();
+        assertEquals("ok", other);
+        assertEquals(List.of("llama-3.1-8b-instant", "openai/gpt-oss-20b"), models);
+        assertEquals(2, calls.get());
+
+        AiRequestException again = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, again.kind());
+        assertTrue(again.getMessage().contains("llama-3.1-8b-instant"), again.getMessage());
+        assertEquals(2, calls.get());
+
+        CompletionException probe = assertThrows(CompletionException.class,
+                () -> harness.provider().complete("ping", GenerationOverrides.none(), true).join());
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, AiErrors.find(probe).kind());
+        assertEquals(3, calls.get());
+    }
+
+    @Test
+    void otherErrorsStillCoolTheWholeRow() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            throw new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500 from api.groq.com: down", null);
+        };
+        Harness harness = harness(List.of(entry("groq", "llama-3.1-8b-instant", 0)), clock, http);
+        AiRequestException first = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.OTHER, first.kind());
+        assertEquals(1, calls.get());
+
+        CompletionException error = assertThrows(CompletionException.class,
+                () -> harness.provider().complete(
+                        "ping", GenerationOverrides.none().withModel("openai/gpt-oss-20b"), false).join());
+        assertNotNull(AiErrors.find(error));
+        assertEquals(1, calls.get());
+    }
+
     private static String failover(AiRequestException firstError) {
         AtomicInteger calls = new AtomicInteger();
         ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {

@@ -61,7 +61,7 @@ The driver registers three context providers: `fast` (returns `coins ~12k`), `sl
 
 Config for the run: pool off, prewarm off, `limits.error-log-cooldown-seconds: 30`, `api.max-tokens: 256`. S3 uses the 1.0.x caps (30/min, 1000/day, 10 and 200 per player) and leaves quotas off. Every other scenario raises those four request caps to 100000 and reloads. S1-keywords turns `quotas.enabled` on with `consumers.default.tokens-per-day: 0`, so nothing is rejected. S6 turns quotas on with that consumer cap at 7200 and `missing-usage: estimate`. Prompt ids are `load_hit` (no context), `load_ctx` (`context: all`), `load_kw` (`knowledge: [rules]`, `knowledge-select: keywords`), and `harbor` (dialogue). Other prompts stay on full selection. `load_hit` and `load_ctx` share prompt text, so startup logs one warning that they share a cache entry. That line is outside the scenario windows. `plugins/NexusAI/knowledge/rules.md` is a short file the harness writes for `load_kw`.
 
-Keyword selection stays on the thread that already calls `KnowledgeComposer.prepare`. For a cached placeholder, including S1 and S1-keywords, that is the caller's thread. For `generate` it is a NexusAI thread inside the generation pipeline. It was left on that thread. No 1.2.0 load measurement showed it missing the MSPT budget. The Recorded run — 1.2.0 section below says not recorded, so that miss was not measured.
+Keyword selection stays on the thread that already calls `KnowledgeComposer.prepare`. For a cached placeholder, including S1 and S1-keywords, that is the caller's thread. For `generate` it is a NexusAI thread inside the generation pipeline. It was left on that thread. The recorded 1.2.0 run measured S1 and S1-keywords. Neither missed the MSPT budget.
 
 `nexusai-context-*` threads are started at enable (`ContextService.newWorkerPool` calls `prestartAllCoreThreads`). Before that, a scenario that never called a provider saw zero context threads even though the pool size was 2. The HTTP pool already kept its four threads. The regression is `ContextServiceTest.workerPoolPrestartsTheConfiguredDaemonThreads`.
 
@@ -93,9 +93,31 @@ The JFR 2% line is a gate only when the recording has at least 200 Server-thread
 
 ## Recorded run — 1.2.0
 
-Not recorded.
+Manual run, 2026-10-09. Commit 4446cbb, Paper 1.21.8 build 60, OpenJDK 25.0.4.1 (Temurin), 8 × Intel Xeon vCPU, Debian 13, kernel 6.12. Mock provider, latency 300 ms; baseline 60 s, load 120 s. S2-over and S-pool were not part of this run and are not recorded. The tables under Recorded run — 1.1.1 and Recorded run — 1.1.0, below, are not 1.2.0 results.
 
-No finished Paper load of baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S6, or S-pool was stored for this snapshot. The machine used to write these notes did not already have a JDK 25 install, and the load job was not run. MSPT and latency are not estimated. The tables under Recorded run — 1.1.1 and Recorded run — 1.1.0, below, are not 1.2.0 results. The full scenario list, the manual Folia check, the version bump, and the platform posts remain for the release candidate.
+### Mode A
+
+No players. Baseline MSPT 0.68 ms, TPS min 20.0.
+
+| Scenario | ΔMSPT | tick max | call p99 | notes | result |
+|----------|-------|----------|----------|-------|--------|
+| S1 | −0.19 | 6.8 ms | 37 µs | 119 900 resolutions, 1 request | pass |
+| S1-keywords | +0.05 | 128 ms | 101 µs | keyword knowledge on | pass |
+| S2 | −0.35 | 26 ms | 273 µs | 1199 requests = 1199 unique prompts | pass |
+| S2-over | | | | not recorded | |
+| S2-probe | −0.37 | 10 ms | 145 µs | events probe attached | pass |
+| S3 | −0.25 | 23 ms | 164 µs | 23 990 resolutions, 90 requests | pass |
+| S6 | −0.37 | 12 ms | 77 µs | 7209/7200 tokens, exhausted at 58 % | pass |
+| S-pool | | | | not recorded | |
+
+### Mode B
+
+20 mineflayer bots. Baseline MSPT 1.88 ms, TPS min 20.0.
+
+| Scenario | ΔMSPT | tick max | call p99 | notes | result |
+|----------|-------|----------|----------|-------|--------|
+| S4 | +0.01 | 31 ms | 403 µs | 4798 resolutions, 0 provide on main | pass |
+| S5 | −0.17 | 119 ms | — | 820 talk commands, 0 provide on main | pass |
 
 ## Recorded run — 1.1.1
 

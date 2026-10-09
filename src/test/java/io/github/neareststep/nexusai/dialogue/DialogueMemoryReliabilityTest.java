@@ -343,6 +343,65 @@ class DialogueMemoryReliabilityTest {
         }
     }
 
+    @Test
+    void stopDuringALargeFirstLoadStaysNearTheJoinGrace() throws Exception {
+        Fixture fixture = fixture("stop-large");
+        UUID player = fixture.player;
+        String pad = "x".repeat(1100);
+        StringBuilder body = new StringBuilder(12_000_000);
+        body.append("entries:\n  ").append(player).append(":\n");
+        for (int i = 0; i < 8_000; i++) {
+            body.append("    npc_").append(i).append(":\n");
+            body.append("      updated: 40\n");
+            body.append("      lines:\n");
+            body.append("      - role: user\n");
+            body.append("        text: ").append(pad).append('\n');
+        }
+        String original = body.toString();
+        Files.writeString(fixture.file, original, StandardCharsets.UTF_8);
+        fixture.store.append(player, "npc_0", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "npc_new", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = () -> {
+            inside.countDown();
+            try {
+                if (!release.await(15, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("large load was not released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertTrue(elapsed < 2_000L, "stop took " + elapsed + "ms");
+            String merged = Files.readString(fixture.file);
+            assertTrue(merged.startsWith(original), "existing characters were rewritten");
+            assertTrue(merged.contains("only-in-memory"), merged.substring(Math.max(0, merged.length() - 500)));
+            assertFalse(merged.contains("must-not-overwrite"), "a character already in the file was overwritten");
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertEquals(merged, Files.readString(fixture.file));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
     private static void awaitFinished(DialogueMemoryPersistence files) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (!files.loadFinished()) {
