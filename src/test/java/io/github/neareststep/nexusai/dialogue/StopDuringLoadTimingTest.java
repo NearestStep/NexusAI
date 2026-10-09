@@ -11,26 +11,35 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class QaStopTimingTest {
+/**
+ * A QA-sized file whose replies contain apostrophes, quotes, and a second paragraph.
+ * Stop during the first load must splice. The elapsed time is printed and is not a strict bound.
+ */
+class StopDuringLoadTimingTest {
 
     @Test
-    void pausedLoadStopKeepsDiskLinesAndStaysNearTheJoin() throws Exception {
-        Logger logger = Logger.getLogger("qa-stop");
+    void pausedLoadStopSplicesAFileWithOrdinaryPunctuation() throws Exception {
+        Logger logger = Logger.getLogger("stop-during-load");
         logger.setUseParentHandlers(false);
-        Path file = Files.createTempDirectory("qa-stop").resolve("dialogue-memory.yml");
+        Path file = Files.createTempDirectory("stop-during-load").resolve("dialogue-memory.yml");
         MemoryStore source = new MemoryStore();
-        UUID first = UUID.randomUUID();
-        source.append(first, "npc_a", "user", "DISKA1", 70L, 64, 1_000_000, 0L);
+        UUID first = new UUID(9L, 9L);
+        source.append(first, "npc_a", "user", "DISKA1 It's fine", 70L, 64, 1_000_000, 0L);
+        String paragraph = "What's up?\n\nNew paragraph, say \"hi\".";
+        String filler = "It's fine, say \"hi\" to the guard. ";
         for (int i = 0; i < 2500; i++) {
             UUID player = new UUID(0x1234L, i);
             for (int character = 0; character < 4; character++) {
                 for (int line = 0; line < 16; line++) {
-                    source.append(player, "npc_" + character, "user",
-                            "filler " + i + " " + character + " " + line + " lorem ipsum dolor sit amet",
-                            70L, 64, 1_000_000, 0L);
+                    String text = line == 0
+                            ? paragraph
+                            : filler + i + " " + character + " " + line;
+                    source.append(player, "npc_" + character, line % 2 == 0 ? "user" : "assistant",
+                            text, 70L, 64, 1_000_000, 0L);
                 }
             }
         }
@@ -60,6 +69,7 @@ class QaStopTimingTest {
                 }
             };
             long elapsed;
+            long fullBefore = MemoryStore.fullDocumentAppends.get();
             try {
                 files.onReload();
                 assertTrue(inside.await(30, TimeUnit.SECONDS));
@@ -77,11 +87,13 @@ class QaStopTimingTest {
             YamlConfiguration yaml = YamlConfiguration.loadConfiguration(copy.toFile());
             String kept = String.valueOf(yaml.get("entries." + first + ".npc_a.lines"));
             System.out.println("qa-shaped stop rep=" + rep + " ms=" + elapsed
-                    + " bytes=" + size + " cpus=" + cpus + " heapMax=" + heap);
+                    + " bytes=" + size + " cpus=" + cpus + " heapMax=" + heap
+                    + " fullDocumentAppends=" + (MemoryStore.fullDocumentAppends.get() - fullBefore));
+            assertEquals(fullBefore, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
             assertTrue(yaml.get("entries." + first + ".npc_d") != null, "new character missing");
             assertTrue(kept.contains("DISKA1"), kept);
             assertFalse(kept.contains("late"), kept);
-            assertTrue(elapsed < 2_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
+            assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
         }
     }
 

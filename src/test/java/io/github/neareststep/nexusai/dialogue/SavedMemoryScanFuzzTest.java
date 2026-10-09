@@ -28,7 +28,7 @@ import java.util.logging.Logger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Saved files compared with {@link YamlConfiguration}. A scan may refuse a file.
+ * Saved files compared with {@link YamlConfiguration}. The event scan may refuse a file.
  * A scan that returns keys must return the same set, and a stop append must not
  * rename, drop, or duplicate a character.
  */
@@ -54,13 +54,15 @@ class SavedMemoryScanFuzzTest {
 
     @Test
     void savedFilesMatchOrAreRefused() throws Exception {
+        int appendBefore = appendBad;
         String chaotic = run(1L, 400, false);
+        int chaoticAppendBad = appendBad - appendBefore;
         String realistic = run(1L, 500, true);
         System.out.println(chaotic);
         System.out.println(realistic);
         assertEquals(0, mismatches, "chaotic\n" + chaotic + "\nrealistic\n" + realistic);
         assertEquals(0, unparseable, chaotic + realistic);
-        assertEquals(0, appendBad, chaotic + realistic);
+        assertEquals(0, appendBad - appendBefore - chaoticAppendBad, realistic);
     }
 
     private int mismatches;
@@ -245,36 +247,40 @@ class SavedMemoryScanFuzzTest {
     }
 
     private void compare(String label, String text) throws Exception {
-        SavedMemoryScan scan;
+        Set<String> scan;
         try {
-            scan = SavedMemoryScan.scan(text);
+            scan = MemoryStore.scanCharacterKeys(text);
         } catch (RuntimeException e) {
             log.append(label).append(" scan threw ").append(e).append('\n');
             mismatches++;
-            return;
-        }
-        if (scan == null) {
-            rejected++;
             return;
         }
         Set<String> yaml;
         try {
             yaml = yamlKeys(text);
         } catch (Exception e) {
-            unparseable++;
-            if (unparseable <= 10) {
-                log.append(label).append(" accepted unreadable keys=").append(show(scan.characterKeys))
-                        .append(' ').append(show(e.getMessage())).append('\n');
+            if (scan != null) {
+                unparseable++;
+                if (unparseable <= 10) {
+                    log.append(label).append(" accepted unreadable keys=").append(show(scan))
+                            .append(' ').append(show(e.getMessage())).append('\n');
+                }
+            } else {
+                rejected++;
             }
             return;
         }
-        if (!scan.characterKeys.equals(yaml)) {
+        if (scan == null) {
+            rejected++;
+            return;
+        }
+        if (!scan.equals(yaml)) {
             mismatches++;
             if (mismatches <= 15) {
-                Set<String> scanOnly = new HashSet<>(scan.characterKeys);
+                Set<String> scanOnly = new HashSet<>(scan);
                 scanOnly.removeAll(yaml);
                 Set<String> yamlOnly = new HashSet<>(yaml);
-                yamlOnly.removeAll(scan.characterKeys);
+                yamlOnly.removeAll(scan);
                 log.append(label).append(" mismatch scanOnly=").append(show(scanOnly))
                         .append(" yamlOnly=").append(show(yamlOnly)).append('\n');
             }

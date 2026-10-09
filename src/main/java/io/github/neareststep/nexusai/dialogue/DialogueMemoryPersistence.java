@@ -25,6 +25,12 @@ final class DialogueMemoryPersistence {
      */
     static long shutdownLoadGraceMillis = 1_000L;
 
+    /**
+     * How long stop waits, after {@link #shutdownLoadGraceMillis}, for the key scan to finish.
+     * When this budget ends, or the scan fails, stop does not replace the file. Tests shorten this.
+     */
+    static volatile long shutdownAppendBudgetMillis = 5_000L;
+
     static final ThreadFactory DEFAULT_LOADER_THREADS = task -> {
         Thread worker = new Thread(task, "nexusai-memory-load");
         worker.setDaemon(true);
@@ -154,9 +160,11 @@ final class DialogueMemoryPersistence {
 
     /**
      * Stop. A load that is still running after {@link #shutdownLoadGraceMillis} does not block disable
-     * for the rest of the read. The key scan started with that load is then awaited with no further
-     * timeout, so stop can wait for the scan after the join. Disk characters are kept. Characters
-     * that were never in the file are appended. A failed load does not replace the file.
+     * for the rest of the read. The key scan started with that load is then awaited only until
+     * {@link #shutdownAppendBudgetMillis} after the join. Disk characters are kept. Characters that
+     * were never in the file are appended when that scan has read the file. If the scan is not
+     * finished, the scan thread failed, or the file cannot be read, stop does not replace the file
+     * and one warning names how many characters were not saved.
      */
     void shutdown() {
         try {
@@ -186,8 +194,10 @@ final class DialogueMemoryPersistence {
             if (pending != null && pending.isAlive()) {
                 DialogueSettings current = settings.get();
                 boolean summaries = current != null && current.summaryEnabled();
+                long deadline = System.nanoTime()
+                        + Math.max(0L, shutdownAppendBudgetMillis) * 1_000_000L;
                 boolean wrote = memory.appendCharactersAbsentFromFile(
-                        file.get(), logger, summaries, secretList(), scan);
+                        file.get(), logger, summaries, secretList(), scan, deadline);
                 if (!wrote) {
                     noteSkippedSave();
                 }
