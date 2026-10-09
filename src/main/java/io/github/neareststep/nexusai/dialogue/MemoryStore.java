@@ -20,7 +20,11 @@ import org.yaml.snakeyaml.resolver.Resolver;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.StringReader;
 import java.io.Writer;
@@ -47,7 +51,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
@@ -75,6 +78,21 @@ public final class MemoryStore {
 
     /** Runs on the key-scan thread before it reads the file. Tests use this to pause or fail that scan. */
     static volatile Runnable beforeKeyScan;
+
+    /**
+     * Runs after a stop write has filled its temporary file and before that file is renamed.
+     * Tests use this to cross the stop budget. A null hook is the production path.
+     */
+    static volatile Runnable beforeReplace;
+
+    /** When set, the next stop rename fails and the temporary file is removed. */
+    static volatile boolean failNextPublish;
+
+    /**
+     * Set when stop gives up on a load that is still reading. The load returns without
+     * replacing the file and without logging a second failure.
+     */
+    static volatile boolean abandonActiveLoad;
 
     /**
      * Times {@link #appendWithFullDocument} ran. A stop that splices, or that refuses the file,
@@ -240,6 +258,9 @@ public final class MemoryStore {
         if (pause != null) {
             pause.run();
         }
+        if (abandonActiveLoad) {
+            return;
+        }
         YamlConfiguration yaml = readRedacting(file, secrets, logger, this);
         if (yaml == null) {
             return;
@@ -319,10 +340,13 @@ public final class MemoryStore {
     public boolean loadForPersistence(File file, long nowMillis, long expiryMillis, Logger logger, Iterable<String> secrets) {
         diskLock.lock();
         try {
-            if (saveBlocked) {
+            if (saveBlocked || abandonActiveLoad) {
                 return false;
             }
             loadHoldingLock(file, nowMillis, expiryMillis, logger, secrets);
+            if (abandonActiveLoad) {
+                return false;
+            }
             return !saveBlocked;
         } finally {
             diskLock.unlock();
@@ -334,9 +358,14 @@ public final class MemoryStore {
         if (file == null || !file.isFile()) {
             return null;
         }
+        if (abandonActiveLoad) {
+            return null;
+        }
         YamlConfiguration yaml = new YamlConfiguration();
-        try {
-            yaml.load(file);
+        try (InputStream in = new AbandonableInputStream(new FileInputStream(file))) {
+            yaml.load(new InputStreamReader(in, StandardCharsets.UTF_8));
+        } catch (LoadAbandoned ignored) {
+            return null;
         } catch (Exception e) {
             boolean preserved = quarantineUnreadable(file, secrets, logger, e, store);
             if (store != null && !preserved) {
@@ -485,34 +514,76 @@ public final class MemoryStore {
         }
         diskLock.lock();
         try {
-            saveHoldingLock(file, logger, summaries, publish);
+            saveHoldingLock(file, logger, summaries, publish, Long.MAX_VALUE);
         } finally {
             diskLock.unlock();
         }
     }
 
-    private void saveHoldingLock(File file, Logger logger, boolean summaries, Publish publish) {
-        if (saveBlocked) {
-            if (logger != null && !saveBlockedLogged) {
-                saveBlockedLogged = true;
-                logger.warning("Refusing to overwrite dialogue-memory.yml because it could not be read. "
-                        + "Repair the broken file and restart.");
+    /**
+     * The save stop uses after a live load has finished. A deadline that has already passed does
+     * not create a temporary file. A write that crosses the deadline does not rename.
+     */
+    StopSave saveForStop(File file, Logger logger, boolean summaries, long deadlineNanos) {
+        if (file == null) {
+            return StopSave.SKIPPED;
+        }
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return StopSave.PAST_DEADLINE;
+        }
+        diskLock.lock();
+        try {
+            if (saveBlocked) {
+                noteSaveBlocked(logger);
+                return StopSave.NOT_WRITTEN;
             }
+            WriteResult wrote = publishYaml(
+                    file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+            return switch (wrote) {
+                case PUBLISHED -> StopSave.SAVED;
+                case PAST_DEADLINE -> StopSave.PAST_DEADLINE;
+                case FAILED -> StopSave.NOT_WRITTEN;
+            };
+        } finally {
+            diskLock.unlock();
+        }
+    }
+
+    private void saveHoldingLock(File file, Logger logger, boolean summaries, Publish publish, long deadlineNanos) {
+        if (saveBlocked) {
+            noteSaveBlocked(logger);
             return;
         }
-        publishYaml(file, document(summaries), logger, summaries, publish);
+        publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos);
+    }
+
+    private void noteSaveBlocked(Logger logger) {
+        if (logger != null && !saveBlockedLogged) {
+            saveBlockedLogged = true;
+            logger.warning("Refusing to overwrite dialogue-memory.yml because it could not be read. "
+                    + "Repair the broken file and restart.");
+        }
     }
 
     /**
      * Writes {@code yaml} via a temp file and {@code publish}. A backup failure is logged and does
-     * not also log a save failure. Returns false when the file was not replaced.
+     * not also log a save failure. The temporary file is removed when the rename does not happen.
      */
-    private boolean publishYaml(
-            File file, YamlConfiguration yaml, Logger logger, boolean summaries, Publish publish) {
+    private WriteResult publishYaml(
+            File file,
+            YamlConfiguration yaml,
+            Logger logger,
+            boolean summaries,
+            Publish publish,
+            long deadlineNanos
+    ) {
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return WriteResult.PAST_DEADLINE;
+        }
         File parent = file.getParentFile();
         try {
             if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
-                return false;
+                return WriteResult.FAILED;
             }
             if (summaries && file.isFile() && !hasFormat2(file)) {
                 try {
@@ -524,7 +595,7 @@ public final class MemoryStore {
                     if (logger != null) {
                         LogRedaction.warning(logger, "Failed to back up dialogue-memory.yml", e, secrets());
                     }
-                    return false;
+                    return WriteResult.FAILED;
                 }
             }
             File temporary = new File(parent == null ? new File(".") : parent,
@@ -537,19 +608,42 @@ public final class MemoryStore {
                 allowLongSimpleKeys(yaml);
                 yaml.save(temporary);
             }
+            WriteResult gate = gateReplace(deadlineNanos);
+            if (gate != WriteResult.PUBLISHED) {
+                return gate;
+            }
             publish.publish(temporary, file);
             } finally {
                 if (temporary.isFile() && !temporary.equals(file)) {
                     temporary.delete();
                 }
             }
-            return true;
+            return WriteResult.PUBLISHED;
         } catch (IOException e) {
             if (logger != null) {
                 LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
             }
-            return false;
+            return WriteResult.FAILED;
         }
+    }
+
+    /**
+     * Decides whether a temporary file may replace the live file. A budget that has already ended
+     * leaves the live file untouched. {@link #failNextPublish} forces the write to fail.
+     */
+    private static WriteResult gateReplace(long deadlineNanos) throws IOException {
+        Runnable hook = beforeReplace;
+        if (hook != null && deadlineNanos != Long.MAX_VALUE) {
+            hook.run();
+        }
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return WriteResult.PAST_DEADLINE;
+        }
+        if (failNextPublish) {
+            failNextPublish = false;
+            throw new IOException("dialogue-memory.yml could not be written");
+        }
+        return WriteResult.PUBLISHED;
     }
 
     /**
@@ -557,12 +651,13 @@ public final class MemoryStore {
      * was. An unreadable file is left untouched. Does not take {@link #diskLock}: a load may hold
      * that lock for the whole read, and shutdown has to finish without waiting for it.
      * <p>
-     * When {@code prepared} is set, it is the scan started with the load. Stop waits for it only
-     * until {@code deadlineNanos}. A scan that cannot splice a file a normal load can still read
-     * rewrites the document, when that rewrite finishes before the deadline. A scan that is still
+     * When {@code prepared} is set, it is the scan stop started. Stop waits for it only until
+     * {@code deadlineNanos}. A scan that cannot splice a file does not read that file again when
+     * a load of it is already running; the caller waits for that load instead. A direct call, with
+     * no live load, may still rewrite a readable file the scan cannot splice. A scan that is still
      * running, that crashed, or that cannot read the file does not publish, and one warning names
-     * how many characters were not saved and why. A direct call with no prepared scan may still
-     * rewrite a readable file when the event scan cannot splice it.
+     * how many characters were not saved and why. The deadline also covers the write: a rename is
+     * not started after it has passed.
      *
      * @return {@code true} when a merged file was published
      */
@@ -587,21 +682,34 @@ public final class MemoryStore {
             return false;
         }
         if (prepared != null) {
-            return appendFromPreparedScan(file, logger, summaries, secrets, prepared, deadlineNanos);
+            PreparedKind kind = takePrepared(file, logger, summaries, secrets, prepared, deadlineNanos);
+            if (kind == PreparedKind.REFUSED) {
+                return finishWithFullDocument(file, logger, summaries, secrets, deadlineNanos);
+            }
+            warnFor(kind, logger, summaries);
+            return kind == PreparedKind.PUBLISHED;
         }
         Snapshot snap;
         try {
-            snap = readSnapshot(file);
+            snap = readSnapshot(file, null);
         } catch (IOException e) {
             warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
             return false;
         }
+        if (snap.unreadable) {
+            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
+            return false;
+        }
         if (snap.text != null && snap.outline != null) {
-            SpliceResult spliced = splice(file, snap.text, snap.outline, logger, summaries, secrets);
+            SpliceResult spliced = splice(file, snap.text, snap.outline, logger, summaries, secrets, Long.MAX_VALUE);
             if (spliced == SpliceResult.PUBLISHED) {
                 return true;
             }
             if (spliced == SpliceResult.NOTHING) {
+                return false;
+            }
+            if (spliced == SpliceResult.PAST_DEADLINE) {
+                warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.BUDGET);
                 return false;
             }
         }
@@ -612,14 +720,35 @@ public final class MemoryStore {
         if (outcome == FullAppend.NOTHING) {
             return false;
         }
-        warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
+        warnUnsaved(logger, unsavedCharacterCount(summaries), reasonFor(outcome));
         return false;
     }
 
     /**
-     * Splice using the scan that overlapped the load. Does not load the document again.
+     * Splice from the scan stop started. Never reads the file a second time. {@link PreparedKind#REFUSED}
+     * means the caller should wait for a load that is already running, or, when there is no such
+     * load, rewrite the document.
      */
-    private boolean appendFromPreparedScan(
+    LiveSplice spliceForStop(
+            File file,
+            Logger logger,
+            boolean summaries,
+            Iterable<String> secrets,
+            AbsentScan prepared,
+            long deadlineNanos
+    ) {
+        if (prepared == null) {
+            return LiveSplice.WAIT_FOR_LOAD;
+        }
+        PreparedKind kind = takePrepared(file, logger, summaries, secrets, prepared, deadlineNanos);
+        if (kind == PreparedKind.REFUSED) {
+            return LiveSplice.WAIT_FOR_LOAD;
+        }
+        warnFor(kind, logger, summaries);
+        return LiveSplice.DONE;
+    }
+
+    private PreparedKind takePrepared(
             File file,
             Logger logger,
             boolean summaries,
@@ -629,33 +758,60 @@ public final class MemoryStore {
     ) {
         Snapshot snap = prepared.awaitSnapshot(deadlineNanos);
         if (prepared.crashed()) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.SCAN_FAILED);
-            return false;
+            prepared.releaseAll();
+            return PreparedKind.SCAN_FAILED;
         }
         if (snap == null) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.BUDGET);
-            return false;
+            prepared.releaseAll();
+            return PreparedKind.BUDGET;
+        }
+        if (snap.unreadable) {
+            prepared.releaseAll();
+            return PreparedKind.UNREADABLE;
         }
         boolean canSplice = false;
         try {
             canSplice = snap.text != null && snap.outline != null && bytesMatch(file, snap);
         } catch (IOException e) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
-            return false;
+            prepared.releaseAll();
+            return PreparedKind.UNREADABLE;
         }
-        String text = snap.text;
-        StreamOutline outline = snap.outline;
-        prepared.releaseBytes();
-        if (canSplice) {
-            SpliceResult spliced = splice(file, text, outline, logger, summaries, secrets);
-            if (spliced == SpliceResult.PUBLISHED) {
-                return true;
-            }
-            if (spliced == SpliceResult.NOTHING) {
-                return false;
-            }
+        String text = canSplice ? snap.text : null;
+        StreamOutline outline = canSplice ? snap.outline : null;
+        prepared.releaseAll();
+        if (!canSplice) {
+            return PreparedKind.REFUSED;
         }
-        return finishWithFullDocument(file, logger, summaries, secrets, deadlineNanos);
+        SpliceResult spliced = splice(file, text, outline, logger, summaries, secrets, deadlineNanos);
+        return switch (spliced) {
+            case PUBLISHED -> PreparedKind.PUBLISHED;
+            case NOTHING -> PreparedKind.NOTHING;
+            case PAST_DEADLINE -> PreparedKind.BUDGET;
+            case FAILED -> PreparedKind.REFUSED;
+        };
+    }
+
+    private void warnFor(PreparedKind kind, Logger logger, boolean summaries) {
+        SkipReason reason = switch (kind) {
+            case BUDGET -> SkipReason.BUDGET;
+            case SCAN_FAILED -> SkipReason.SCAN_FAILED;
+            case UNREADABLE -> SkipReason.UNREADABLE;
+            case UNWRITTEN -> SkipReason.UNWRITTEN;
+            case PUBLISHED, NOTHING, REFUSED -> null;
+        };
+        if (reason != null) {
+            warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
+        }
+    }
+
+    void warnStop(Logger logger, boolean summaries, StopSkip skip) {
+        SkipReason reason = switch (skip) {
+            case BUDGET -> SkipReason.BUDGET;
+            case SCAN_FAILED -> SkipReason.SCAN_FAILED;
+            case UNREADABLE -> SkipReason.UNREADABLE;
+            case UNWRITTEN -> SkipReason.UNWRITTEN;
+        };
+        warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
     }
 
     /**
@@ -676,9 +832,16 @@ public final class MemoryStore {
         if (outcome == FullAppend.NOTHING) {
             return false;
         }
-        SkipReason reason = outcome == FullAppend.NOT_FINISHED ? SkipReason.BUDGET : SkipReason.UNREADABLE;
-        warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
+        warnUnsaved(logger, unsavedCharacterCount(summaries), reasonFor(outcome));
         return false;
+    }
+
+    private static SkipReason reasonFor(FullAppend outcome) {
+        return switch (outcome) {
+            case NOT_FINISHED -> SkipReason.BUDGET;
+            case UNWRITTEN -> SkipReason.UNWRITTEN;
+            default -> SkipReason.UNREADABLE;
+        };
     }
 
     private SpliceResult splice(
@@ -687,8 +850,12 @@ public final class MemoryStore {
             StreamOutline outline,
             Logger logger,
             boolean summaries,
-            Iterable<String> secrets
+            Iterable<String> secrets,
+            long deadlineNanos
     ) {
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return SpliceResult.PAST_DEADLINE;
+        }
         Map<String, StoredTranscript> extra;
         synchronized (this) {
             extra = transcriptsAbsent(outline.characterKeys, summaries);
@@ -697,43 +864,57 @@ public final class MemoryStore {
             return SpliceResult.NOTHING;
         }
         List<TextEdit> edits = editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
-        if (edits != null && publishEdits(file, text, edits, logger, summaries, outline.format2, secrets)) {
-            return SpliceResult.PUBLISHED;
+        if (edits == null) {
+            return SpliceResult.FAILED;
         }
-        return SpliceResult.FAILED;
+        WriteResult wrote = publishEdits(file, text, edits, logger, summaries, outline.format2, secrets, deadlineNanos);
+        return switch (wrote) {
+            case PUBLISHED -> SpliceResult.PUBLISHED;
+            case PAST_DEADLINE -> SpliceResult.PAST_DEADLINE;
+            case FAILED -> SpliceResult.FAILED;
+        };
     }
 
     private enum SpliceResult {
-        NOTHING, PUBLISHED, FAILED
+        NOTHING, PUBLISHED, FAILED, PAST_DEADLINE
     }
 
     /**
-     * Reads player and character keys on a daemon thread. Stop starts this when the load starts,
-     * so the read overlaps the load and the one-second join.
+     * Reads player and character keys on a daemon thread. Stop starts this when stop begins,
+     * so the read overlaps the one-second join.
      */
     static AbsentScan startAbsentScan(File file) {
         return AbsentScan.start(file);
     }
 
-    private boolean publishEdits(
+    /** Stops a key scan that is still reading. A scan that has already finished is left alone. */
+    static void abandonScan(AbsentScan scan) {
+        if (scan != null) {
+            scan.abandonAndJoin();
+        }
+    }
+
+    private WriteResult publishEdits(
             File file,
             String text,
             List<TextEdit> edits,
             Logger logger,
             boolean summaries,
             boolean format2,
-            Iterable<String> secrets
+            Iterable<String> secrets,
+            long deadlineNanos
     ) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
-                return false;
+                return WriteResult.FAILED;
             }
             if (loaderMustNotPublish) {
-                return true;
+                return WriteResult.PUBLISHED;
             }
             loaderMustNotPublish = true;
-            boolean published = writeAppended(file, text, edits, logger, summaries, format2, secrets);
-            if (!published) {
+            WriteResult published = writeAppended(
+                    file, text, edits, logger, summaries, format2, secrets, deadlineNanos);
+            if (published != WriteResult.PUBLISHED) {
                 loaderMustNotPublish = false;
             }
             return published;
@@ -742,8 +923,8 @@ public final class MemoryStore {
 
     /**
      * The 1.1.2 merge: load the document, add characters that are absent, and write it back.
-     * Used when the event scan cannot splice. A deadline other than {@link Long#MAX_VALUE} runs
-     * the load on a daemon thread and does not publish after that deadline.
+     * Used only when no load of this file is already running. The load runs on the caller.
+     * A deadline that has already passed does not start the load or the rename.
      */
     private FullAppend appendWithFullDocument(
             File file, Logger logger, boolean summaries, Iterable<String> secrets, long deadlineNanos) {
@@ -751,37 +932,11 @@ public final class MemoryStore {
             return FullAppend.NOT_FINISHED;
         }
         fullDocumentAppends.incrementAndGet();
-        if (deadlineNanos == Long.MAX_VALUE) {
-            return mergeLoaded(file, loadDocument(file), logger, summaries, secrets);
-        }
-        AtomicReference<YamlConfiguration> loaded = new AtomicReference<>();
-        AtomicReference<Boolean> unreadable = new AtomicReference<>();
-        Thread worker = new Thread(() -> {
-            YamlConfiguration yaml = loadDocument(file);
-            if (yaml == null) {
-                unreadable.set(Boolean.TRUE);
-                return;
-            }
-            loaded.set(yaml);
-        }, "nexusai-memory-merge");
-        worker.setDaemon(true);
-        worker.start();
-        long remaining = deadlineNanos - System.nanoTime();
-        try {
-            if (remaining > 0) {
-                worker.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remaining)));
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        YamlConfiguration yaml = loadDocument(file);
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
             return FullAppend.NOT_FINISHED;
         }
-        if (worker.isAlive() || (loaded.get() == null && unreadable.get() == null)) {
-            return FullAppend.NOT_FINISHED;
-        }
-        if (unreadable.get() != null) {
-            return FullAppend.UNREADABLE;
-        }
-        return mergeLoaded(file, loaded.get(), logger, summaries, secrets);
+        return mergeLoaded(file, yaml, logger, summaries, secrets, deadlineNanos);
     }
 
     private static YamlConfiguration loadDocument(File file) {
@@ -795,9 +950,18 @@ public final class MemoryStore {
     }
 
     private FullAppend mergeLoaded(
-            File file, YamlConfiguration yaml, Logger logger, boolean summaries, Iterable<String> secrets) {
+            File file,
+            YamlConfiguration yaml,
+            Logger logger,
+            boolean summaries,
+            Iterable<String> secrets,
+            long deadlineNanos
+    ) {
         if (yaml == null) {
             return FullAppend.UNREADABLE;
+        }
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return FullAppend.NOT_FINISHED;
         }
         Set<String> present = characterKeys(yaml);
         Map<String, StoredTranscript> extra;
@@ -813,17 +977,42 @@ public final class MemoryStore {
         for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
             writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
         }
-        return publishYamlLocked(file, yaml, logger, summaries) ? FullAppend.PUBLISHED : FullAppend.UNREADABLE;
+        return switch (publishYamlLocked(file, yaml, logger, summaries, deadlineNanos)) {
+            case PUBLISHED -> FullAppend.PUBLISHED;
+            case PAST_DEADLINE -> FullAppend.NOT_FINISHED;
+            case FAILED -> FullAppend.UNWRITTEN;
+        };
     }
 
     private enum FullAppend {
-        PUBLISHED, NOTHING, UNREADABLE, NOT_FINISHED
+        PUBLISHED, NOTHING, UNREADABLE, UNWRITTEN, NOT_FINISHED
+    }
+
+    enum StopSave {
+        SAVED, PAST_DEADLINE, NOT_WRITTEN, SKIPPED
+    }
+
+    enum StopSkip {
+        BUDGET, SCAN_FAILED, UNREADABLE, UNWRITTEN
+    }
+
+    enum LiveSplice {
+        DONE, WAIT_FOR_LOAD
+    }
+
+    private enum PreparedKind {
+        PUBLISHED, NOTHING, REFUSED, BUDGET, SCAN_FAILED, UNREADABLE, UNWRITTEN
+    }
+
+    private enum WriteResult {
+        PUBLISHED, FAILED, PAST_DEADLINE
     }
 
     private enum SkipReason {
         BUDGET("it did not finish within the stop budget"),
         SCAN_FAILED("the key scan failed"),
-        UNREADABLE("dialogue-memory.yml could not be read");
+        UNREADABLE("dialogue-memory.yml could not be read"),
+        UNWRITTEN("dialogue-memory.yml could not be written");
 
         private final String text;
 
@@ -832,17 +1021,18 @@ public final class MemoryStore {
         }
     }
 
-    private boolean publishYamlLocked(File file, YamlConfiguration yaml, Logger logger, boolean summaries) {
+    private WriteResult publishYamlLocked(
+            File file, YamlConfiguration yaml, Logger logger, boolean summaries, long deadlineNanos) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
-                return false;
+                return WriteResult.FAILED;
             }
             if (loaderMustNotPublish) {
-                return true;
+                return WriteResult.PUBLISHED;
             }
             loaderMustNotPublish = true;
-            boolean published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace);
-            if (!published) {
+            WriteResult published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+            if (published != WriteResult.PUBLISHED) {
                 loaderMustNotPublish = false;
             }
             return published;
@@ -854,11 +1044,11 @@ public final class MemoryStore {
      * event, so a continuation line does not hide a character. Null when the shape is not one this
      * append can splice without rewriting existing text.
      */
-    private static StreamOutline scanEvents(String text) {
+    private static EventRead parseEvents(String text, AbsentScan scan) throws IOException {
         eventScans.incrementAndGet();
         // These breaks are line breaks to the parser and are not stable offsets in the original text.
         if (text.indexOf('\u0085') >= 0 || text.indexOf('\u2028') >= 0 || text.indexOf('\u2029') >= 0) {
-            return null;
+            return EventRead.refused();
         }
         LoaderOptions options = new LoaderOptions();
         options.setCodePointLimit(Integer.MAX_VALUE);
@@ -870,6 +1060,9 @@ public final class MemoryStore {
         MarkIndex marks = new MarkIndex();
         try {
             for (Event event : yaml.parse(new StringReader(text))) {
+                if (scan != null && scan.abandoned) {
+                    throw new LoadAbandoned();
+                }
                 switch (event.getEventId()) {
                     case StreamStart, StreamEnd, DocumentStart, DocumentEnd, Comment -> {
                     }
@@ -887,13 +1080,15 @@ public final class MemoryStore {
                     default -> throw new ScanFallback();
                 }
             }
+        } catch (ScanFallback e) {
+            return EventRead.refused();
         } catch (RuntimeException e) {
-            return null;
+            return EventRead.unreadable();
         }
         if (!stack.isEmpty()) {
-            return null;
+            return EventRead.refused();
         }
-        return outline;
+        return EventRead.ok(outline);
     }
 
     /**
@@ -903,11 +1098,16 @@ public final class MemoryStore {
      * later load drops it.
      */
     static Set<String> scanCharacterKeys(String text) {
-        StreamOutline outline = scanEvents(text);
-        if (outline == null) {
+        EventRead read;
+        try {
+            read = parseEvents(text, null);
+        } catch (IOException e) {
             return null;
         }
-        return Set.copyOf(outline.characterKeys);
+        if (read.outline == null) {
+            return null;
+        }
+        return Set.copyOf(read.outline.characterKeys);
     }
 
     private static void onMappingStart(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, MappingStartEvent event) {
@@ -1649,15 +1849,19 @@ public final class MemoryStore {
         return masked;
     }
 
-    private boolean writeAppended(
+    private WriteResult writeAppended(
             File file,
             String text,
             List<TextEdit> edits,
             Logger logger,
             boolean summaries,
             boolean format2,
-            Iterable<String> secrets
+            Iterable<String> secrets,
+            long deadlineNanos
     ) {
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return WriteResult.PAST_DEADLINE;
+        }
         if (summaries && !format2) {
             try {
                 java.nio.file.Path backup = FileBackup.backup(file.toPath());
@@ -1668,7 +1872,7 @@ public final class MemoryStore {
                 if (logger != null) {
                     LogRedaction.warning(logger, "Failed to back up dialogue-memory.yml", e, secrets);
                 }
-                return false;
+                return WriteResult.FAILED;
             }
         }
         File parent = file.getParentFile();
@@ -1676,17 +1880,21 @@ public final class MemoryStore {
                 file.getName() + "." + UUID.randomUUID() + ".tmp");
         try {
             if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
-                return false;
+                return WriteResult.FAILED;
             }
             AtomicFiles.createPrivate(temporary.toPath());
             writeMerged(temporary.toPath(), text, edits);
+            WriteResult gate = gateReplace(deadlineNanos);
+            if (gate != WriteResult.PUBLISHED) {
+                return gate;
+            }
             durableReplace(temporary.toPath(), file.toPath());
-            return true;
+            return WriteResult.PUBLISHED;
         } catch (IOException e) {
             if (logger != null) {
                 LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
             }
-            return false;
+            return WriteResult.FAILED;
         } finally {
             if (temporary.isFile() && !temporary.equals(file)) {
                 temporary.delete();
@@ -2263,36 +2471,117 @@ public final class MemoryStore {
         return Arrays.equals(snap.bytes, Files.readAllBytes(file.toPath()));
     }
 
-    private static Snapshot readSnapshot(File file) throws IOException {
+    private static Snapshot readSnapshot(File file, AbsentScan scan) throws IOException {
         if (file == null || !file.isFile()) {
             return Snapshot.EMPTY;
         }
-        byte[] bytes = Files.readAllBytes(file.toPath());
+        byte[] bytes = readBytes(file, scan);
         String text;
         try {
             text = decodeUtf8(bytes);
         } catch (CharacterCodingException e) {
-            return new Snapshot(bytes, null, null);
+            return new Snapshot(bytes, null, null, true);
         }
-        StreamOutline outline = scanEvents(text);
-        return new Snapshot(bytes, text, outline);
+        EventRead read = parseEvents(text, scan);
+        return new Snapshot(bytes, text, read.outline, read.unreadable);
+    }
+
+    private static byte[] readBytes(File file, AbsentScan scan) throws IOException {
+        try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
+            long size = channel.size();
+            if (size > Integer.MAX_VALUE) {
+                throw new IOException("dialogue-memory.yml is too large");
+            }
+            byte[] bytes = new byte[(int) size];
+            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+            while (buffer.hasRemaining()) {
+                if (scan != null && scan.abandoned) {
+                    throw new LoadAbandoned();
+                }
+                int read = channel.read(buffer);
+                if (read < 0) {
+                    break;
+                }
+            }
+            if (scan != null && scan.abandoned) {
+                throw new LoadAbandoned();
+            }
+            return bytes;
+        }
     }
 
     private static final class Snapshot {
-        private static final Snapshot EMPTY = new Snapshot(null, null, null);
+        private static final Snapshot EMPTY = new Snapshot(null, null, null, false);
         private final byte[] bytes;
         private final String text;
         private final StreamOutline outline;
+        private final boolean unreadable;
 
-        private Snapshot(byte[] bytes, String text, StreamOutline outline) {
+        private Snapshot(byte[] bytes, String text, StreamOutline outline, boolean unreadable) {
             this.bytes = bytes;
             this.text = text;
             this.outline = outline;
+            this.unreadable = unreadable;
+        }
+    }
+
+    private static final class EventRead {
+        private final StreamOutline outline;
+        private final boolean unreadable;
+
+        private EventRead(StreamOutline outline, boolean unreadable) {
+            this.outline = outline;
+            this.unreadable = unreadable;
+        }
+
+        private static EventRead ok(StreamOutline outline) {
+            return new EventRead(outline, false);
+        }
+
+        private static EventRead refused() {
+            return new EventRead(null, false);
+        }
+
+        private static EventRead unreadable() {
+            return new EventRead(null, true);
+        }
+    }
+
+    /** Stops a file read without treating the file as broken. */
+    private static final class LoadAbandoned extends IOException {
+        private LoadAbandoned() {
+            super("dialogue-memory read stopped");
         }
     }
 
     /**
-     * Key scan started when a load starts. The bytes are the file as it was at that moment.
+     * A file stream that stops when stop gives up on the load. The next read fails and the
+     * load returns without quarantining the file.
+     */
+    private static final class AbandonableInputStream extends FilterInputStream {
+        private AbandonableInputStream(InputStream in) {
+            super(in);
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (abandonActiveLoad) {
+                throw new LoadAbandoned();
+            }
+            return super.read();
+        }
+
+        @Override
+        public int read(byte[] destination, int offset, int length) throws IOException {
+            if (abandonActiveLoad) {
+                throw new LoadAbandoned();
+            }
+            return super.read(destination, offset, length);
+        }
+    }
+
+    /**
+     * Key scan started when stop begins. The bytes are the file as it was at that moment.
      * Stop uses them only when the live file is still those bytes.
      */
     static final class AbsentScan implements Runnable {
@@ -2301,6 +2590,7 @@ public final class MemoryStore {
         private volatile Snapshot snapshot = Snapshot.EMPTY;
         private volatile boolean crashed;
         private volatile boolean finished;
+        private volatile boolean abandoned;
 
         private AbsentScan(File file) {
             this.file = file;
@@ -2341,12 +2631,19 @@ public final class MemoryStore {
             return crashed;
         }
 
-        private void releaseBytes() {
-            Snapshot current = snapshot;
-            if (current == null || current.bytes == null) {
-                return;
+        private void releaseAll() {
+            snapshot = Snapshot.EMPTY;
+        }
+
+        private void abandonAndJoin() {
+            abandoned = true;
+            snapshot = Snapshot.EMPTY;
+            thread.interrupt();
+            try {
+                thread.join(2_000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-            snapshot = new Snapshot(null, current.text, current.outline);
         }
 
         @Override
@@ -2356,7 +2653,12 @@ public final class MemoryStore {
                 if (hook != null) {
                     hook.run();
                 }
-                snapshot = readSnapshot(file);
+                if (abandoned) {
+                    return;
+                }
+                snapshot = readSnapshot(file, this);
+            } catch (LoadAbandoned ignored) {
+                snapshot = Snapshot.EMPTY;
             } catch (Throwable ignored) {
                 crashed = true;
                 snapshot = Snapshot.EMPTY;
