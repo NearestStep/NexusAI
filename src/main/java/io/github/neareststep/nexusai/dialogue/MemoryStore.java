@@ -7,9 +7,15 @@ import io.github.neareststep.nexusai.config.SecretMask;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.events.MappingStartEvent;
+import org.yaml.snakeyaml.events.ScalarEvent;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
@@ -518,6 +524,12 @@ public final class MemoryStore {
      * Adds transcripts that are not already in {@code file}, leaving every on-disk character as it
      * was. An unreadable file is left untouched. Does not take {@link #diskLock}: a load may hold
      * that lock for the whole read, and shutdown has to finish without waiting for it.
+     * <p>
+     * Existing character ids are found with a streaming parse, and only the missing characters are
+     * inserted. The characters already in the file are not loaded into a document and are not
+     * rewritten. If that parse cannot read the file, the whole document is loaded and the missing
+     * characters are still appended. If the file still cannot be read, one warning names how many
+     * characters were not saved.
      *
      * @return {@code true} when a merged file was published
      */
@@ -529,35 +541,32 @@ public final class MemoryStore {
         try {
             text = decodeUtf8(Files.readAllBytes(file.toPath()));
         } catch (IOException e) {
+            warnUnsaved(logger, unsavedCharacterCount(summaries));
             return false;
         }
-        boolean trailingNewline = text.endsWith("\n");
-        String newline = text.contains("\r\n") ? "\r\n" : "\n";
-        List<String> lines = new ArrayList<>(Arrays.asList(text.replace("\r\n", "\n").replace("\r", "\n").split("\n", -1)));
-        if (trailingNewline && !lines.isEmpty() && lines.get(lines.size() - 1).isEmpty()) {
-            lines.remove(lines.size() - 1);
-        }
-        Outline outline = scanOutline(lines);
-        if (outline == null) {
-            return false;
-        }
-        Map<String, StoredTranscript> extra;
-        synchronized (this) {
-            extra = transcriptsAbsent(outline.characterKeys, summaries);
-        }
-        if (extra.isEmpty()) {
-            return false;
-        }
-        List<String> merged = insertAbsent(lines, outline, redactExtra(extra, secrets), summaries);
-        if (merged == null) {
-            return false;
-        }
-        String body = String.join(newline, merged);
-        if (trailingNewline || !body.endsWith(newline)) {
-            if (!body.endsWith(newline)) {
-                body = body + newline;
+        StreamOutline outline = scanEvents(text);
+        if (outline != null) {
+            Map<String, StoredTranscript> extra;
+            synchronized (this) {
+                extra = transcriptsAbsent(outline.characterKeys, summaries);
+            }
+            if (extra.isEmpty()) {
+                return false;
+            }
+            String body = spliceAbsent(text, outline, redactExtra(extra, secrets), summaries);
+            if (body != null && publishBody(file, body, logger, summaries, outline.format2, secrets)) {
+                return true;
             }
         }
+        if (appendWithFullDocument(file, logger, summaries, secrets)) {
+            return true;
+        }
+        warnUnsaved(logger, unsavedCharacterCount(summaries));
+        return false;
+    }
+
+    private boolean publishBody(
+            File file, String body, Logger logger, boolean summaries, boolean format2, Iterable<String> secrets) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
                 return false;
@@ -566,7 +575,7 @@ public final class MemoryStore {
                 return true;
             }
             loaderMustNotPublish = true;
-            boolean published = writeAppended(file, body, logger, summaries, outline.format2, secrets);
+            boolean published = writeAppended(file, body, logger, summaries, format2, secrets);
             if (!published) {
                 loaderMustNotPublish = false;
             }
@@ -575,90 +584,192 @@ public final class MemoryStore {
     }
 
     /**
-     * Character ids already in the file, found by indentation. A tab-indented or unreadable
-     * document returns null so shutdown does not rewrite it.
+     * The 1.1.2 merge: load the document, add characters that are absent, and write it back.
+     * Used only when the streaming parse cannot find a safe place to append.
      */
-    private static Outline scanOutline(List<String> lines) {
-        Outline outline = new Outline();
-        outline.entriesEnd = lines.size();
-        boolean inEntries = false;
-        int entriesIndent = -1;
-        String player = null;
-        int playerIndent = -1;
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            if (line.isBlank() || stripIndent(line).startsWith("#")) {
-                continue;
+    private boolean appendWithFullDocument(File file, Logger logger, boolean summaries, Iterable<String> secrets) {
+        YamlConfiguration yaml = new YamlConfiguration();
+        try {
+            yaml.load(file);
+        } catch (IOException | InvalidConfigurationException | RuntimeException e) {
+            return false;
+        }
+        Set<String> present = characterKeys(yaml);
+        Map<String, StoredTranscript> extra;
+        synchronized (this) {
+            extra = transcriptsAbsent(present, summaries);
+        }
+        if (extra.isEmpty()) {
+            return false;
+        }
+        if (summaries) {
+            yaml.set("format", 2);
+        }
+        for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
+            writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
+        }
+        return publishYamlLocked(file, yaml, logger, summaries);
+    }
+
+    private boolean publishYamlLocked(File file, YamlConfiguration yaml, Logger logger, boolean summaries) {
+        synchronized (publishGate) {
+            if (saveBlocked || !file.isFile()) {
+                return false;
             }
-            if (line.indexOf('\t') >= 0) {
-                return null;
+            if (loaderMustNotPublish) {
+                return true;
             }
-            String trimmed = stripIndent(line);
-            if (trimmed.startsWith("-")) {
-                continue;
+            loaderMustNotPublish = true;
+            boolean published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace);
+            if (!published) {
+                loaderMustNotPublish = false;
             }
-            int colon = trimmed.indexOf(':');
-            if (colon <= 0) {
-                return null;
-            }
-            int indent = indentOfSpaces(line);
-            String key = unquoteKey(trimmed.substring(0, colon).trim());
-            String rest = trimmed.substring(colon + 1).trim();
-            if (!inEntries) {
-                if (indent == 0 && "format".equals(key)) {
-                    outline.format2 = formatValue(rest) >= 2;
+            return published;
+        }
+    }
+
+    /**
+     * Character ids already in the file, from SnakeYAML events. Folded and block scalars stay one
+     * event, so a continuation line does not hide a character. Null when the shape is not one this
+     * append can splice without rewriting existing text.
+     */
+    private static StreamOutline scanEvents(String text) {
+        LoaderOptions options = new LoaderOptions();
+        options.setCodePointLimit(Integer.MAX_VALUE);
+        options.setMaxAliasesForCollections(Integer.MAX_VALUE);
+        Yaml yaml = new Yaml(options);
+        StreamOutline outline = new StreamOutline();
+        java.util.ArrayDeque<ScanFrame> stack = new java.util.ArrayDeque<>();
+        try {
+            for (Event event : yaml.parse(new StringReader(text))) {
+                switch (event.getEventId()) {
+                    case StreamStart, StreamEnd, DocumentStart, DocumentEnd, Comment -> {
+                    }
+                    case Alias -> throw new ScanFallback();
+                    case MappingStart -> onMappingStart(outline, stack, (MappingStartEvent) event);
+                    case MappingEnd -> onMappingEnd(outline, stack, event);
+                    case SequenceStart -> onSequenceStart(stack);
+                    case SequenceEnd -> {
+                        if (stack.isEmpty() || stack.peek().kind != ScanKind.SEQUENCE) {
+                            throw new ScanFallback();
+                        }
+                        stack.pop();
+                    }
+                    case Scalar -> onScalar(outline, stack, (ScalarEvent) event);
+                    default -> throw new ScanFallback();
                 }
-                if ("entries".equals(key) && rest.isEmpty()) {
-                    inEntries = true;
-                    entriesIndent = indent;
-                    outline.entriesLine = i;
-                    outline.entriesIndent = indent;
-                } else if ("entries".equals(key) && "{}".equals(rest)) {
-                    outline.entriesLine = i;
-                    outline.entriesIndent = indent;
-                    outline.entriesInlineEmpty = true;
-                }
-                continue;
             }
-            if (indent <= entriesIndent) {
-                outline.entriesEnd = i;
-                if (player != null) {
-                    outline.players.get(player).end = i;
-                    player = null;
-                }
-                inEntries = false;
-                if (indent == 0 && "format".equals(key)) {
-                    outline.format2 = formatValue(rest) >= 2;
-                }
-                continue;
-            }
-            if (player != null && indent <= playerIndent) {
-                outline.players.get(player).end = i;
-                player = null;
-            }
-            if (player == null && rest.isEmpty() && indent == entriesIndent + 2) {
-                player = key;
-                playerIndent = indent;
-                PlayerSite site = new PlayerSite();
-                site.line = i;
-                site.indent = indent;
-                site.end = lines.size();
-                outline.players.put(player, site);
-                continue;
-            }
-            if (player != null && rest.isEmpty() && indent == playerIndent + 2) {
-                outline.characterKeys.add(player + "\u0000" + key);
-            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (!stack.isEmpty()) {
+            return null;
         }
         return outline;
     }
 
-    private static List<String> insertAbsent(
-            List<String> lines,
-            Outline outline,
+    private static void onMappingStart(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, MappingStartEvent event) {
+        ScanFrame parent = stack.peek();
+        if (parent == null) {
+            stack.push(new ScanFrame(ScanKind.ROOT));
+            return;
+        }
+        if (parent.expectKey || event.isFlow()) {
+            throw new ScanFallback();
+        }
+        String key = parent.pendingKey;
+        int column = parent.pendingColumn;
+        parent.pendingKey = null;
+        parent.expectKey = true;
+        ScanFrame frame;
+        if (parent.kind == ScanKind.ROOT && "entries".equals(key)) {
+            frame = new ScanFrame(ScanKind.ENTRIES);
+            outline.sawEntries = true;
+        } else if (parent.kind == ScanKind.ENTRIES && key != null) {
+            frame = new ScanFrame(ScanKind.PLAYER);
+            frame.name = key;
+            frame.keyColumn = column;
+            outline.playerIndent = column;
+            outline.playerEnd.put(key, -1);
+        } else if (parent.kind == ScanKind.PLAYER && key != null) {
+            frame = new ScanFrame(ScanKind.NESTED);
+            outline.characterKeys.add(parent.name + "\u0000" + key);
+            if (parent.childKeyColumn < 0) {
+                parent.childKeyColumn = column;
+            }
+        } else {
+            frame = new ScanFrame(ScanKind.NESTED);
+        }
+        stack.push(frame);
+    }
+
+    private static void onMappingEnd(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, Event event) {
+        if (stack.isEmpty() || event.getStartMark() == null) {
+            throw new ScanFallback();
+        }
+        ScanFrame frame = stack.pop();
+        int index = event.getStartMark().getIndex();
+        if (frame.kind == ScanKind.PLAYER) {
+            outline.playerEnd.put(frame.name, index);
+            outline.characterIndent.put(frame.name, frame.childKeyColumn < 0 ? frame.keyColumn + 2 : frame.childKeyColumn);
+        } else if (frame.kind == ScanKind.ENTRIES) {
+            outline.entriesEnd = index;
+            if (frame.childKeyColumn >= 0) {
+                outline.playerIndent = frame.childKeyColumn;
+            }
+        }
+    }
+
+    private static void onSequenceStart(java.util.ArrayDeque<ScanFrame> stack) {
+        ScanFrame parent = stack.peek();
+        if (parent == null || parent.expectKey) {
+            throw new ScanFallback();
+        }
+        parent.pendingKey = null;
+        parent.expectKey = true;
+        stack.push(new ScanFrame(ScanKind.SEQUENCE));
+    }
+
+    private static void onScalar(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, ScalarEvent event) {
+        ScanFrame parent = stack.peek();
+        if (parent == null) {
+            throw new ScanFallback();
+        }
+        if (parent.kind == ScanKind.SEQUENCE) {
+            return;
+        }
+        if (parent.expectKey) {
+            parent.pendingKey = event.getValue();
+            parent.pendingColumn = event.getStartMark() == null ? 0 : event.getStartMark().getColumn();
+            parent.expectKey = false;
+            if (parent.childKeyColumn < 0) {
+                parent.childKeyColumn = parent.pendingColumn;
+            }
+            return;
+        }
+        if (parent.kind == ScanKind.ROOT && "format".equals(parent.pendingKey)) {
+            outline.format2 = formatNumber(event.getValue()) >= 2;
+        } else if (parent.kind == ScanKind.PLAYER && parent.pendingKey != null) {
+            outline.characterKeys.add(parent.name + "\u0000" + parent.pendingKey);
+            if (parent.childKeyColumn < 0) {
+                parent.childKeyColumn = parent.pendingColumn;
+            }
+        } else if (parent.kind == ScanKind.ROOT && parent.pendingKey != null && !"entries".equals(parent.pendingKey)) {
+            outline.otherRoot = true;
+        }
+        parent.pendingKey = null;
+        parent.expectKey = true;
+    }
+
+    private static String spliceAbsent(
+            String text,
+            StreamOutline outline,
             Map<String, StoredTranscript> extra,
             boolean summaries
     ) {
+        if (outline.otherRoot && !outline.sawEntries) {
+            return null;
+        }
         Map<String, List<Map.Entry<String, StoredTranscript>>> byPlayer = new LinkedHashMap<>();
         for (Map.Entry<String, StoredTranscript> entry : extra.entrySet()) {
             String[] parts = entry.getKey().split("\u0000", 2);
@@ -670,86 +781,180 @@ public final class MemoryStore {
         if (byPlayer.isEmpty()) {
             return null;
         }
-        if (outline.entriesLine < 0) {
-            if (hasContent(lines)) {
+        String nl = text.contains("\r\n") ? "\r\n" : "\n";
+        List<TextInsertion> insertions = new ArrayList<>();
+        List<Map.Entry<String, StoredTranscript>> newcomers = new ArrayList<>();
+        for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : byPlayer.entrySet()) {
+            Integer raw = outline.playerEnd.get(player.getKey());
+            if (raw == null || raw < 0) {
+                for (Map.Entry<String, StoredTranscript> one : player.getValue()) {
+                    newcomers.add(one);
+                }
+                continue;
+            }
+            int at = cutPoint(text, raw);
+            int indent = outline.characterIndent.getOrDefault(player.getKey(), outline.playerIndent + 2);
+            insertions.add(new TextInsertion(at, 1, characterTexts(player.getValue(), summaries, indent, nl)));
+        }
+        if (!newcomers.isEmpty()) {
+            Map<String, List<Map.Entry<String, StoredTranscript>>> fresh = new LinkedHashMap<>();
+            for (Map.Entry<String, StoredTranscript> one : newcomers) {
+                String playerId = one.getKey().split("\u0000", 2)[0];
+                fresh.computeIfAbsent(playerId, ignored -> new ArrayList<>()).add(one);
+            }
+            int playerIndent = outline.sawEntries ? outline.playerIndent : 2;
+            if (playerIndent < 0) {
+                playerIndent = 2;
+            }
+            int characterIndent = playerIndent + 2;
+            StringBuilder block = new StringBuilder();
+            if (!outline.sawEntries) {
+                block.append("entries:").append(nl);
+            }
+            for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : fresh.entrySet()) {
+                block.append(" ".repeat(playerIndent)).append(yamlKey(player.getKey())).append(':').append(nl);
+                block.append(characterTexts(player.getValue(), summaries, characterIndent, nl));
+            }
+            if (outline.sawEntries && outline.entriesEnd < 0) {
                 return null;
             }
-            List<String> created = new ArrayList<>(lines);
-            created.addAll(entriesBlock(0, byPlayer, summaries));
-            if (summaries && !outline.format2) {
-                created.add(0, "format: 2");
-            }
-            return created;
-        }
-        List<Insertion> insertions = new ArrayList<>();
-        if (outline.entriesInlineEmpty) {
-            List<String> block = entriesBlock(outline.entriesIndent, byPlayer, summaries);
-            block.add(0, " ".repeat(outline.entriesIndent) + "entries:");
-            insertions.add(new Insertion(outline.entriesLine, block, 1));
-        } else {
-            List<Map.Entry<String, StoredTranscript>> newcomers = new ArrayList<>();
-            for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : byPlayer.entrySet()) {
-                PlayerSite site = outline.players.get(player.getKey());
-                if (site == null) {
-                    newcomers.addAll(player.getValue());
-                    continue;
-                }
-                List<String> block = new ArrayList<>();
-                for (Map.Entry<String, StoredTranscript> one : player.getValue()) {
-                    String character = one.getKey().split("\u0000", 2)[1];
-                    block.addAll(characterBlock(character, one.getValue(), summaries, site.indent + 2));
-                }
-                insertions.add(new Insertion(site.end, block, 0));
-            }
-            if (!newcomers.isEmpty()) {
-                Map<String, List<Map.Entry<String, StoredTranscript>>> fresh = new LinkedHashMap<>();
-                for (Map.Entry<String, StoredTranscript> one : newcomers) {
-                    String playerId = one.getKey().split("\u0000", 2)[0];
-                    fresh.computeIfAbsent(playerId, ignored -> new ArrayList<>()).add(one);
-                }
-                insertions.add(new Insertion(outline.entriesEnd, entriesBlock(outline.entriesIndent, fresh, summaries), 0));
-            }
-        }
-        insertions.sort((left, right) -> Integer.compare(right.at, left.at));
-        List<String> merged = new ArrayList<>(lines);
-        for (Insertion insertion : insertions) {
-            if (insertion.remove > 0) {
-                for (int n = 0; n < insertion.remove && insertion.at < merged.size(); n++) {
-                    merged.remove(insertion.at);
-                }
-            }
-            merged.addAll(insertion.at, insertion.lines);
+            int at = outline.sawEntries ? cutPoint(text, outline.entriesEnd) : text.length();
+            insertions.add(new TextInsertion(at, 2, block.toString()));
         }
         if (summaries && !outline.format2) {
-            merged.add(0, "format: 2");
+            insertions.add(new TextInsertion(0, 0, "format: 2" + nl));
         }
-        return merged;
-    }
-
-    private static boolean hasContent(List<String> lines) {
-        for (String line : lines) {
-            if (!line.isBlank() && !stripIndent(line).startsWith("#")) {
-                return true;
+        insertions.sort((left, right) -> {
+            int byIndex = Integer.compare(right.at, left.at);
+            return byIndex != 0 ? byIndex : Integer.compare(right.rank, left.rank);
+        });
+        StringBuilder merged = new StringBuilder(text);
+        for (TextInsertion insertion : insertions) {
+            if (insertion.at < 0 || insertion.at > merged.length()) {
+                return null;
             }
+            String block = insertion.text;
+            if (block == null || block.isEmpty()) {
+                continue;
+            }
+            if (insertion.at > 0) {
+                char previous = merged.charAt(insertion.at - 1);
+                if (previous != '\n' && previous != '\r') {
+                    block = nl + block;
+                }
+            }
+            if (!block.endsWith("\n")) {
+                block = block + nl;
+            }
+            merged.insert(insertion.at, block);
         }
-        return false;
+        return merged.toString();
     }
 
-    private static List<String> entriesBlock(
-            int entriesIndent,
-            Map<String, List<Map.Entry<String, StoredTranscript>>> byPlayer,
-            boolean summaries
+    /**
+     * SnakeYAML marks are code-point offsets. A block-end mark also sits on the next token, after
+     * that line's indent, so the cut moves back to the start of the line and the following key
+     * keeps its indent.
+     */
+    private static int cutPoint(String text, int codePoints) {
+        int at = utf16Index(text, codePoints);
+        while (at > 0) {
+            char previous = text.charAt(at - 1);
+            if (previous != ' ' && previous != '\t') {
+                break;
+            }
+            at--;
+        }
+        return at;
+    }
+
+    private static int utf16Index(String text, int codePoints) {
+        int unit = 0;
+        int seen = 0;
+        int length = text.length();
+        while (unit < length && seen < codePoints) {
+            unit += Character.charCount(text.codePointAt(unit));
+            seen++;
+        }
+        return unit;
+    }
+
+    private static String characterTexts(
+            List<Map.Entry<String, StoredTranscript>> characters,
+            boolean summaries,
+            int indent,
+            String nl
     ) {
-        List<String> block = new ArrayList<>();
-        int playerIndent = entriesIndent + 2;
-        for (Map.Entry<String, List<Map.Entry<String, StoredTranscript>>> player : byPlayer.entrySet()) {
-            block.add(" ".repeat(playerIndent) + yamlKey(player.getKey()) + ":");
-            for (Map.Entry<String, StoredTranscript> one : player.getValue()) {
-                String character = one.getKey().split("\u0000", 2)[1];
-                block.addAll(characterBlock(character, one.getValue(), summaries, playerIndent + 2));
+        StringBuilder block = new StringBuilder();
+        for (Map.Entry<String, StoredTranscript> one : characters) {
+            String character = one.getKey().split("\u0000", 2)[1];
+            block.append(String.join(nl, characterBlock(character, one.getValue(), summaries, indent)));
+            if (!block.isEmpty() && block.charAt(block.length() - 1) != '\n') {
+                block.append(nl);
             }
         }
-        return block;
+        return block.toString();
+    }
+
+    private static int formatNumber(String rest) {
+        try {
+            return Integer.parseInt(rest == null ? "" : rest.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private int unsavedCharacterCount(boolean summaries) {
+        synchronized (this) {
+            return transcriptsAbsent(Set.of(), summaries).size();
+        }
+    }
+
+    private static void warnUnsaved(Logger logger, int count) {
+        if (logger == null || count <= 0) {
+            return;
+        }
+        logger.warning("Did not save " + count + " dialogue characters because dialogue-memory.yml could not be read.");
+    }
+
+    private enum ScanKind {
+        ROOT, ENTRIES, PLAYER, NESTED, SEQUENCE
+    }
+
+    private static final class ScanFrame {
+        private final ScanKind kind;
+        private String name = "";
+        private boolean expectKey = true;
+        private String pendingKey;
+        private int pendingColumn;
+        private int keyColumn;
+        private int childKeyColumn = -1;
+
+        private ScanFrame(ScanKind kind) {
+            this.kind = kind;
+            this.expectKey = kind != ScanKind.SEQUENCE;
+        }
+    }
+
+    private static final class StreamOutline {
+        private boolean format2;
+        private boolean sawEntries;
+        private boolean otherRoot;
+        /** Code-point index of the entries mapping end, or -1 when that mapping was not closed. */
+        private int entriesEnd = -1;
+        private int playerIndent = 2;
+        private final Map<String, Integer> playerEnd = new LinkedHashMap<>();
+        private final Map<String, Integer> characterIndent = new LinkedHashMap<>();
+        private final Set<String> characterKeys = new java.util.HashSet<>();
+    }
+
+    private record TextInsertion(int at, int rank, String text) {
+    }
+
+    private static final class ScanFallback extends RuntimeException {
+        private ScanFallback() {
+            super(null, null, false, false);
+        }
     }
 
     private static List<String> characterBlock(
@@ -835,65 +1040,11 @@ public final class MemoryStore {
         }
     }
 
-    private static int formatValue(String rest) {
-        try {
-            return Integer.parseInt(rest);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private static String stripIndent(String line) {
-        int index = 0;
-        while (index < line.length() && line.charAt(index) == ' ') {
-            index++;
-        }
-        return line.substring(index);
-    }
-
-    private static int indentOfSpaces(String line) {
-        int indent = 0;
-        while (indent < line.length() && line.charAt(indent) == ' ') {
-            indent++;
-        }
-        return indent;
-    }
-
-    private static String unquoteKey(String key) {
-        if (key.length() >= 2) {
-            char first = key.charAt(0);
-            char last = key.charAt(key.length() - 1);
-            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
-                return key.substring(1, key.length() - 1);
-            }
-        }
-        return key;
-    }
-
     private static String yamlKey(String key) {
         if (key != null && key.matches("[A-Za-z0-9_.-]+")) {
             return key;
         }
         return "'" + (key == null ? "" : key.replace("'", "''")) + "'";
-    }
-
-    private static final class Outline {
-        private int entriesLine = -1;
-        private int entriesIndent;
-        private int entriesEnd;
-        private boolean entriesInlineEmpty;
-        private boolean format2;
-        private final Map<String, PlayerSite> players = new LinkedHashMap<>();
-        private final Set<String> characterKeys = new java.util.HashSet<>();
-    }
-
-    private static final class PlayerSite {
-        private int line;
-        private int indent;
-        private int end;
-    }
-
-    private record Insertion(int at, List<String> lines, int remove) {
     }
 
     private static Set<String> characterKeys(YamlConfiguration yaml) {

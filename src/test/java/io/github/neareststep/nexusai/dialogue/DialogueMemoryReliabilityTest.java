@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -10,6 +12,7 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -402,6 +405,279 @@ class DialogueMemoryReliabilityTest {
         }
     }
 
+    @Test
+    void stopAfterASaveKeepsExistingLinesAndAddsMissingCharacters() throws Exception {
+        stopAfterASave(false);
+        stopAfterASave(true);
+    }
+
+    @Test
+    void stopDuringALargeSavedLoadStaysNearTheJoinGrace() throws Exception {
+        Fixture fixture = fixture("stop-large-saved");
+        UUID player = fixture.player;
+        String text = "alpha beta gamma delta epsilon zeta eta theta iota kappa ".repeat(16);
+        int count = 11_000;
+        MemoryStore writer = new MemoryStore();
+        for (int i = 0; i < count; i++) {
+            writer.append(player, "npc_" + i, "user", text, 40L, 4, 8_000, 0L);
+        }
+        writer.save(fixture.file.toFile(), null, false);
+        long bytes = Files.size(fixture.file);
+        assertTrue(bytes >= 11_000_000L && bytes <= 14_000_000L, "saved file is " + bytes + " bytes");
+        String original = Files.readString(fixture.file);
+        assertTrue(hasContinuation(original), "saved file has a colon on every content line");
+        fixture.store.append(player, "npc_0", "user", "must-not-overwrite", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "npc_new", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "large saved load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            long started = System.nanoTime();
+            fixture.files.shutdown();
+            long elapsed = millisSince(started);
+            assertTrue(elapsed < 2_500L, "stop took " + elapsed + "ms");
+            String merged = Files.readString(fixture.file);
+            assertOriginalLinesRemain(original, merged);
+            YamlConfiguration parsed = yaml(merged);
+            assertEquals(text, firstText(parsed, player, "npc_0"));
+            assertEquals("only-in-memory", firstText(parsed, player, "npc_new"));
+            assertFalse(merged.contains("must-not-overwrite"));
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(15_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertEquals(merged, Files.readString(fixture.file));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(15_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopNamesCharactersItCouldNotSave() throws Exception {
+        Fixture fixture = fixture("stop-unread");
+        byte[] before = "entries: [\n".getBytes(StandardCharsets.UTF_8);
+        Files.write(fixture.file, before);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        fixture.store.append(fixture.player, "guide", "user", "also-only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "unreadable load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertArrayEquals(before, Files.readAllBytes(fixture.file));
+            List<String> notes = warnings(fixture.records, "Did not save");
+            assertEquals(1, notes.size(), fixture.records.toString());
+            assertEquals(
+                    "Did not save 2 dialogue characters because dialogue-memory.yml could not be read.",
+                    notes.get(0));
+            assertEquals("only-in-memory", line(fixture.store, fixture.player, "innkeeper"));
+            assertEquals("also-only-in-memory", line(fixture.store, fixture.player, "guide"));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    @Test
+    void stopStillAppendsWhenTheSavedShapeIsFlow() throws Exception {
+        Fixture fixture = fixture("stop-flow");
+        UUID player = fixture.player;
+        String flow = "entries:\n  " + player + ":\n    shared: {updated: 40, lines: [{role: user, text: kept-flow}]}\n";
+        Files.writeString(fixture.file, flow, StandardCharsets.UTF_8);
+        fixture.store.append(player, "shared", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "flow load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            String merged = Files.readString(fixture.file);
+            YamlConfiguration parsed = yaml(merged);
+            assertEquals("kept-flow", firstText(parsed, player, "shared"));
+            assertEquals("only-in-memory", firstText(parsed, player, "innkeeper"));
+            assertFalse(merged.contains("said-while-off"), merged);
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    private void stopAfterASave(boolean summaries) throws Exception {
+        Fixture fixture = fixture(summaries ? "stop-saved-summary" : "stop-saved", summaries);
+        UUID player = fixture.player;
+        UUID other = UUID.randomUUID();
+        String summary = summaries ? BLOCKED : "";
+        MemoryStore writer = new MemoryStore();
+        remember(writer, player, "bard", FOLDED, BLOCKED, summary, 50L);
+        remember(writer, player, "shared", "disk-shared", null, "", 40L);
+        remember(writer, player, "miner", "from-disk-only", null, "", 40L);
+        writer.save(fixture.file.toFile(), null, summaries);
+        String original = Files.readString(fixture.file);
+        assertTrue(FOLDED.length() > 120, FOLDED);
+        assertTrue(hasContinuation(original), original);
+        fixture.store.append(player, "shared", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        fixture.store.append(other, "guide", "user", "new-player", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "saved load was not released");
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            String merged = Files.readString(fixture.file);
+            yaml(merged);
+            assertOriginalLinesRemain(original, merged);
+            assertParsedCharactersMatch(original, merged);
+            YamlConfiguration parsed = yaml(merged);
+            assertEquals("disk-shared", firstText(parsed, player, "shared"));
+            assertEquals("only-in-memory", firstText(parsed, player, "innkeeper"));
+            assertEquals("new-player", firstText(parsed, other, "guide"));
+            assertEquals("from-disk-only", firstText(parsed, player, "miner"));
+            assertFalse(merged.contains("said-while-off"), merged);
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+                assertFalse(pending.isAlive());
+            }
+            assertEquals(merged, Files.readString(fixture.file));
+            assertEquals("disk-shared", line(fixture.store, player, "shared"));
+            assertEquals("only-in-memory", line(fixture.store, player, "innkeeper"));
+            assertEquals("new-player", line(fixture.store, other, "guide"));
+        } finally {
+            MemoryStore.pauseDuringLoad = null;
+            release.countDown();
+            Thread pending = fixture.files.diskLoader();
+            if (pending != null) {
+                pending.join(5_000L);
+            }
+        }
+    }
+
+    private static void remember(
+            MemoryStore store,
+            UUID player,
+            String character,
+            String first,
+            String second,
+            String summary,
+            long updated
+    ) {
+        List<TurnMemory.Line> lines = new ArrayList<>();
+        lines.add(new TurnMemory.Line("user", first));
+        if (second != null) {
+            lines.add(new TurnMemory.Line("assistant", second));
+        }
+        store.get(player, character).load(lines, updated, summary, summary == null || summary.isBlank() ? 0L : updated);
+    }
+
+    private static Runnable waitingLoad(CountDownLatch inside, CountDownLatch release, String timeout) {
+        return () -> {
+            inside.countDown();
+            try {
+                if (!release.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException(timeout);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        };
+    }
+
+    private static void assertOriginalLinesRemain(String original, String merged) {
+        List<String> before = contentLines(original);
+        List<String> after = contentLines(merged);
+        int cursor = 0;
+        for (String line : before) {
+            int found = -1;
+            for (int i = cursor; i < after.size(); i++) {
+                if (line.equals(after.get(i))) {
+                    found = i;
+                    break;
+                }
+            }
+            assertTrue(found >= 0, "rewritten line: " + line);
+            cursor = found + 1;
+        }
+    }
+
+    private static void assertParsedCharactersMatch(String original, String merged) throws Exception {
+        YamlConfiguration before = yaml(original);
+        YamlConfiguration after = yaml(merged);
+        ConfigurationSection entries = before.getConfigurationSection("entries");
+        assertTrue(entries != null, merged);
+        for (String playerId : entries.getKeys(false)) {
+            ConfigurationSection characters = entries.getConfigurationSection(playerId);
+            assertTrue(characters != null, playerId);
+            for (String characterId : characters.getKeys(false)) {
+                String base = "entries." + playerId + "." + characterId;
+                assertEquals(before.getLong(base + ".updated"), after.getLong(base + ".updated"), base);
+                assertEquals(before.getString(base + ".summary"), after.getString(base + ".summary"), base);
+                assertEquals(before.getMapList(base + ".lines"), after.getMapList(base + ".lines"), base);
+            }
+        }
+    }
+
+    private static List<String> contentLines(String text) {
+        List<String> lines = new ArrayList<>();
+        for (String line : text.split("\\R", -1)) {
+            if (!line.isBlank()) {
+                lines.add(line);
+            }
+        }
+        return lines;
+    }
+
+    private static boolean hasContinuation(String text) {
+        for (String line : text.split("\\R", -1)) {
+            if (!line.isBlank() && line.indexOf(':') < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static YamlConfiguration yaml(String text) throws Exception {
+        YamlConfiguration parsed = new YamlConfiguration();
+        parsed.loadFromString(text);
+        return parsed;
+    }
+
+    private static String firstText(YamlConfiguration parsed, UUID player, String character) {
+        List<Map<?, ?>> lines = parsed.getMapList("entries." + player + "." + character + ".lines");
+        assertFalse(lines.isEmpty(), character);
+        return String.valueOf(lines.get(0).get("text"));
+    }
+
     private static void awaitFinished(DialogueMemoryPersistence files) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (!files.loadFinished()) {
@@ -450,7 +726,15 @@ class DialogueMemoryReliabilityTest {
                 "POSIX permissions are not available");
     }
 
+    private static final String FOLDED =
+            ("alpha: \"double\" and 'single' # hash - dash Привет 😀 ").repeat(4);
+    private static final String BLOCKED = "- leading: \"double\" and 'single' # hash\nПривет мир";
+
     private static Fixture fixture(String name) throws Exception {
+        return fixture(name, false);
+    }
+
+    private static Fixture fixture(String name, boolean summaries) throws Exception {
         Path root = Files.createTempDirectory("nai-memory");
         Path dir = root.resolve("kp_" + SECRET).resolve("NexusAI");
         Files.createDirectories(dir);
@@ -488,7 +772,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore store = new MemoryStore();
         store.secrets(() -> List.of(SECRET));
         AtomicLong clock = new AtomicLong(1_000_000L);
-        DialogueSettings settings = persisting(false);
+        DialogueSettings settings = persisting(summaries);
         DialogueMemoryPersistence files = new DialogueMemoryPersistence(
                 store,
                 file::toFile,
