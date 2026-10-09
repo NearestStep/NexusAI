@@ -162,9 +162,11 @@ final class DialogueMemoryPersistence {
      * Stop. A load that is still running after {@link #shutdownLoadGraceMillis} does not block disable
      * for the rest of the read. The key scan started with that load is then awaited only until
      * {@link #shutdownAppendBudgetMillis} after the join. Disk characters are kept. Characters that
-     * were never in the file are appended when that scan has read the file. If the scan is not
-     * finished, the scan thread failed, or the file cannot be read, stop does not replace the file
-     * and one warning names how many characters were not saved.
+     * were never in the file are appended when that scan has read the file. A file the scan cannot
+     * splice, but a normal load can read, is rewritten when that rewrite finishes inside the same
+     * budget. If the scan or that rewrite is not finished, the scan thread failed, or the file
+     * cannot be read, stop does not replace the file and one warning names how many characters
+     * were not saved and why. Stop does not also log that saves are paused.
      */
     void shutdown() {
         try {
@@ -196,11 +198,8 @@ final class DialogueMemoryPersistence {
                 boolean summaries = current != null && current.summaryEnabled();
                 long deadline = System.nanoTime()
                         + Math.max(0L, shutdownAppendBudgetMillis) * 1_000_000L;
-                boolean wrote = memory.appendCharactersAbsentFromFile(
+                memory.appendCharactersAbsentFromFile(
                         file.get(), logger, summaries, secretList(), scan, deadline);
-                if (!wrote) {
-                    noteSkippedSave();
-                }
                 return;
             }
             writeSave();

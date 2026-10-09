@@ -45,8 +45,10 @@ class DialogueMemoryReliabilityTest {
     @AfterEach
     void resetLoaderHooks() {
         MemoryStore.pauseDuringLoad = null;
+        MemoryStore.beforeKeyScan = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
+        DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
         MemoryStore.fullDocumentAppends.set(0);
         MemoryStore.eventScans.set(0);
     }
@@ -665,13 +667,17 @@ class DialogueMemoryReliabilityTest {
             fixture.files.onReload();
             assertTrue(inside.await(5, TimeUnit.SECONDS));
             assertTrue(scanInside.await(5, TimeUnit.SECONDS));
+            fixture.clock.addAndGet(DialogueMemoryPersistence.LOAD_HANG_WARNING_AFTER_MILLIS);
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because dialogue-memory.yml could not be read.",
+                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
                     notes.get(0));
+            assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
+                    fixture.records.toString());
         } finally {
             DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
             MemoryStore.beforeKeyScan = null;
@@ -706,8 +712,11 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because dialogue-memory.yml could not be read.",
+                    "Did not save 1 dialogue characters because the key scan failed.",
                     notes.get(0));
+            assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
+            assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
+                    fixture.records.toString());
         } finally {
             MemoryStore.beforeKeyScan = null;
             MemoryStore.pauseDuringLoad = null;
@@ -756,7 +765,7 @@ class DialogueMemoryReliabilityTest {
     }
 
     @Test
-    void stopLeavesAFlowFileUntouched() throws Exception {
+    void stopRewritesAFlowFileTheScanCannotSplice() throws Exception {
         Fixture fixture = fixture("stop-flow");
         UUID player = fixture.player;
         String flow = "entries:\n  " + player + ":\n    shared: {updated: 40, lines: [{role: user, text: kept-flow}]}\n";
@@ -769,13 +778,16 @@ class DialogueMemoryReliabilityTest {
         try {
             fixture.files.onReload();
             assertTrue(inside.await(5, TimeUnit.SECONDS));
+            MemoryStore.fullDocumentAppends.set(0);
             fixture.files.shutdown();
-            assertEquals(flow, Files.readString(fixture.file));
-            List<String> notes = warnings(fixture.records, "Did not save");
-            assertEquals(1, notes.size(), fixture.records.toString());
-            assertEquals(
-                    "Did not save 2 dialogue characters because dialogue-memory.yml could not be read.",
-                    notes.get(0));
+            String merged = Files.readString(fixture.file);
+            YamlConfiguration loaded = yaml(merged);
+            List<Map<?, ?>> shared = loaded.getMapList("entries." + player + ".shared.lines");
+            assertEquals("kept-flow", String.valueOf(shared.get(0).get("text")), merged);
+            assertTrue(merged.contains("only-in-memory"), merged);
+            assertFalse(merged.contains("said-while-off"), merged);
+            assertTrue(MemoryStore.fullDocumentAppends.get() > 0, merged);
+            assertEquals(0, warnings(fixture.records, "Did not save").size(), fixture.records.toString());
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {

@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * A scan that returns keys must return the same set, and a stop append must not
  * rename, drop, or duplicate a character.
  */
-class SavedMemoryScanFuzzTest {
+class DialogueMemoryKeyScanFuzzTest {
 
     private static final String[] FRAG = {
             ": ", "#", " #x", "'", "\"", "- ", "\n", "\t", "{", "}", "[", "]", "&a", "*b", "!t", "|", ">", "Кир", "😀",

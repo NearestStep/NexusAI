@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.StringReader;
 import java.io.Writer;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
@@ -46,6 +47,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
@@ -445,6 +447,7 @@ public final class MemoryStore {
                 return false;
             }
             AtomicFiles.createPrivate(temporary.toPath());
+            allowLongSimpleKeys(yaml);
             yaml.save(temporary);
             durableReplace(temporary.toPath(), file.toPath());
             // The file just held a key. Do not keep a group- or world-readable mode.
@@ -531,6 +534,7 @@ public final class MemoryStore {
             if (containsForcedQuote(yaml)) {
                 Files.writeString(temporary.toPath(), dumpDocument(configurationMap(yaml)), StandardCharsets.UTF_8);
             } else {
+                allowLongSimpleKeys(yaml);
                 yaml.save(temporary);
             }
             publish.publish(temporary, file);
@@ -554,10 +558,11 @@ public final class MemoryStore {
      * that lock for the whole read, and shutdown has to finish without waiting for it.
      * <p>
      * When {@code prepared} is set, it is the scan started with the load. Stop waits for it only
-     * until {@code deadlineNanos}. A scan that is still running, that crashed, or that cannot read
-     * the file does not publish, and one warning names how many characters were not saved. There is
-     * no second full load on that path. A direct call with no prepared scan may still rewrite a
-     * readable file when the event scan cannot splice it.
+     * until {@code deadlineNanos}. A scan that cannot splice a file a normal load can still read
+     * rewrites the document, when that rewrite finishes before the deadline. A scan that is still
+     * running, that crashed, or that cannot read the file does not publish, and one warning names
+     * how many characters were not saved and why. A direct call with no prepared scan may still
+     * rewrite a readable file when the event scan cannot splice it.
      *
      * @return {@code true} when a merged file was published
      */
@@ -588,7 +593,7 @@ public final class MemoryStore {
         try {
             snap = readSnapshot(file);
         } catch (IOException e) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries));
+            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
             return false;
         }
         if (snap.text != null && snap.outline != null) {
@@ -600,10 +605,14 @@ public final class MemoryStore {
                 return false;
             }
         }
-        if (appendWithFullDocument(file, logger, summaries, secrets)) {
+        FullAppend outcome = appendWithFullDocument(file, logger, summaries, secrets, Long.MAX_VALUE);
+        if (outcome == FullAppend.PUBLISHED) {
             return true;
         }
-        warnUnsaved(logger, unsavedCharacterCount(summaries));
+        if (outcome == FullAppend.NOTHING) {
+            return false;
+        }
+        warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
         return false;
     }
 
@@ -619,27 +628,56 @@ public final class MemoryStore {
             long deadlineNanos
     ) {
         Snapshot snap = prepared.awaitSnapshot(deadlineNanos);
+        if (prepared.crashed()) {
+            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.SCAN_FAILED);
+            return false;
+        }
+        if (snap == null) {
+            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.BUDGET);
+            return false;
+        }
+        boolean canSplice = false;
         try {
-            if (prepared.crashed() || snap == null || snap.text == null || snap.outline == null
-                    || !bytesMatch(file, snap)) {
-                warnUnsaved(logger, unsavedCharacterCount(summaries));
-                return false;
-            }
+            canSplice = snap.text != null && snap.outline != null && bytesMatch(file, snap);
         } catch (IOException e) {
-            warnUnsaved(logger, unsavedCharacterCount(summaries));
+            warnUnsaved(logger, unsavedCharacterCount(summaries), SkipReason.UNREADABLE);
             return false;
         }
         String text = snap.text;
         StreamOutline outline = snap.outline;
         prepared.releaseBytes();
-        SpliceResult spliced = splice(file, text, outline, logger, summaries, secrets);
-        if (spliced == SpliceResult.PUBLISHED) {
+        if (canSplice) {
+            SpliceResult spliced = splice(file, text, outline, logger, summaries, secrets);
+            if (spliced == SpliceResult.PUBLISHED) {
+                return true;
+            }
+            if (spliced == SpliceResult.NOTHING) {
+                return false;
+            }
+        }
+        return finishWithFullDocument(file, logger, summaries, secrets, deadlineNanos);
+    }
+
+    /**
+     * The event scan refused a file, or could not splice one character. Rewrite the document when
+     * a normal load can read it and the rewrite finishes before {@code deadlineNanos}.
+     */
+    private boolean finishWithFullDocument(
+            File file,
+            Logger logger,
+            boolean summaries,
+            Iterable<String> secrets,
+            long deadlineNanos
+    ) {
+        FullAppend outcome = appendWithFullDocument(file, logger, summaries, secrets, deadlineNanos);
+        if (outcome == FullAppend.PUBLISHED) {
             return true;
         }
-        if (spliced == SpliceResult.NOTHING) {
+        if (outcome == FullAppend.NOTHING) {
             return false;
         }
-        warnUnsaved(logger, unsavedCharacterCount(summaries));
+        SkipReason reason = outcome == FullAppend.NOT_FINISHED ? SkipReason.BUDGET : SkipReason.UNREADABLE;
+        warnUnsaved(logger, unsavedCharacterCount(summaries), reason);
         return false;
     }
 
@@ -704,15 +742,62 @@ public final class MemoryStore {
 
     /**
      * The 1.1.2 merge: load the document, add characters that are absent, and write it back.
-     * Used only when the streaming parse cannot find a safe place to append.
+     * Used when the event scan cannot splice. A deadline other than {@link Long#MAX_VALUE} runs
+     * the load on a daemon thread and does not publish after that deadline.
      */
-    private boolean appendWithFullDocument(File file, Logger logger, boolean summaries, Iterable<String> secrets) {
+    private FullAppend appendWithFullDocument(
+            File file, Logger logger, boolean summaries, Iterable<String> secrets, long deadlineNanos) {
+        if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
+            return FullAppend.NOT_FINISHED;
+        }
         fullDocumentAppends.incrementAndGet();
+        if (deadlineNanos == Long.MAX_VALUE) {
+            return mergeLoaded(file, loadDocument(file), logger, summaries, secrets);
+        }
+        AtomicReference<YamlConfiguration> loaded = new AtomicReference<>();
+        AtomicReference<Boolean> unreadable = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            YamlConfiguration yaml = loadDocument(file);
+            if (yaml == null) {
+                unreadable.set(Boolean.TRUE);
+                return;
+            }
+            loaded.set(yaml);
+        }, "nexusai-memory-merge");
+        worker.setDaemon(true);
+        worker.start();
+        long remaining = deadlineNanos - System.nanoTime();
+        try {
+            if (remaining > 0) {
+                worker.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remaining)));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return FullAppend.NOT_FINISHED;
+        }
+        if (worker.isAlive() || (loaded.get() == null && unreadable.get() == null)) {
+            return FullAppend.NOT_FINISHED;
+        }
+        if (unreadable.get() != null) {
+            return FullAppend.UNREADABLE;
+        }
+        return mergeLoaded(file, loaded.get(), logger, summaries, secrets);
+    }
+
+    private static YamlConfiguration loadDocument(File file) {
         YamlConfiguration yaml = new YamlConfiguration();
         try {
             yaml.load(file);
         } catch (IOException | InvalidConfigurationException | RuntimeException e) {
-            return false;
+            return null;
+        }
+        return yaml;
+    }
+
+    private FullAppend mergeLoaded(
+            File file, YamlConfiguration yaml, Logger logger, boolean summaries, Iterable<String> secrets) {
+        if (yaml == null) {
+            return FullAppend.UNREADABLE;
         }
         Set<String> present = characterKeys(yaml);
         Map<String, StoredTranscript> extra;
@@ -720,7 +805,7 @@ public final class MemoryStore {
             extra = transcriptsAbsent(present, summaries);
         }
         if (extra.isEmpty()) {
-            return false;
+            return FullAppend.NOTHING;
         }
         if (summaries) {
             yaml.set("format", 2);
@@ -728,7 +813,23 @@ public final class MemoryStore {
         for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
             writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
         }
-        return publishYamlLocked(file, yaml, logger, summaries);
+        return publishYamlLocked(file, yaml, logger, summaries) ? FullAppend.PUBLISHED : FullAppend.UNREADABLE;
+    }
+
+    private enum FullAppend {
+        PUBLISHED, NOTHING, UNREADABLE, NOT_FINISHED
+    }
+
+    private enum SkipReason {
+        BUDGET("it did not finish within the stop budget"),
+        SCAN_FAILED("the key scan failed"),
+        UNREADABLE("dialogue-memory.yml could not be read");
+
+        private final String text;
+
+        SkipReason(String text) {
+            this.text = text;
+        }
     }
 
     private boolean publishYamlLocked(File file, YamlConfiguration yaml, Logger logger, boolean summaries) {
@@ -762,9 +863,11 @@ public final class MemoryStore {
         LoaderOptions options = new LoaderOptions();
         options.setCodePointLimit(Integer.MAX_VALUE);
         options.setMaxAliasesForCollections(Integer.MAX_VALUE);
+        options.setProcessComments(true);
         Yaml yaml = new Yaml(options);
         StreamOutline outline = new StreamOutline();
         java.util.ArrayDeque<ScanFrame> stack = new java.util.ArrayDeque<>();
+        MarkIndex marks = new MarkIndex();
         try {
             for (Event event : yaml.parse(new StringReader(text))) {
                 switch (event.getEventId()) {
@@ -780,7 +883,7 @@ public final class MemoryStore {
                         }
                         stack.pop();
                     }
-                    case Scalar -> onScalar(outline, stack, (ScalarEvent) event);
+                    case Scalar -> onScalar(outline, stack, (ScalarEvent) event, text, marks);
                     default -> throw new ScanFallback();
                 }
             }
@@ -882,7 +985,12 @@ public final class MemoryStore {
         stack.push(new ScanFrame(ScanKind.SEQUENCE));
     }
 
-    private static void onScalar(StreamOutline outline, java.util.ArrayDeque<ScanFrame> stack, ScalarEvent event) {
+    private static void onScalar(
+            StreamOutline outline,
+            java.util.ArrayDeque<ScanFrame> stack,
+            ScalarEvent event,
+            String text,
+            MarkIndex marks) {
         ScanFrame parent = stack.peek();
         if (parent == null) {
             throw new ScanFallback();
@@ -892,7 +1000,7 @@ public final class MemoryStore {
         }
         if (parent.expectKey) {
             parent.pendingKey = scalarKey(event);
-            parent.pendingColumn = event.getStartMark() == null ? 0 : event.getStartMark().getColumn();
+            parent.pendingColumn = keyIndent(text, event, marks);
             parent.pendingStart = event.getStartMark() == null ? 0 : event.getStartMark().getIndex();
             parent.pendingEnd = event.getEndMark() == null ? parent.pendingStart : event.getEndMark().getIndex();
             parent.expectKey = false;
@@ -1092,15 +1200,72 @@ public final class MemoryStore {
         }
     }
 
-    private static void warnUnsaved(Logger logger, int count) {
-        if (logger == null || count <= 0) {
+    private static void warnUnsaved(Logger logger, int count, SkipReason reason) {
+        if (logger == null || count <= 0 || reason == null) {
             return;
         }
-        logger.warning("Did not save " + count + " dialogue characters because dialogue-memory.yml could not be read.");
+        logger.warning("Did not save " + count + " dialogue characters because " + reason.text + ".");
+    }
+
+    /**
+     * Column of a key. A complex key ({@code ?} followed by whitespace) is measured at the {@code ?},
+     * not at the scalar, so a later character is inserted beside it.
+     */
+    private static int keyIndent(String text, ScalarEvent event, MarkIndex marks) {
+        if (event.getStartMark() == null) {
+            return 0;
+        }
+        int column = event.getStartMark().getColumn();
+        int at = marks.utf16(text, event.getStartMark().getIndex());
+        int line = at;
+        while (line > 0) {
+            char previous = text.charAt(line - 1);
+            if (previous == '\n' || previous == '\r') {
+                break;
+            }
+            line--;
+        }
+        int content = line;
+        while (content < text.length()) {
+            char c = text.charAt(content);
+            if (c != ' ' && c != '\t') {
+                break;
+            }
+            content++;
+        }
+        if (content < text.length() && text.charAt(content) == '?' && content + 1 < text.length()) {
+            char after = text.charAt(content + 1);
+            if (after == ' ' || after == '\t' || after == '\n' || after == '\r') {
+                return content - line;
+            }
+        }
+        return column;
     }
 
     private enum ScanKind {
         ROOT, ENTRIES, PLAYER, NESTED, SEQUENCE
+    }
+
+    /**
+     * Event marks are code points and arrive in order. This index turns the next mark into a
+     * Java index without rereading the file from the start.
+     */
+    private static final class MarkIndex {
+        private int codePoint;
+        private int unit;
+
+        private int utf16(String text, int codePointIndex) {
+            if (codePointIndex < codePoint) {
+                codePoint = 0;
+                unit = 0;
+            }
+            int length = text.length();
+            while (unit < length && codePoint < codePointIndex) {
+                unit += Character.charCount(text.codePointAt(unit));
+                codePoint++;
+            }
+            return unit;
+        }
     }
 
     private static final class ScanFrame {
@@ -1151,44 +1316,27 @@ public final class MemoryStore {
     }
 
     /**
-     * One character mapping, or null when the id or the text cannot be written as a block that
-     * loads back as the same id and lines. The caller then appends with a full document.
+     * One character mapping, or null when this character cannot be written as a block that loads
+     * back as the same id and lines. A failure is this character only; the caller rewrites the
+     * document instead of dropping the other characters.
      */
     private static String characterBlock(
             String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
-        String text;
-        if (transcriptNeedsQuote(transcript)) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("updated", transcript.updatedAt);
-            if (!transcript.lines.isEmpty()) {
-                List<Map<String, String>> stored = new ArrayList<>();
-                for (TurnMemory.Line line : transcript.lines) {
-                    Map<String, String> row = new LinkedHashMap<>();
-                    row.put("role", line.role());
-                    row.put("text", line.text());
-                    stored.add(row);
-                }
-                body.put("lines", stored);
+        if (yamlKey(characterId) != null && !transcriptNeedsQuote(transcript)) {
+            String classic = classicCharacterBlock(characterId, transcript, summaries, indent, nl);
+            if (blockRoundTrips(characterId, transcript, summaries, classic)) {
+                return classic;
             }
-            if (summaries && transcript.summary != null && !transcript.summary.isBlank()) {
-                body.put("summary", transcript.summary);
-                body.put("summary-updated", transcript.summaryUpdatedAt);
-            }
-            Map<String, Object> wrapped = new LinkedHashMap<>();
-            wrapped.put(characterId, body);
-            StringBuilder block = new StringBuilder();
-            appendIndented(block, dumpCharacterBody(wrapped), " ".repeat(indent), nl);
-            text = block.toString();
-        } else {
-            if (yamlKey(characterId) == null) {
-                return null;
-            }
-            text = classicCharacterBlock(characterId, transcript, summaries, indent, nl);
         }
-        if (!blockRoundTrips(characterId, transcript, summaries, text)) {
-            return null;
+        String dumped = dumpedCharacterBlock(characterId, transcript, summaries, indent, nl, false);
+        if (blockRoundTrips(characterId, transcript, summaries, dumped)) {
+            return dumped;
         }
-        return text;
+        String quoted = dumpedCharacterBlock(characterId, transcript, summaries, indent, nl, true);
+        if (blockRoundTrips(characterId, transcript, summaries, quoted)) {
+            return quoted;
+        }
+        return null;
     }
 
     private static boolean transcriptNeedsQuote(StoredTranscript transcript) {
@@ -1223,11 +1371,15 @@ public final class MemoryStore {
             yaml.set("summary-updated", transcript.summaryUpdatedAt);
         }
         String dumped = yaml.saveToString().replace("\r\n", "\n").replace("\r", "\n");
+        if (dumped.endsWith("\n")) {
+            dumped = dumped.substring(0, dumped.length() - 1);
+        }
         String pad = " ".repeat(indent + 2);
         StringBuilder block = new StringBuilder();
         block.append(" ".repeat(indent)).append(yamlKey(characterId)).append(':').append(nl);
         for (String line : dumped.split("\n", -1)) {
-            if (line.isBlank()) {
+            if (line.isEmpty()) {
+                block.append(nl);
                 continue;
             }
             block.append(pad).append(line).append(nl);
@@ -1236,19 +1388,65 @@ public final class MemoryStore {
     }
 
     /**
+     * One character, emitted directly. Ordinary multi-line text stays a literal block. Strings that
+     * would break that block are double-quoted, and {@code quoteAll} quotes every string.
+     */
+    private static String dumpedCharacterBlock(
+            String characterId,
+            StoredTranscript transcript,
+            boolean summaries,
+            int indent,
+            String nl,
+            boolean quoteAll
+    ) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("updated", transcript.updatedAt);
+        if (!transcript.lines.isEmpty()) {
+            List<Map<String, String>> stored = new ArrayList<>();
+            for (TurnMemory.Line line : transcript.lines) {
+                Map<String, String> row = new LinkedHashMap<>();
+                row.put("role", line.role());
+                row.put("text", line.text());
+                stored.add(row);
+            }
+            body.put("lines", stored);
+        }
+        if (summaries && transcript.summary != null && !transcript.summary.isBlank()) {
+            body.put("summary", transcript.summary);
+            body.put("summary-updated", transcript.summaryUpdatedAt);
+        }
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put(characterId, body);
+        StringBuilder block = new StringBuilder();
+        appendIndented(block, dumpDocument(wrapped, quoteAll), " ".repeat(indent), nl);
+        return block.toString();
+    }
+
+    /**
      * Block mapping whose strings stay strings. A plain scalar is used only when YAML 1.1 would
-     * read it back as that same string. Line breaks and controls are escaped inside double quotes.
+     * read it back as that same string. Ordinary multi-line text is a literal block. Controls are
+     * escaped inside double quotes.
      */
     private static String dumpDocument(Map<String, Object> document) {
+        return dumpDocument(document, false);
+    }
+
+    private static String dumpDocument(Map<String, Object> document, boolean quoteAll) {
         DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
-        options.setNonPrintableStyle(DumperOptions.NonPrintableStyle.ESCAPE);
+        options.setMaxSimpleKeyLength(MAX_SIMPLE_KEY);
         Representer representer = new Representer(options) {
             {
                 representers.put(String.class, data -> {
                     String value = String.valueOf(data);
-                    DumperOptions.ScalarStyle style = needsQuote(value)
-                            ? DumperOptions.ScalarStyle.DOUBLE_QUOTED : null;
+                    DumperOptions.ScalarStyle style;
+                    if (quoteAll || needsQuote(value)) {
+                        style = DumperOptions.ScalarStyle.DOUBLE_QUOTED;
+                    } else if (value.indexOf('\n') >= 0) {
+                        style = DumperOptions.ScalarStyle.LITERAL;
+                    } else {
+                        style = null;
+                    }
                     return representScalar(Tag.STR, value, style);
                 });
             }
@@ -1256,8 +1454,20 @@ public final class MemoryStore {
         return new Yaml(representer, options).dump(document);
     }
 
-    private static String dumpCharacterBody(Map<String, Object> body) {
-        return dumpDocument(body);
+    /** Long enough that a character id is a simple key instead of a {@code ?} key. */
+    private static final int MAX_SIMPLE_KEY = 1024;
+
+    private static void allowLongSimpleKeys(YamlConfiguration yaml) {
+        try {
+            Field field = YamlConfiguration.class.getDeclaredField("yamlDumperOptions");
+            field.setAccessible(true);
+            Object options = field.get(yaml);
+            if (options instanceof DumperOptions dumper) {
+                dumper.setMaxSimpleKeyLength(MAX_SIMPLE_KEY);
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // A long id then stays a complex key. The scan measures that key at the question mark.
+        }
     }
 
     private static Map<String, Object> configurationMap(YamlConfiguration yaml) {
