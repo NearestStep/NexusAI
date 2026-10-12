@@ -2,11 +2,13 @@ package io.github.neareststep.nexusai.config;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
@@ -137,6 +139,28 @@ public final class AtomicFiles {
      * then moves it into place. A missing target keeps the mode {@code temporary} already has
      * (owner-read/write when {@link #createPrivate} created it).
      */
+    /**
+     * Flushes {@code temporary}, renames it onto {@code target}, then flushes the parent directory.
+     * A failed flush does not abort the rename. Permissions stay with {@link #moveReplacing}.
+     */
+    public static void durableReplace(Path temporary, Path target) throws IOException {
+        if (temporary == null || target == null) {
+            throw new IOException("missing path");
+        }
+        try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException ignored) {
+            // A failed fsync must not abort the rename or leave the temp file as the only copy.
+        }
+        moveReplacing(temporary, target);
+        Path parent = target.getParent() == null ? Path.of(".") : target.getParent();
+        try (FileChannel channel = FileChannel.open(parent, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException ignored) {
+            // Directory fsync is best effort. The temp file was already forced.
+        }
+    }
+
     public static void moveReplacing(Path temporary, Path target) throws IOException {
         if (target != null && Files.isRegularFile(target)) {
             copyPosix(target, temporary);

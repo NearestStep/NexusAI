@@ -749,6 +749,150 @@ class MemoryStoreTest {
         }
     }
 
+    @Test
+    void autosaveForcesTheTempFileBeforeRenameAndKeepsGoingWhenFsyncFails() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-fsync");
+        assumePosix(dir);
+        Path file = dir.resolve("dialogue-memory.yml");
+        Files.writeString(file, "entries: {}\n", StandardCharsets.UTF_8);
+        Files.setPosixFilePermissions(file, Set.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.GROUP_READ));
+        List<String> trace = new ArrayList<>();
+        MemoryStore.DiskSync previous = MemoryStore.diskSync;
+        MemoryStore.durableTrace = trace;
+        MemoryStore.diskSync = path -> {
+            if (Files.isRegularFile(path)) {
+                String text = Files.readString(path);
+                assertTrue(text.contains("kept-line"), text);
+            }
+            throw new IOException("fsync failed qa-ring-kA-0002y");
+        };
+        List<String> logged = new ArrayList<>();
+        try {
+            MemoryStore store = new MemoryStore();
+            store.secrets(() -> List.of("qa-ring-kA-0002y"));
+            store.append(UUID.randomUUID(), "blacksmith", "user", "kept-line", 70L, 8, 100, 0L);
+            store.save(file.toFile(), capturingLogger("fsync-fail", logged), false);
+            assertEquals(List.of("force-temp", "rename", "force-dir"), trace);
+            String saved = Files.readString(file);
+            assertTrue(saved.contains("kept-line"), saved);
+            assertEquals(0, Files.list(dir).filter(path -> path.getFileName().toString().endsWith(".tmp")).count());
+            Set<PosixFilePermission> mode = Files.getPosixFilePermissions(file);
+            assertTrue(mode.contains(PosixFilePermission.OWNER_READ));
+            assertTrue(mode.contains(PosixFilePermission.OWNER_WRITE));
+            assertTrue(mode.contains(PosixFilePermission.GROUP_READ), mode.toString());
+            assertTrue(logged.stream().noneMatch(line -> line.contains("Failed to save")), logged.toString());
+            assertTrue(logged.stream().noneMatch(line -> line.contains("qa-ring-kA-0002y")), logged.toString());
+        } finally {
+            MemoryStore.diskSync = previous;
+            MemoryStore.durableTrace = null;
+        }
+    }
+
+    @Test
+    void aNewAutosaveIsOwnerReadWriteWhenFsyncFails() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-fsync-new");
+        assumePosix(dir);
+        Path file = dir.resolve("dialogue-memory.yml");
+        MemoryStore.DiskSync previous = MemoryStore.diskSync;
+        MemoryStore.diskSync = path -> {
+            throw new IOException("fsync failed");
+        };
+        try {
+            MemoryStore store = new MemoryStore();
+            store.append(UUID.randomUUID(), "blacksmith", "user", "fresh", 70L, 8, 100, 0L);
+            store.save(file.toFile(), null, false);
+            assertTrue(Files.readString(file).contains("fresh"));
+            assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(file));
+            assertEquals(0, Files.list(dir).filter(path -> path.getFileName().toString().endsWith(".tmp")).count());
+        } finally {
+            MemoryStore.diskSync = previous;
+        }
+    }
+
+    @Test
+    void maskingRewriteForcesTheTempFileBeforeRename() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-fsync-mask");
+        assumePosix(dir);
+        UUID player = UUID.randomUUID();
+        Path file = dir.resolve("dialogue-memory.yml");
+        Files.writeString(file, """
+                entries:
+                  %s:
+                    blacksmith:
+                      updated: 50
+                      lines:
+                      - role: user
+                        text: hello qa-ring-kA-0002y
+                """.formatted(player), StandardCharsets.UTF_8);
+        Files.setPosixFilePermissions(file, Set.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.GROUP_READ,
+                PosixFilePermission.OTHERS_READ));
+        List<String> trace = new ArrayList<>();
+        MemoryStore.durableTrace = trace;
+        try {
+            MemoryStore store = new MemoryStore();
+            store.load(file.toFile(), 60L, 10_000L, null, List.of("qa-ring-kA-0002y"));
+            assertEquals(List.of("force-temp", "rename", "force-dir"), trace);
+            assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(file));
+            String text = Files.readString(file);
+            assertFalse(text.contains("qa-ring-kA-0002y"), text);
+            assertTrue(text.contains("****002y"), text);
+            assertEquals(0, Files.list(dir).filter(path -> path.getFileName().toString().endsWith(".tmp")).count());
+        } finally {
+            MemoryStore.durableTrace = null;
+        }
+    }
+
+    @Test
+    void anIdenticalCorruptCopyIsReusedAndTheOriginalIsRemoved() throws Exception {
+        identicalCorruptIsReused("dialogue-memory.yml.corrupt");
+    }
+
+    @Test
+    void anIdenticalStampedCorruptCopyIsReusedAndTheOriginalIsRemoved() throws Exception {
+        identicalCorruptIsReused("dialogue-memory.yml.corrupt.1700000000000");
+    }
+
+    private static void identicalCorruptIsReused(String existingName) throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-corrupt-dup");
+        assumePosix(dir);
+        Path file = dir.resolve("dialogue-memory.yml");
+        String original = brokenMemory("qa-ring-kA-0002y");
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        List<String> logged = new ArrayList<>();
+        MemoryStore first = new MemoryStore();
+        first.load(file.toFile(), 60L, 10_000L, capturingLogger("dup-first", logged), List.of("qa-ring-kA-0002y"));
+        Path produced = dir.resolve("dialogue-memory.yml.corrupt");
+        assertTrue(Files.exists(produced));
+        byte[] masked = Files.readAllBytes(produced);
+        Path existing = dir.resolve(existingName);
+        if (!existing.equals(produced)) {
+            Files.move(produced, existing);
+        }
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        logged.clear();
+        MemoryStore again = new MemoryStore();
+        again.load(file.toFile(), 60L, 10_000L, capturingLogger("dup-second", logged), List.of("qa-ring-kA-0002y"));
+        assertFalse(Files.exists(file));
+        assertArrayEquals(masked, Files.readAllBytes(existing));
+        assertEquals(1, Files.list(dir).filter(path -> path.getFileName().toString().contains(".corrupt")).count());
+        String joined = String.join("\n", logged);
+        assertTrue(joined.contains("already exists as " + existingName), joined);
+        assertTrue(joined.contains("The original was removed"), joined);
+        assertFalse(joined.contains("qa-ring-kA-0002y"), joined);
+        again.append(UUID.randomUUID(), "blacksmith", "user", "after", 70L, 8, 100, 0L);
+        again.save(file.toFile(), null, false);
+        assertTrue(Files.readString(file).contains("after"));
+        assertArrayEquals(masked, Files.readAllBytes(existing));
+    }
+
     private static String brokenMemory(String secret) {
         return "entries:\n\tblacksmith:\n    summary: hello " + secret + "\n";
     }

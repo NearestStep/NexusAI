@@ -9,14 +9,24 @@ import io.github.neareststep.nexusai.ai.OpenAiProvider;
 import io.github.neareststep.nexusai.ai.RequestGate;
 import io.github.neareststep.nexusai.ai.RoutingProvider;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
+import io.github.neareststep.nexusai.budget.TokenAccounting;
+import io.github.neareststep.nexusai.budget.TokenLedger;
+import io.github.neareststep.nexusai.budget.TokenLedgerStore;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.ConfigMigrator;
 import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.i18n.MessageService;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import io.github.neareststep.nexusai.moderation.ChatModerationListener;
 import io.github.neareststep.nexusai.moderation.FoliaStaffNotifier;
@@ -31,6 +41,9 @@ import io.github.neareststep.nexusai.pool.PoolStore;
 import io.github.neareststep.nexusai.pool.UnpooledGenerateLog;
 import io.github.neareststep.nexusai.prewarm.PrewarmService;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
+import io.github.neareststep.nexusai.generate.GenerationRuntime;
+import io.github.neareststep.nexusai.generate.GenerationService;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
 import io.github.neareststep.nexusai.context.ContextRegistry;
 import io.github.neareststep.nexusai.context.ContextService;
@@ -53,9 +66,14 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -96,6 +114,10 @@ public final class NexusAI extends JavaPlugin {
     private ContextSnapshots contextSnapshots;
     private ContextService contextService;
     private CachedContextCoordinator contextCoordinator;
+    private GenerationService generationService;
+    private TokenLedgerStore tokenStore;
+    private QuotaPolicy quotaPolicy;
+    private TokenAccounting tokenAccounting = TokenAccounting.none();
 
     @Override
     public void onEnable() {
@@ -114,12 +136,15 @@ public final class NexusAI extends JavaPlugin {
         } else {
             this.pluginConfig = new PluginConfig(getConfig());
         }
+        EventDispatcher.install(EventDispatcher.bukkit(getLogger(), () -> pluginConfig.configuredSecrets()));
         this.messageService = new MessageService(this);
         this.messageService.reload(pluginConfig.getLocale());
         loadKnowledge();
         this.contextRegistry = new ContextRegistry(getLogger());
         NexusAIApi.bindContextRegistry(contextRegistry);
         getServer().getPluginManager().registerEvents(contextRegistry, this);
+        ApiPromptRegistry.get().retainEnabled();
+        getServer().getPluginManager().registerEvents(new ApiPromptRegistry.DisableListener(), this);
         contextRegistry.load(getServer().getServicesManager());
         loadPrompts();
         logCredentialState();
@@ -127,10 +152,15 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStructuredOutput();
         logHttpLimitWarning();
+        logPluginApiWarnings();
+        logQuotaWarnings();
+        logKnowledgeWarnings();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
-                + ", base-url: " + pluginConfig.getBaseUrl()
+                + ", base-url: " + SecretMask.redactUrl(
+                        pluginConfig.getBaseUrl(), pluginConfig.configuredSecrets())
                 + ", model: " + pluginConfig.getModel());
         String maskedKeys = pluginConfig.maskedApiKeys();
         if (!maskedKeys.isBlank()) {
@@ -172,10 +202,19 @@ public final class NexusAI extends JavaPlugin {
             dialogueService = null;
         }
         stopRuntimeServices(true);
+        if (generationService != null) {
+            generationService.shutdown();
+            NexusAIApi.bindGeneration(null);
+            generationService = null;
+        }
+        EventDispatcher.install(null);
         closeSharedHttpClient();
+        shutdownExecutor(httpExecutor);
+        if (tokenStore != null) {
+            tokenStore.flush();
+        }
         shutdownExecutor(contextExecutor);
         shutdownExecutor(scheduler);
-        shutdownExecutor(httpExecutor);
         NexusAIApi.bindContextRegistry(null);
         getLogger().info("NexusAI disabled.");
     }
@@ -202,6 +241,7 @@ public final class NexusAI extends JavaPlugin {
         messageService.reload(pluginConfig.getLocale());
         getUnpooledGenerateLog().reset();
         LengthTrimNotices.reset();
+        StructuredOutputSupport.clear();
 
         stopRuntimeServices(true);
         if (httpPool != null) {
@@ -214,13 +254,18 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStructuredOutput();
         logHttpLimitWarning();
+        logPluginApiWarnings();
+        logQuotaWarnings();
+        logKnowledgeWarnings();
 
         getLogger().info("NexusAI reloaded (locale=" + pluginConfig.getLocale()
                 + ", prompts=" + promptCatalog.ids().size() + ").");
     }
 
     private void startRuntimeServices() {
+        ensureTokenStore();
         this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize(), pluginConfig.allowMarkup());
         this.rateLimiter = new RateLimiter(
                 pluginConfig.getRequestsPerMinute(),
@@ -247,6 +292,7 @@ public final class NexusAI extends JavaPlugin {
                 pluginConfig.isPoolPersist(),
                 pluginConfig.allowMarkup()
         );
+        poolStore.secrets(pluginConfig::configuredSecrets);
         this.poolService = new PoolService(
                 pluginConfig, aiPool, aiHttpClient, getLogger(), poolStore,
                 (delay, task) -> scheduler.schedule(task, Math.max(0L, delay), TimeUnit.MILLISECONDS),
@@ -265,10 +311,54 @@ public final class NexusAI extends JavaPlugin {
         } else {
             dialogueService.onReload();
         }
+        dialogueService.tokenAccounting(tokenAccounting);
         startModeration();
+        if (generationService == null) {
+            generationService = new GenerationService(this, httpExecutor, scheduler, getLogger());
+            NexusAIApi.bindGeneration(generationService);
+        }
+        generationService.publish(new GenerationRuntime(
+                pluginConfig,
+                aiCache,
+                gate,
+                diagnostics,
+                provider,
+                aiHttpClient,
+                promptCatalog,
+                knowledgeBase,
+                contextService));
+        wireQuotas(gate);
+    }
+
+    private void wireQuotas(RequestGate gate) {
+        if (quotaPolicy == null || pluginConfig == null) {
+            return;
+        }
+        quotaPolicy.apply(pluginConfig.quotaSettings());
+        quotaPolicy.clearMembership();
+        if (modelQueue != null) {
+            modelQueue.rowTokens(quotaPolicy);
+        }
+        if (aiHttpClient != null) {
+            aiHttpClient.quotas(quotaPolicy);
+        }
+        if (gate != null) {
+            QuotaPolicy policy = quotaPolicy;
+            gate.skipPlayerDay(policy::replacesPlayerDay);
+        }
+        if (dialogueService != null) {
+            dialogueService.quotas(quotaPolicy);
+        }
+        if (generationService != null) {
+            generationService.quotas(quotaPolicy);
+        }
+        if (moderationService != null) {
+            moderationService.quotas(quotaPolicy);
+        }
     }
 
     private void stopRuntimeServices(boolean invalidateCache) {
+        flushUsageFiles();
         // Context providers stay registered across /nai reload. Only snapshots and health reset.
         if (contextSnapshots != null) {
             contextSnapshots.clear();
@@ -277,9 +367,6 @@ public final class NexusAI extends JavaPlugin {
             contextService.apply(pluginConfig.contextSettings(), pluginConfig.getErrorLogCooldownSeconds());
         }
         this.moderationService = null;
-        if (modelQueue != null) {
-            modelQueue.save();
-        }
         if (prewarmService != null) {
             prewarmService.shutdown();
             prewarmService = null;
@@ -290,6 +377,16 @@ public final class NexusAI extends JavaPlugin {
         }
         if (invalidateCache && aiCache != null) {
             aiCache.invalidateAll();
+        }
+    }
+
+    /**
+     * Drops off-region placeholder aliases for a player who quit. The cached answer stays until
+     * its TTL, and a later read from that player does not reuse another player's alias.
+     */
+    public void forgetPlaceholderPlayer(UUID playerId) {
+        if (placeholderExpansion != null) {
+            placeholderExpansion.forgetPlayer(playerId);
         }
     }
 
@@ -409,6 +506,30 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    private void logPluginApiWarnings() {
+        for (String warning : pluginConfig.pluginApiWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
+    private void logQuotaWarnings() {
+        for (String warning : pluginConfig.quotaWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
+    private void logKnowledgeWarnings() {
+        for (String warning : pluginConfig.knowledgeWarnings()) {
+            if (warning != null && !warning.isBlank()) {
+                getLogger().warning(warning);
+            }
+        }
+    }
+
     /**
      * One warning per startup and per {@code /nai reload}. Not logged per request.
      */
@@ -456,12 +577,83 @@ public final class NexusAI extends JavaPlugin {
                 new File(getDataFolder(), "usage.yml"),
                 getLogger(),
                 config.modelQueueStrategy());
-        return new RoutingProvider(config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
+        this.modelQueue.secrets(config::configuredSecrets);
+        this.modelQueue.saveExecutor(scheduler);
+        RoutingProvider routing = new RoutingProvider(
+                config, modelQueue, http, httpExecutor, getLogger(), httpPool.gate());
+        routing.tokenAccounting(tokenAccounting);
+        if (quotaPolicy != null) {
+            modelQueue.rowTokens(quotaPolicy);
+            routing.quotas(quotaPolicy);
+        }
+        return routing;
+    }
+
+    private void ensureTokenStore() {
+        if (pluginConfig == null) {
+            return;
+        }
+        if (tokenStore == null) {
+            TokenLedger ledger = new TokenLedger(LocalDate::now, getLogger());
+            tokenStore = new TokenLedgerStore(
+                    new File(getDataFolder(), "token-usage.yml").toPath(),
+                    scheduler,
+                    ledger,
+                    getLogger(),
+                    () -> OffsetDateTime.now(ZoneId.systemDefault()).truncatedTo(ChronoUnit.SECONDS),
+                    System::currentTimeMillis);
+            tokenStore.secrets(pluginConfig::configuredSecrets);
+            tokenStore.start(pluginConfig.missingUsage(), pluginConfig.tokenSaveIntervalSeconds());
+            tokenAccounting = new TokenAccounting(tokenStore);
+            quotaPolicy = new QuotaPolicy(
+                    ledger, LocalDate::now, System::currentTimeMillis, getLogger(), pluginConfig::configuredSecrets);
+            return;
+        }
+        tokenStore.secrets(pluginConfig::configuredSecrets);
+        tokenStore.reconfigure(pluginConfig.missingUsage(), pluginConfig.tokenSaveIntervalSeconds());
+    }
+
+    /**
+     * Writes {@code usage.yml} and {@code token-usage.yml} on {@code nexusai-scheduler}, then
+     * ignores later saves from the queue instance that was just flushed. The caller waits so the
+     * next {@link ModelQueue} cannot load a stale file. Shutdown may run the same work inline.
+     */
+    private void flushUsageFiles() {
+        ModelQueue queue = modelQueue;
+        TokenLedgerStore store = tokenStore;
+        Runnable flush = () -> {
+            if (queue != null) {
+                queue.flushAndClose();
+            }
+            if (store != null) {
+                store.flush();
+            }
+        };
+        if (scheduler == null || "nexusai-scheduler".equals(Thread.currentThread().getName())) {
+            flush.run();
+            return;
+        }
+        try {
+            scheduler.submit(flush).get(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LogRedaction.warning(getLogger(), "Failed to flush usage files", e, loggingSecrets());
+            flush.run();
+        } catch (Exception e) {
+            LogRedaction.warning(getLogger(), "Failed to flush usage files", e, loggingSecrets());
+            flush.run();
+        }
     }
 
     private void logQueueStrategy() {
         String warning = pluginConfig.modelQueueStrategyWarning();
         if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
+        }
+    }
+
+    private void logStructuredOutput() {
+        for (String warning : pluginConfig.structuredOutputWarnings()) {
             getLogger().warning(warning);
         }
     }
@@ -586,6 +778,19 @@ public final class NexusAI extends JavaPlugin {
         return modelQueue;
     }
 
+    public QuotaPolicy getQuotaPolicy() {
+        return quotaPolicy;
+    }
+
+    /** Today's ledger, or null before the plugin has started accounting. */
+    public TokenLedger.Snapshot tokenSnapshot() {
+        TokenLedgerStore store = tokenStore;
+        if (store == null || store.ledger() == null) {
+            return null;
+        }
+        return store.ledger().snapshot();
+    }
+
     public ContextRegistry getContextRegistry() {
         return contextRegistry;
     }
@@ -610,6 +815,16 @@ public final class NexusAI extends JavaPlugin {
         return moderationService;
     }
 
+    private ModerationLog moderationLog() {
+        ModerationLog log = new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger());
+        log.secrets(this::loggingSecrets);
+        return log;
+    }
+
+    private Iterable<String> loggingSecrets() {
+        return pluginConfig == null ? List.of() : pluginConfig.configuredSecrets();
+    }
+
     private void startModeration() {
         ModerationSettings settings = pluginConfig.moderation();
         if (settings.enabled() && settings.provider().isEmpty() != settings.model().isEmpty()) {
@@ -630,10 +845,14 @@ public final class NexusAI extends JavaPlugin {
                 modelQueue,
                 openAiProvider,
                 httpExecutor,
-                new ModerationLog(new File(getDataFolder(), "moderation.log"), getLogger()),
+                moderationLog(),
                 new FoliaStaffNotifier(this),
                 getLogger()
         );
+        this.moderationService.tokenAccounting(tokenAccounting);
+        if (quotaPolicy != null) {
+            this.moderationService.quotas(quotaPolicy);
+        }
     }
 
     private void registerModerationListener() {
@@ -673,6 +892,7 @@ public final class NexusAI extends JavaPlugin {
                 }
             }
         }
+        noteKnowledgeModes();
         List<String> poolPrompts = new ArrayList<>();
         for (PoolEntry entry : pluginConfig.getPoolEntries()) {
             poolPrompts.add(entry.prompt());
@@ -711,7 +931,7 @@ public final class NexusAI extends JavaPlugin {
                 AtomicFiles.installPrivate(target.toPath(), in);
             }
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create " + name, e);
+            LogRedaction.warning(getLogger(), "Could not create " + name, e, loggingSecrets());
         }
         if (target.isFile()) {
             return;
@@ -738,7 +958,7 @@ public final class NexusAI extends JavaPlugin {
         try {
             KnowledgeBase.ensureExample(knowledge.toPath());
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+            LogRedaction.warning(getLogger(), "Could not create the knowledge example file", e, loggingSecrets());
         }
     }
 
@@ -747,16 +967,53 @@ public final class NexusAI extends JavaPlugin {
         try {
             KnowledgeBase.ensureExample(new File(getDataFolder(), "knowledge").toPath());
         } catch (IOException e) {
-            getLogger().log(Level.WARNING, "Could not create the knowledge example file", e);
+            LogRedaction.warning(getLogger(), "Could not create the knowledge example file", e, loggingSecrets());
         }
         this.knowledgeBase = KnowledgeBase.load(
                 new File(getDataFolder(), "knowledge").toPath(),
                 pluginConfig.knowledgeMaxChars(),
                 pluginConfig.knowledgeMaxFileChars(),
+                pluginConfig.keywordSettings(),
+                false,
                 warnings,
-                getLogger());
+                getLogger(),
+                loggingSecrets());
         for (String warning : warnings) {
             getLogger().warning(warning);
+        }
+    }
+
+    /**
+     * Full-mode truncation is warned only for files a full-mode prompt actually lists.
+     * Characters that list knowledge while selection is full get one info line: talk does not
+     * attach those files until {@code knowledge-select} is {@code keywords}.
+     */
+    private void noteKnowledgeModes() {
+        List<String> fullFiles = new ArrayList<>();
+        List<String> talkFull = new ArrayList<>();
+        for (String id : promptCatalog.ids()) {
+            NamedPrompt prompt = promptCatalog.find(id).orElse(null);
+            if (prompt == null || prompt.knowledge().isEmpty()) {
+                continue;
+            }
+            if (KnowledgeRequests.effective(prompt.knowledgeSelect(), pluginConfig.knowledgeSelect())
+                    != KnowledgeSelect.FULL) {
+                continue;
+            }
+            for (String name : prompt.knowledge()) {
+                if (!fullFiles.contains(name)) {
+                    fullFiles.add(name);
+                }
+            }
+            if (prompt.dialogue().defined() || !prompt.actions().isEmpty()) {
+                talkFull.add(id);
+            }
+        }
+        knowledgeBase.warnFullModeTruncation(fullFiles, getLogger());
+        if (!talkFull.isEmpty()) {
+            getLogger().info("Characters " + String.join(", ", talkFull)
+                    + " list knowledge while selection is full. /nai talk does not attach those files."
+                    + " Set knowledge-select: keywords to send matching paragraphs.");
         }
     }
 

@@ -12,6 +12,12 @@ public enum AiErrorKind {
     OTHER("other"),
     /** Local minute/day limiter. Not a provider failure. */
     LOCAL_LIMIT("local-limit"),
+    /**
+     * A NexusAI daily quota refused the call before HTTP. Not a provider failure,
+     * so it does not pause a provider, start backoff, or cool a queue row.
+     * This is not {@link #QUOTA}, which is an HTTP 402 from the provider.
+     */
+    LOCAL_QUOTA("local-quota"),
     /** The model leaked a player-input boundary or restated the guard. Not a provider failure. */
     REJECTED("rejected"),
     /**

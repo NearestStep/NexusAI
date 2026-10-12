@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -35,6 +36,8 @@ public final class NamedPrompt {
     private final GenerationOverrides overrides;
     private final String format;
     private final List<String> knowledge;
+    private final KnowledgeSelect knowledgeSelect;
+    private final List<String> knowledgeKeywords;
     private final FallbackModel fallbackModel;
     private final boolean playerDependent;
     private final Pattern resolvedPattern;
@@ -84,6 +87,27 @@ public final class NamedPrompt {
             List<CharacterAction> actions,
             PromptContext context
     ) {
+        this(id, template, vars, ttl, fallback, maxPromptLength, overrides, format,
+                knowledge, fallbackModel, dialogue, actions, context, null, List.of());
+    }
+
+    public NamedPrompt(
+            String id,
+            String template,
+            Map<String, String> vars,
+            Duration ttl,
+            String fallback,
+            Integer maxPromptLength,
+            GenerationOverrides overrides,
+            String format,
+            List<String> knowledge,
+            FallbackModel fallbackModel,
+            DialogueProfile dialogue,
+            List<CharacterAction> actions,
+            PromptContext context,
+            KnowledgeSelect knowledgeSelect,
+            List<String> knowledgeKeywords
+    ) {
         this.id = Objects.requireNonNull(id, "id");
         this.template = Objects.requireNonNull(template, "template");
         this.vars = vars == null || vars.isEmpty()
@@ -95,6 +119,10 @@ public final class NamedPrompt {
         this.overrides = overrides == null ? GenerationOverrides.none() : overrides;
         this.format = format == null || format.isBlank() ? null : format;
         this.knowledge = knowledge == null || knowledge.isEmpty() ? List.of() : List.copyOf(knowledge);
+        this.knowledgeSelect = knowledgeSelect;
+        this.knowledgeKeywords = knowledgeKeywords == null || knowledgeKeywords.isEmpty()
+                ? List.of()
+                : List.copyOf(knowledgeKeywords);
         this.fallbackModel = fallbackModel != null && fallbackModel.configured() ? fallbackModel : null;
         this.dialogue = dialogue == null ? DialogueProfile.absent() : dialogue;
         this.actions = actions == null || actions.isEmpty() ? List.of() : List.copyOf(actions);
@@ -167,6 +195,20 @@ public final class NamedPrompt {
      */
     public List<String> knowledge() {
         return knowledge;
+    }
+
+    /**
+     * @return {@code knowledge-select}, or {@code null} to inherit {@code knowledge.select}
+     */
+    public KnowledgeSelect knowledgeSelect() {
+        return knowledgeSelect;
+    }
+
+    /**
+     * Words always added to a keyword query. Empty when the prompt lists none.
+     */
+    public List<String> knowledgeKeywords() {
+        return knowledgeKeywords;
     }
 
     /**

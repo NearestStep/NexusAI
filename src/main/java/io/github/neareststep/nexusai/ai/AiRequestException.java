@@ -11,6 +11,7 @@ public final class AiRequestException extends RuntimeException {
     private final java.util.Map<String, java.util.List<String>> headers;
     private final boolean unsupportedTools;
     private final java.util.Set<String> pausedProviders;
+    private final ResponseUsage usage;
 
     public AiRequestException(AiErrorKind kind, int status, String message, Throwable cause) {
         this(kind, status, message, cause, 0L);
@@ -40,7 +41,7 @@ public final class AiRequestException extends RuntimeException {
             java.util.Map<String, java.util.List<String>> headers,
             boolean unsupportedTools
     ) {
-        this(kind, status, message, cause, retryAfterSeconds, headers, unsupportedTools, java.util.Set.of());
+        this(kind, status, message, cause, retryAfterSeconds, headers, unsupportedTools, java.util.Set.of(), ResponseUsage.none());
     }
 
     private AiRequestException(
@@ -51,7 +52,8 @@ public final class AiRequestException extends RuntimeException {
             long retryAfterSeconds,
             java.util.Map<String, java.util.List<String>> headers,
             boolean unsupportedTools,
-            java.util.Set<String> pausedProviders
+            java.util.Set<String> pausedProviders,
+            ResponseUsage usage
     ) {
         super(message, cause);
         this.kind = kind == null ? AiErrorKind.OTHER : kind;
@@ -62,6 +64,25 @@ public final class AiRequestException extends RuntimeException {
         this.pausedProviders = pausedProviders == null || pausedProviders.isEmpty()
                 ? java.util.Set.of()
                 : java.util.Set.copyOf(pausedProviders);
+        this.usage = usage == null ? ResponseUsage.none() : usage;
+    }
+
+    /**
+     * Usage parsed from a body NexusAI then discarded. Error statuses without a usage object stay
+     * {@link ResponseUsage#none()}.
+     */
+    public ResponseUsage usage() {
+        return usage;
+    }
+
+    /** A copy that carries {@code usage}. The same instance is returned when nothing changes. */
+    public AiRequestException withUsage(ResponseUsage usage) {
+        ResponseUsage next = usage == null ? ResponseUsage.none() : usage;
+        if (next.equals(this.usage)) {
+            return this;
+        }
+        return new AiRequestException(
+                kind, status, getMessage(), getCause(), retryAfterSeconds, headers, unsupportedTools, pausedProviders, next);
     }
 
     public AiErrorKind kind() {
@@ -120,7 +141,8 @@ public final class AiRequestException extends RuntimeException {
                 retryAfterSeconds,
                 headers,
                 unsupportedTools,
-                providers
+                providers,
+                usage
         );
     }
 

@@ -2,13 +2,24 @@ package io.github.neareststep.nexusai.placeholder;
 
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
 import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.api.RequestOrigin;
+import io.github.neareststep.nexusai.budget.QuotaGroups;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
+import io.github.neareststep.nexusai.budget.UsagePlaceholders;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.context.CachedContextCoordinator;
+import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.context.RegionOwnership;
+import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.pool.AiPool;
 import io.github.neareststep.nexusai.pool.PoolService;
 import io.github.neareststep.nexusai.context.ContextVariables;
@@ -17,12 +28,19 @@ import io.github.neareststep.nexusai.prompt.PromptCatalog;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Registers {@code %ainexus_generate_<prompt>%} (unique pool) and
@@ -34,12 +52,25 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     private static final String CACHED_PREFIX = "cached_";
 
     private final NexusAI plugin;
+    private final Plugin schedulerPlugin;
+    private final KnowledgeBase knowledgeOverride;
+    private final CachedContextCoordinator coordinatorOverride;
+    private final ContextService contextOverride;
+    private final Logger loggerOverride;
     private PluginConfig config;
     private AiCache cache;
     private AiHttpClient httpClient;
     private AiPool pool;
     private PoolService poolService;
     private PromptCatalog prompts;
+    /**
+     * Off-region reads cannot fill {@code {player}} or {@code %} vars, so the text they look up
+     * is not the text stored after the hop. This maps that caller's key to the resolved cache key.
+     * The value is per player. Two players do not share it. An alias is removed when its cache
+     * entry is gone, when that player quits, and when the map is past the configured cache size.
+     */
+    private final LinkedHashMap<String, String> offThreadCacheKeys = new LinkedHashMap<>();
+    private final Map<UUID, Set<String>> offThreadAliasesByPlayer = new HashMap<>();
 
     public AiPlaceholderExpansion(
             NexusAI plugin,
@@ -50,7 +81,69 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             PoolService poolService,
             PromptCatalog prompts
     ) {
+        this(plugin, plugin, null, null, null, null, config, cache, httpClient, pool, poolService, prompts);
+    }
+
+    /**
+     * Placeholder path without a running plugin. The overrides stand in for the services
+     * {@code NexusAI} would provide. With no scheduler plugin, an off-region caller cannot hop
+     * and the owning-thread guard leaves {@code %} vars empty.
+     */
+    AiPlaceholderExpansion(
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            AiPool pool,
+            PoolService poolService,
+            PromptCatalog prompts,
+            KnowledgeBase knowledge,
+            CachedContextCoordinator coordinator,
+            ContextService contexts,
+            Logger logger
+    ) {
+        this(null, null, knowledge, coordinator, contexts, logger, config, cache, httpClient, pool, poolService, prompts);
+    }
+
+    /**
+     * Same as the service override, plus a plugin whose entity scheduler can carry a background
+     * read onto the player's region.
+     */
+    AiPlaceholderExpansion(
+            Plugin schedulerPlugin,
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            AiPool pool,
+            PoolService poolService,
+            PromptCatalog prompts,
+            KnowledgeBase knowledge,
+            CachedContextCoordinator coordinator,
+            ContextService contexts,
+            Logger logger
+    ) {
+        this(null, schedulerPlugin, knowledge, coordinator, contexts, logger, config, cache, httpClient, pool, poolService, prompts);
+    }
+
+    private AiPlaceholderExpansion(
+            NexusAI plugin,
+            Plugin schedulerPlugin,
+            KnowledgeBase knowledgeOverride,
+            CachedContextCoordinator coordinatorOverride,
+            ContextService contextOverride,
+            Logger loggerOverride,
+            PluginConfig config,
+            AiCache cache,
+            AiHttpClient httpClient,
+            AiPool pool,
+            PoolService poolService,
+            PromptCatalog prompts
+    ) {
         this.plugin = plugin;
+        this.schedulerPlugin = schedulerPlugin;
+        this.knowledgeOverride = knowledgeOverride;
+        this.coordinatorOverride = coordinatorOverride;
+        this.contextOverride = contextOverride;
+        this.loggerOverride = loggerOverride;
         this.config = config;
         this.cache = cache;
         this.httpClient = httpClient;
@@ -77,6 +170,34 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         this.pool = pool;
         this.poolService = poolService;
         this.prompts = prompts == null ? PromptCatalog.empty() : prompts;
+        synchronized (offThreadCacheKeys) {
+            this.offThreadCacheKeys.clear();
+            this.offThreadAliasesByPlayer.clear();
+        }
+    }
+
+    /**
+     * Drops aliases for a player who left. The cached answer itself stays until its TTL.
+     */
+    public void forgetPlayer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        synchronized (offThreadCacheKeys) {
+            Set<String> keys = offThreadAliasesByPlayer.remove(playerId);
+            if (keys == null) {
+                return;
+            }
+            for (String key : keys) {
+                offThreadCacheKeys.remove(key);
+            }
+        }
+    }
+
+    int offThreadAliasCount() {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.size();
+        }
     }
 
     @Override
@@ -101,6 +222,14 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
 
     @Override
     public @Nullable String onPlaceholderRequest(Player player, @NotNull String params) {
+        if (params.startsWith("usage_")) {
+            refreshGroupsIfOwned(player);
+            return UsagePlaceholders.resolve(
+                    params,
+                    player == null ? null : player.getUniqueId(),
+                    plugin.tokenSnapshot(),
+                    plugin.getQuotaPolicy());
+        }
         if (params.startsWith(GENERATE_PREFIX)) {
             return resolveGenerate(player, params.substring(GENERATE_PREFIX.length()));
         }
@@ -111,14 +240,16 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     }
 
     private String resolveGenerate(Player player, String raw) {
-        plugin.getUnpooledGenerateLog().note(
-                raw, config.isPoolEnabled() && poolService.findEntry(raw).isPresent());
+        if (plugin != null) {
+            plugin.getUnpooledGenerateLog().note(
+                    raw, config.isPoolEnabled() && poolService.findEntry(raw).isPresent());
+        }
         ResolvedPrompt resolved = resolve(player, raw);
         if (!resolved.usable()) {
             return resolved.fallback();
         }
         Optional<String> answer = pool.poll(resolved.poolKey());
-        poolService.onConsume(raw, resolved.text());
+        refillPool(player, raw, resolved);
         if (answer.isEmpty()) {
             return resolved.fallback();
         }
@@ -138,31 +269,29 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         KnowledgeComposer.Prepared prepared = KnowledgeComposer.prepare(
                 resolved.overrides(),
                 config.getSystemPrompt(),
-                plugin.getKnowledgeBase(),
-                resolved.knowledge());
+                knowledgeBase(),
+                resolved.knowledge(),
+                new KnowledgeRequest(
+                        KnowledgeRequests.effective(resolved.knowledgeSelect(), config.knowledgeSelect()),
+                        resolved.text(),
+                        resolved.knowledgeKeywords()));
         NamedPrompt named = contextPrompt(player, resolved);
         if (named == null) {
             return cachedLookup(player, raw, resolved, resolved.text(), prepared);
         }
-        CachedContextCoordinator coordinator = plugin.getContextCoordinator();
-        if (coordinator == null || plugin.getContextService() == null) {
+        CachedContextCoordinator coordinator = coordinator();
+        ContextService contexts = contexts();
+        if (coordinator == null || contexts == null) {
             return cachedLookup(player, raw, resolved, resolved.text(), prepared);
         }
-        org.bukkit.Location location = player.getLocation();
-        String world = location.getWorld() == null ? "" : location.getWorld().getName();
-        ContextRequest request = new ContextRequest(
-                player.getUniqueId(),
-                player.getName(),
-                world,
-                named.id(),
-                ContextRequest.Purpose.PLACEHOLDER);
+        ContextRequest request = contextRequest(player, named.id());
         CachedContextCoordinator.Decision decision = coordinator.decide(
                 player.getUniqueId(),
                 named.id(),
                 resolved.text(),
                 true,
                 System.currentTimeMillis(),
-                () -> plugin.getContextService().collect(request, named.context()),
+                () -> contexts.collect(request, named.context()),
                 text -> startBackground(player, raw, resolved, text, prepared));
         if (decision.phase() == CachedContextCoordinator.Phase.PENDING) {
             return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
@@ -178,7 +307,7 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
         if (player == null || resolved.id() == null || resolved.id().isBlank() || !config.contextSettings().enabled()) {
             return null;
         }
-        NamedPrompt named = prompts.find(resolved.id()).orElse(null);
+        NamedPrompt named = visiblePrompts().find(resolved.id()).orElse(null);
         if (named == null || !named.context().active()) {
             return null;
         }
@@ -192,6 +321,21 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             String promptText,
             KnowledgeComposer.Prepared prepared
     ) {
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
+        if (alias != null) {
+            String canonical = canonicalFor(alias);
+            if (canonical != null) {
+                Optional<String> hit = cache.get(canonical);
+                if (hit.isPresent()) {
+                    return hit.get();
+                }
+                forgetAlias(alias);
+            }
+            if (config.canSendChatRequests()) {
+                startBackground(player, raw, resolved, promptText, prepared);
+            }
+            return pool.peek(resolved.poolKey()).orElseGet(resolved::fallback);
+        }
         String key = httpClient.cacheKey(resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
         return cache.get(key).orElseGet(() -> {
             if (config.canSendChatRequests()) {
@@ -209,20 +353,307 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
             KnowledgeComposer.Prepared prepared
     ) {
         UUID playerId = player != null ? player.getUniqueId() : null;
+        boolean readOnOwner = player != null && !RegionOwnership.owned(player);
+        String alias = offThreadAlias(player, resolved, promptText, prepared);
+        runOnOwner(player, () -> {
+            ResolvedPrompt fresh = resolved;
+            String text = promptText;
+            KnowledgeComposer.Prepared knowledge = prepared;
+            if (readOnOwner && RegionOwnership.owned(player)) {
+                fresh = resolve(player, raw);
+                text = promptAfterHop(resolved == null ? "" : resolved.text(), promptText, fresh.text());
+                knowledge = knowledgeFor(fresh, text);
+            }
+            if (alias != null) {
+                rememberAlias(alias, httpClient.cacheKey(
+                        fresh.model(), text, fresh.formatId(), knowledge.cacheToken()));
+            }
+            rememberQuota(player, playerId);
+            sendPlaceholder(player, raw, fresh, text, knowledge);
+        });
+    }
+
+    /**
+     * Key an off-region caller can rebuild. Null when this thread already owns the player, or when
+     * the prompt has no {@code {player}} / {@code %} var, so the rendered text is already final.
+     * {@code %} vars are not resolved here.
+     */
+    private String offThreadAlias(
+            Player player,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        if (!defersPlayerText(player, resolved)) {
+            return null;
+        }
+        String rendered = httpClient.cacheKey(
+                resolved.model(), promptText, resolved.formatId(), prepared.cacheToken());
+        return player.getUniqueId() + "\u0000" + rendered;
+    }
+
+    private String canonicalFor(String alias) {
+        synchronized (offThreadCacheKeys) {
+            return offThreadCacheKeys.get(alias);
+        }
+    }
+
+    private void forgetAlias(String alias) {
+        synchronized (offThreadCacheKeys) {
+            dropAlias(alias);
+        }
+    }
+
+    private void rememberAlias(String alias, String canonical) {
+        synchronized (offThreadCacheKeys) {
+            offThreadCacheKeys.put(alias, canonical);
+            UUID playerId = playerId(alias);
+            if (playerId != null) {
+                offThreadAliasesByPlayer.computeIfAbsent(playerId, ignored -> new HashSet<>()).add(alias);
+            }
+            while (offThreadCacheKeys.size() > aliasCap()) {
+                String eldest = offThreadCacheKeys.keySet().iterator().next();
+                dropAlias(eldest);
+            }
+        }
+    }
+
+    /**
+     * Alias map limit. It follows {@code cache.max-size} so a cyclic off-thread read of every
+     * cached player and prompt still finds the stored answer. Reload replaces {@link #config}.
+     */
+    private int aliasCap() {
+        long configured = config == null ? 1000L : config.getCacheMaxSize();
+        if (configured > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) Math.max(1L, configured);
+    }
+
+    private void dropAlias(String alias) {
+        offThreadCacheKeys.remove(alias);
+        UUID playerId = playerId(alias);
+        if (playerId == null) {
+            return;
+        }
+        Set<String> keys = offThreadAliasesByPlayer.get(playerId);
+        if (keys == null) {
+            return;
+        }
+        keys.remove(alias);
+        if (keys.isEmpty()) {
+            offThreadAliasesByPlayer.remove(playerId);
+        }
+    }
+
+    private static UUID playerId(String alias) {
+        int split = alias.indexOf('\u0000');
+        if (split <= 0) {
+            return null;
+        }
+        try {
+            return UUID.fromString(alias.substring(0, split));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * True when a later hop can change the prompt text. Built-ins and {@code %} vars are left
+     * unresolved on this thread, so the lookup key would not match the stored answer.
+     */
+    private boolean defersPlayerText(Player player, ResolvedPrompt resolved) {
+        if (player == null || RegionOwnership.owned(player) || resolved == null) {
+            return false;
+        }
+        if (resolved.id() != null && !resolved.id().isBlank()) {
+            NamedPrompt named = visiblePrompts().find(resolved.id()).orElse(null);
+            return named != null && named.playerDependent();
+        }
+        return ContextVariables.usesBuiltIn(resolved.text(), java.util.Set.of());
+    }
+
+    /**
+     * Pool refill uses the resolved prompt. An off-region caller hops first so {@code %} is not
+     * stored as an empty value. The synchronous placeholder result cannot wait for that hop.
+     */
+    private void refillPool(Player player, String raw, ResolvedPrompt resolved) {
+        if (poolService == null || resolved == null) {
+            return;
+        }
+        boolean readOnOwner = player != null && !RegionOwnership.owned(player);
+        Plugin host = schedulerPlugin();
+        if (!readOnOwner || host == null) {
+            poolService.onConsume(raw, resolved.text());
+            return;
+        }
+        player.getScheduler().run(host, task -> {
+            String text = resolved.text();
+            if (RegionOwnership.owned(player)) {
+                text = resolve(player, raw).text();
+            }
+            poolService.onConsume(raw, text);
+        }, null);
+    }
+
+    private void runOnOwner(Player player, Runnable body) {
+        if (player == null || RegionOwnership.owned(player)) {
+            body.run();
+            return;
+        }
+        Plugin host = schedulerPlugin();
+        if (host == null) {
+            body.run();
+            return;
+        }
+        player.getScheduler().run(host, task -> body.run(), null);
+    }
+
+    private Plugin schedulerPlugin() {
+        return schedulerPlugin != null ? schedulerPlugin : plugin;
+    }
+
+    /**
+     * Keeps a context block that was appended to the off-region rendering.
+     */
+    static String promptAfterHop(String original, String sent, String fresh) {
+        String base = original == null ? "" : original;
+        String text = sent == null ? base : sent;
+        String body = fresh == null ? "" : fresh;
+        if (!base.isEmpty() && text.startsWith(base)) {
+            return body + text.substring(base.length());
+        }
+        return body;
+    }
+
+    private KnowledgeComposer.Prepared knowledgeFor(ResolvedPrompt resolved, String text) {
+        return KnowledgeComposer.prepare(
+                resolved.overrides(),
+                config.getSystemPrompt(),
+                knowledgeBase(),
+                resolved.knowledge(),
+                new KnowledgeRequest(
+                        KnowledgeRequests.effective(resolved.knowledgeSelect(), config.knowledgeSelect()),
+                        text,
+                        resolved.knowledgeKeywords()));
+    }
+
+    private void rememberQuota(Player player, UUID playerId) {
+        QuotaPolicy policy = quotaPolicy();
+        if (player == null || policy == null) {
+            return;
+        }
+        policy.noteName(playerId, playerName(player));
+        if (policy.needsGroupRead(playerId) && RegionOwnership.owned(player)) {
+            policy.remember(playerId, QuotaGroups.held(player, policy.groupNames()));
+        }
+    }
+
+    private void sendPlaceholder(
+            Player player,
+            String raw,
+            ResolvedPrompt resolved,
+            String promptText,
+            KnowledgeComposer.Prepared prepared
+    ) {
+        UUID playerId = player != null ? player.getUniqueId() : null;
+        CallTrace trace = placeholderTrace(playerId, resolved == null ? null : resolved.id());
         CompletionSupport.onComplete(
                 httpClient.requestAsync(
                         promptText,
                         playerId,
                         prepared.overrides().withNoticeId(noticeId(resolved, raw)),
                         resolved.ttl(),
-                        prepared.cacheToken()),
-                plugin.getLogger(),
+                        prepared.cacheToken(),
+                        trace,
+                        PlaceholderAdmission.key(resolved, promptText)),
+                logger(),
                 "Background AI generation failed",
                 (ignored, error) -> {
                     if (error != null) {
-                        plugin.getLogger().log(Level.FINE, "Background AI generation failed", error);
+                        logger().log(Level.FINE, "Background AI generation failed", error);
                     }
                 });
+    }
+
+    private void refreshGroupsIfOwned(Player player) {
+        QuotaPolicy policy = quotaPolicy();
+        if (player == null || policy == null) {
+            return;
+        }
+        policy.noteName(player.getUniqueId(), playerName(player));
+        if (!policy.needsGroupRead(player.getUniqueId()) || !RegionOwnership.owned(player)) {
+            return;
+        }
+        policy.remember(player.getUniqueId(), QuotaGroups.held(player, policy.groupNames()));
+    }
+
+    /**
+     * World hint for a context provider. Empty when this thread does not own the player,
+     * so an async placeholder cannot read another region.
+     */
+    static ContextRequest contextRequest(Player player, String promptId) {
+        return new ContextRequest(
+                player.getUniqueId(),
+                playerName(player),
+                ownedWorld(player),
+                promptId,
+                ContextRequest.Purpose.PLACEHOLDER);
+    }
+
+    static String ownedWorld(Player player) {
+        if (player == null || !RegionOwnership.owned(player)) {
+            return "";
+        }
+        try {
+            org.bukkit.Location location = player.getLocation();
+            if (location == null || location.getWorld() == null || location.getWorld().getName() == null) {
+                return "";
+            }
+            return location.getWorld().getName();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String playerName(Player player) {
+        if (player == null) {
+            return "";
+        }
+        try {
+            String name = player.getName();
+            return name == null ? "" : name;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private KnowledgeBase knowledgeBase() {
+        return knowledgeOverride != null ? knowledgeOverride : plugin.getKnowledgeBase();
+    }
+
+    private CachedContextCoordinator coordinator() {
+        return coordinatorOverride != null ? coordinatorOverride : plugin.getContextCoordinator();
+    }
+
+    private ContextService contexts() {
+        return contextOverride != null ? contextOverride : plugin.getContextService();
+    }
+
+    private QuotaPolicy quotaPolicy() {
+        return plugin == null ? null : plugin.getQuotaPolicy();
+    }
+
+    private Logger logger() {
+        return loggerOverride != null ? loggerOverride : plugin.getLogger();
+    }
+
+    /**
+     * A cached placeholder. {@code promptId} is the named-prompt id, or empty for a literal
+     * argument. The rendered text is not the id.
+     */
+    static CallTrace placeholderTrace(UUID playerId, String promptId) {
+        return CallTrace.start(RequestOrigin.PLACEHOLDER, playerId, promptId == null ? "" : promptId, "");
     }
 
     /**
@@ -237,10 +668,18 @@ public final class AiPlaceholderExpansion extends PlaceholderExpansion {
     }
 
     private ResolvedPrompt resolve(Player player, String raw) {
-        return prompts.resolve(
+        return visiblePrompts().resolve(
                 raw,
                 config,
                 template -> VarSubstitutor.resolve(player, template),
                 ContextVariables.capture(player));
+    }
+
+    /**
+     * File prompts plus prompts registered from code. A {@code prompts.yml} id wins.
+     * Read on each request so a plugin can register after {@code /nai reload}.
+     */
+    private PromptCatalog visiblePrompts() {
+        return prompts.overlayRegistered(ApiPromptRegistry.get().namedPrompts());
     }
 }

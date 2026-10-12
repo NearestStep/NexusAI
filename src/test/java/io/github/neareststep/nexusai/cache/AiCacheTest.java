@@ -51,6 +51,31 @@ class AiCacheTest {
     }
 
     @Test
+    void legacyPutLeavesProviderAndModelEmpty() {
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        cache.put("k", "hello");
+        cache.put("short", "later", Duration.ofMinutes(1));
+        AiCache.CachedAnswer legacy = cache.lookup("k").orElseThrow();
+        assertEquals("hello", legacy.text());
+        assertEquals("", legacy.providerId());
+        assertEquals("", legacy.model());
+        AiCache.CachedAnswer timed = cache.lookup("short").orElseThrow();
+        assertEquals("", timed.providerId());
+        assertEquals("", timed.model());
+    }
+
+    @Test
+    void putWithProviderAndModelReturnsThemOnLookup() {
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
+        cache.put("k", "hello", "openai", "gpt-4o-mini");
+        AiCache.CachedAnswer hit = cache.lookup("k").orElseThrow();
+        assertEquals("hello", hit.text());
+        assertEquals("openai", hit.providerId());
+        assertEquals("gpt-4o-mini", hit.model());
+        assertEquals("hello", cache.get("k").orElseThrow());
+    }
+
+    @Test
     void perEntryTtlOverridesTheCacheDefault() throws InterruptedException {
         AiCache cache = new AiCache(Duration.ofMinutes(5), 100);
         cache.put("short", "v", Duration.ofMillis(50));

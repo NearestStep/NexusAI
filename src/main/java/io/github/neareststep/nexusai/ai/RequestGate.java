@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 /**
  * Shared admission for every outgoing completion: server/player rate limits,
@@ -50,6 +51,8 @@ public final class RequestGate {
      * Placeholders still see {@link #isPaused()} either way.
      */
     private final Set<String> pausedProviderIds = ConcurrentHashMap.newKeySet();
+    /** When this returns true, the player day window is left to the quota group. */
+    private volatile Predicate<UUID> skipPlayerDay = ignored -> false;
 
     public RequestGate(
             RateLimiter rateLimiter,
@@ -105,10 +108,29 @@ public final class RequestGate {
             }
             return Optional.of("Backing off after a provider error for this prompt");
         }
-        if (!rateLimiter.tryAcquire(playerId)) {
+        if (!rateLimiter.tryAcquire(playerId, skipDay(playerId))) {
             return Optional.of("Local rate limit reached");
         }
         return Optional.empty();
+    }
+
+    /**
+     * A fresh quota group replaces {@code limits.player-requests-per-day} for that player.
+     * The minute window and the server windows still apply. A missing predicate does not skip.
+     */
+    public void skipPlayerDay(Predicate<UUID> predicate) {
+        this.skipPlayerDay = predicate == null ? ignored -> false : predicate;
+    }
+
+    private boolean skipDay(UUID playerId) {
+        if (playerId == null || RateLimiter.SERVER_SENTINEL.equals(playerId)) {
+            return false;
+        }
+        try {
+            return skipPlayerDay.test(playerId);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     public boolean isBlocked(String admissionKey) {
@@ -269,7 +291,8 @@ public final class RequestGate {
             });
             return;
         }
-        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED) {
+        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.LOCAL_QUOTA
+                || kind == AiErrorKind.REJECTED) {
             return;
         }
         long now = clock.getAsLong();
@@ -334,7 +357,7 @@ public final class RequestGate {
         if (backoff != null && clock.getAsLong() < backoff.untilMillis) {
             return Optional.of("Backing off after a provider error for this prompt");
         }
-        if (!rateLimiter.tryAcquire(playerId)) {
+        if (!rateLimiter.tryAcquire(playerId, skipDay(playerId))) {
             return Optional.of("Local rate limit reached");
         }
         return Optional.empty();
@@ -346,6 +369,7 @@ public final class RequestGate {
             case RATE_LIMIT -> "rate limit";
             case QUOTA -> "quota";
             case BAD_KEY -> "authentication";
+            case LOCAL_QUOTA -> "provider error";
             default -> "provider error";
         };
         return "Provider requests are paused (" + why + ") for " + seconds + "s";

@@ -1,5 +1,9 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.budget.MissingUsage;
+import io.github.neareststep.nexusai.budget.QuotaSettings;
+import io.github.neareststep.nexusai.knowledge.KeywordSettings;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 
@@ -7,6 +11,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.regex.Pattern;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -97,6 +102,9 @@ public final class PluginConfig {
     private FallbackModel fallbackModel = FallbackModel.none();
     private int knowledgeMaxChars = 6000;
     private int knowledgeMaxFileChars = 4000;
+    private KnowledgeSelect knowledgeSelect = KnowledgeSelect.FULL;
+    private KeywordSettings keywordSettings = KeywordSettings.defaults();
+    private final List<String> knowledgeWarnings = new ArrayList<>();
     private String defaultFormatId = FormatPresets.SIMPLE;
     private Map<String, FormatPreset> formats = Map.of();
     private io.github.neareststep.nexusai.dialogue.DialogueSettings dialogueSettings =
@@ -108,6 +116,22 @@ public final class PluginConfig {
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
     private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
+    private final List<String> structuredOutputWarnings = new ArrayList<>();
+    private boolean pluginApiEnabled = true;
+    private int pluginApiMaxTemplateChars = 8000;
+    private int pluginApiMaxVarChars = 1000;
+    private final List<String> pluginApiWarnings = new ArrayList<>();
+    private static final Pattern QUOTA_GROUP_NAME = Pattern.compile("[a-z0-9_-]{1,32}");
+    private static final Set<String> QUOTA_FIELDS = Set.of("tokens-per-day", "requests-per-day");
+
+    private MissingUsage missingUsage = MissingUsage.ESTIMATE;
+    private int tokenSaveIntervalSeconds = 10;
+    private boolean quotasEnabled;
+    private long serverTokensPerDay;
+    private long playerTokensPerDay;
+    private Map<String, QuotaSettings.GroupLimit> quotaGroups = Map.of();
+    private Map<String, QuotaSettings.ConsumerLimit> quotaConsumers = Map.of();
+    private final List<String> quotaWarnings = new ArrayList<>();
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -118,7 +142,11 @@ public final class PluginConfig {
         missingEnvVars.clear();
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
+        structuredOutputWarnings.clear();
         httpLimitWarnings.clear();
+        pluginApiWarnings.clear();
+        quotaWarnings.clear();
+        knowledgeWarnings.clear();
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -206,13 +234,197 @@ public final class PluginConfig {
                 config.getString("fallback-model.model", ""));
         this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
         this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
+        readKnowledge(config);
         this.defaultFormatId = normalizeConfiguredFormat(config.getString("formats.default", FormatPresets.SIMPLE));
         this.formats = loadFormats(config);
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
         readHttpLimits(config);
+        readPluginApi(config);
+        readQuotas(config);
         noteShortKeys();
+    }
+
+    private void readQuotas(FileConfiguration config) {
+        String raw = config.getString("quotas.missing-usage", "estimate");
+        MissingUsage parsed = MissingUsage.parse(raw);
+        if (parsed == null) {
+            this.missingUsage = MissingUsage.ESTIMATE;
+            quotaWarnings.add("Unknown quotas.missing-usage '" + raw + "'. Using estimate.");
+        } else {
+            this.missingUsage = parsed;
+        }
+        int interval = config.getInt("quotas.save-interval-seconds", 10);
+        int clamped = interval < 1 ? 1 : Math.min(interval, 300);
+        if (clamped != interval) {
+            quotaWarnings.add("quotas.save-interval-seconds is " + interval
+                    + ". It must be from 1 to 300. Using " + clamped + ".");
+        }
+        this.tokenSaveIntervalSeconds = clamped;
+        this.quotasEnabled = config.getBoolean("quotas.enabled", false);
+        this.serverTokensPerDay = nonNegativeQuota(config, "quotas.server-tokens-per-day");
+        this.playerTokensPerDay = nonNegativeQuota(config, "quotas.player-tokens-per-day");
+        this.quotaGroups = readQuotaGroups(config.getConfigurationSection("quotas.groups"));
+        this.quotaConsumers = readQuotaConsumers(config.getConfigurationSection("quotas.consumers"));
+    }
+
+    private long nonNegativeQuota(FileConfiguration config, String key) {
+        if (!config.contains(key)) {
+            return 0L;
+        }
+        long value = config.getLong(key, 0L);
+        if (value < 0L) {
+            quotaWarnings.add(key + " is " + value + ". A negative limit is treated as 0.");
+            return 0L;
+        }
+        return value;
+    }
+
+    private Map<String, QuotaSettings.GroupLimit> readQuotaGroups(ConfigurationSection section) {
+        if (section == null) {
+            return Map.of();
+        }
+        Map<String, QuotaSettings.GroupLimit> groups = new LinkedHashMap<>();
+        for (String name : section.getKeys(false)) {
+            if (name == null || !QUOTA_GROUP_NAME.matcher(name).matches()) {
+                quotaWarnings.add("quotas.groups." + name + " is not a valid group name. It was skipped.");
+                continue;
+            }
+            ConfigurationSection one = section.getConfigurationSection(name);
+            if (one == null) {
+                quotaWarnings.add("quotas.groups." + name + " is not a section. It was skipped.");
+                continue;
+            }
+            warnUnknownQuotaKeys(one, "quotas.groups." + name);
+            groups.put(name, new QuotaSettings.GroupLimit(
+                    nonNegativeQuota(one, "tokens-per-day", "quotas.groups." + name + ".tokens-per-day"),
+                    nonNegativeQuota(one, "requests-per-day", "quotas.groups." + name + ".requests-per-day")));
+        }
+        return groups.isEmpty() ? Map.of() : Map.copyOf(groups);
+    }
+
+    private Map<String, QuotaSettings.ConsumerLimit> readQuotaConsumers(ConfigurationSection section) {
+        if (section == null) {
+            return Map.of();
+        }
+        Map<String, QuotaSettings.ConsumerLimit> consumers = new LinkedHashMap<>();
+        for (String name : section.getKeys(false)) {
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            ConfigurationSection one = section.getConfigurationSection(name);
+            if (one == null) {
+                quotaWarnings.add("quotas.consumers." + name + " is not a section. It was skipped.");
+                continue;
+            }
+            warnUnknownQuotaKeys(one, "quotas.consumers." + name);
+            consumers.put(name, new QuotaSettings.ConsumerLimit(
+                    nonNegativeQuota(one, "tokens-per-day", "quotas.consumers." + name + ".tokens-per-day"),
+                    nonNegativeQuota(one, "requests-per-day", "quotas.consumers." + name + ".requests-per-day")));
+        }
+        return consumers.isEmpty() ? Map.of() : Map.copyOf(consumers);
+    }
+
+    private void warnUnknownQuotaKeys(ConfigurationSection section, String path) {
+        for (String key : section.getKeys(false)) {
+            if (key != null && !QUOTA_FIELDS.contains(key)) {
+                quotaWarnings.add("Unknown key " + path + "." + key + ". It was ignored.");
+            }
+        }
+    }
+
+    private long nonNegativeQuota(ConfigurationSection section, String key, String path) {
+        if (!section.contains(key)) {
+            return 0L;
+        }
+        long value = section.getLong(key, 0L);
+        if (value < 0L) {
+            quotaWarnings.add(path + " is " + value + ". A negative limit is treated as 0.");
+            return 0L;
+        }
+        return value;
+    }
+
+    private void readKnowledge(FileConfiguration config) {
+        String rawSelect = config.getString("knowledge.select", "full");
+        KnowledgeSelect parsed = parseKnowledgeSelect(rawSelect);
+        if (parsed == null) {
+            this.knowledgeSelect = KnowledgeSelect.FULL;
+            knowledgeWarnings.add("Unknown knowledge.select '" + rawSelect + "'. Using full.");
+        } else {
+            this.knowledgeSelect = parsed;
+        }
+        int maxParagraphs = clampKnowledge(config, "knowledge.keywords.max-paragraphs", 6, 1, 50);
+        int maxParagraphChars = clampKnowledge(config, "knowledge.keywords.max-paragraph-chars", 1200, 100, 10_000);
+        int maxFileChars = clampKnowledge(config, "knowledge.keywords.max-file-chars", 200_000, 1000, 2_000_000);
+        int minMatches = clampKnowledge(config, "knowledge.keywords.min-matches", 1, 1, 10);
+        String rawMatch = config.getString("knowledge.keywords.on-no-match", "none");
+        KeywordSettings.OnNoMatch onNoMatch = parseOnNoMatch(rawMatch);
+        if (onNoMatch == null) {
+            onNoMatch = KeywordSettings.OnNoMatch.NONE;
+            knowledgeWarnings.add("Unknown knowledge.keywords.on-no-match '" + rawMatch + "'. Using none.");
+        }
+        List<String> stops = new ArrayList<>();
+        for (String word : config.getStringList("knowledge.keywords.stop-words")) {
+            if (word != null && !word.isBlank()) {
+                stops.add(word.trim());
+            }
+        }
+        this.keywordSettings = new KeywordSettings(
+                maxParagraphs, maxParagraphChars, maxFileChars, minMatches, onNoMatch, stops);
+    }
+
+    private int clampKnowledge(FileConfiguration config, String key, int fallback, int min, int max) {
+        int value = config.getInt(key, fallback);
+        int clamped = clamp(value, min, max);
+        if (clamped != value) {
+            knowledgeWarnings.add(key + " is " + value + ". It must be from " + min + " to " + max + ". Using " + clamped + ".");
+        }
+        return clamped;
+    }
+
+    private static KnowledgeSelect parseKnowledgeSelect(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String normalized = raw.trim().toLowerCase(Locale.ROOT);
+        if ("full".equals(normalized)) {
+            return KnowledgeSelect.FULL;
+        }
+        if ("keywords".equals(normalized)) {
+            return KnowledgeSelect.KEYWORDS;
+        }
+        return null;
+    }
+
+    private static KeywordSettings.OnNoMatch parseOnNoMatch(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String normalized = raw.trim().toLowerCase(Locale.ROOT);
+        if ("none".equals(normalized)) {
+            return KeywordSettings.OnNoMatch.NONE;
+        }
+        if ("first".equals(normalized)) {
+            return KeywordSettings.OnNoMatch.FIRST;
+        }
+        return null;
+    }
+
+    private void readPluginApi(FileConfiguration config) {
+        this.pluginApiEnabled = config.getBoolean("plugin-api.enabled", true);
+        this.pluginApiMaxTemplateChars = clampPluginApi(config, "plugin-api.max-template-chars", 8000, 100, 100_000);
+        this.pluginApiMaxVarChars = clampPluginApi(config, "plugin-api.max-var-chars", 1000, 10, 20_000);
+    }
+
+    private int clampPluginApi(FileConfiguration config, String key, int fallback, int min, int max) {
+        int value = config.getInt(key, fallback);
+        int clamped = clamp(value, min, max);
+        if (clamped != value) {
+            pluginApiWarnings.add(key + " is " + value + ". It must be from " + min + " to " + max + ". Using " + clamped + ".");
+        }
+        return clamped;
     }
 
     private void readHttpLimits(FileConfiguration config) {
@@ -278,7 +490,12 @@ public final class PluginConfig {
             boolean active = normalizedId.equals(provider);
             ResolvedKeys resolved = resolveKeys(normalizedId, one, active, legacyKey, envKey);
             loaded.put(normalizedId, new ProviderSettings(
-                    normalizedId, type, url, resolved.keys(), resolved.source()));
+                    normalizedId,
+                    type,
+                    url,
+                    resolved.keys(),
+                    resolved.source(),
+                    structuredOutput(normalizedId, one.getString("structured-output"))));
         }
         return Map.copyOf(loaded);
     }
@@ -323,7 +540,8 @@ public final class PluginConfig {
                 continue;
             }
             int limit = Math.max(0, toInt(map.get("daily-request-limit"), 0));
-            entries.add(new QueueEntryConfig(providerId, modelId, limit));
+            int tokenLimit = nonNegativeTokenLimit(map.get("daily-token-limit"), providerId, modelId);
+            entries.add(new QueueEntryConfig(providerId, modelId, limit, tokenLimit));
         }
         if (entries.isEmpty()) {
             return List.of(new QueueEntryConfig(provider, model, 0));
@@ -605,6 +823,38 @@ public final class PluginConfig {
 
     private static int clamp(int value, int min, int max) {
         return Math.min(max, Math.max(min, value));
+    }
+
+    private int nonNegativeTokenLimit(Object value, String providerId, String modelId) {
+        if (value == null) {
+            return 0;
+        }
+        long parsed = toLong(value, 0L);
+        if (parsed < 0L) {
+            quotaWarnings.add("model-queue " + providerId + "/" + modelId
+                    + " daily-token-limit is " + parsed + ". A negative limit is treated as 0.");
+            return 0;
+        }
+        if (parsed > Integer.MAX_VALUE) {
+            quotaWarnings.add("model-queue " + providerId + "/" + modelId
+                    + " daily-token-limit is " + parsed + ". Using " + Integer.MAX_VALUE + ".");
+            return Integer.MAX_VALUE;
+        }
+        return (int) parsed;
+    }
+
+    private static long toLong(Object value, long defaultValue) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Long.parseLong(text.trim());
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
     }
 
     private static int toInt(Object value, int defaultValue) {
@@ -1027,6 +1277,18 @@ public final class PluginConfig {
         return knowledgeMaxFileChars;
     }
 
+    public KnowledgeSelect knowledgeSelect() {
+        return knowledgeSelect == null ? KnowledgeSelect.FULL : knowledgeSelect;
+    }
+
+    public KeywordSettings keywordSettings() {
+        return keywordSettings == null ? KeywordSettings.defaults() : keywordSettings;
+    }
+
+    public List<String> knowledgeWarnings() {
+        return List.copyOf(knowledgeWarnings);
+    }
+
     private static int positiveOrDefault(int value, int fallback) {
         return value > 0 ? value : fallback;
     }
@@ -1075,8 +1337,10 @@ public final class PluginConfig {
     }
 
     /**
-     * Resolved secrets, including keys too short to show a suffix. Used only to strip them from
-     * command text and error bodies. The key text is not logged from here.
+     * Resolved secrets, including keys too short to show a suffix, and secret-looking parts of
+     * each configured provider URL (see {@link SecretMask#addUrlSecrets}). Ordinary query values
+     * such as {@code api-version} or {@code model} are not included. Used only to strip secrets
+     * from command text, error bodies, events, and logs. The key text is not logged from here.
      */
     public List<String> configuredSecrets() {
         List<String> secrets = new ArrayList<>();
@@ -1091,11 +1355,13 @@ public final class PluginConfig {
                         secrets.add(trimmed);
                     }
                 }
+                SecretMask.addUrlSecrets(settings.url(), secrets);
             }
         }
         if (apiKey != null && !apiKey.isBlank() && !secrets.contains(apiKey.trim())) {
             secrets.add(apiKey.trim());
         }
+        SecretMask.addUrlSecrets(baseUrl, secrets);
         return secrets;
     }
 
@@ -1115,11 +1381,75 @@ public final class PluginConfig {
         return List.copyOf(httpLimitWarnings);
     }
 
+    /** {@code plugin-api.enabled}. Missing means true. */
+    public boolean pluginApiEnabled() {
+        return pluginApiEnabled;
+    }
+
+    /** {@code plugin-api.max-template-chars}, clamped to 100..100000. */
+    public int pluginApiMaxTemplateChars() {
+        return pluginApiMaxTemplateChars;
+    }
+
+    /** {@code plugin-api.max-var-chars}, clamped to 10..20000. */
+    public int pluginApiMaxVarChars() {
+        return pluginApiMaxVarChars;
+    }
+
+    public List<String> pluginApiWarnings() {
+        return List.copyOf(pluginApiWarnings);
+    }
+
+    /** {@code quotas.missing-usage}. Missing or unknown means {@link MissingUsage#ESTIMATE}. */
+    public MissingUsage missingUsage() {
+        return missingUsage == null ? MissingUsage.ESTIMATE : missingUsage;
+    }
+
+    /** {@code quotas.save-interval-seconds}, clamped to 1..300. */
+    public int tokenSaveIntervalSeconds() {
+        return tokenSaveIntervalSeconds;
+    }
+
+    public List<String> quotaWarnings() {
+        return List.copyOf(quotaWarnings);
+    }
+
+    /** Daily caps. Enforcement uses this only when {@link QuotaSettings#enabled()} is true. */
+    public QuotaSettings quotaSettings() {
+        return new QuotaSettings(quotasEnabled, serverTokensPerDay, playerTokensPerDay, quotaGroups, quotaConsumers);
+    }
+
     /**
      * Load warnings for keys too short to show a suffix. The key text is not included.
      */
     public List<String> shortKeyWarnings() {
         return List.copyOf(shortKeyWarnings);
+    }
+
+    /** Unknown {@code structured-output} values. Empty when every provider is {@code auto} or a known mode. */
+    public List<String> structuredOutputWarnings() {
+        return List.copyOf(structuredOutputWarnings);
+    }
+
+    /**
+     * {@code null} means {@code auto}. A known mode is returned as written. Anything else is {@code auto}
+     * and one warning is kept for startup and {@code /nai reload}.
+     */
+    private String structuredOutput(String id, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String mode = raw.trim().toLowerCase(Locale.ROOT);
+        if (mode.equals("auto")) {
+            return null;
+        }
+        if (mode.equals("json-schema") || mode.equals("json-object") || mode.equals("prompt")) {
+            return mode;
+        }
+        String shown = mode.length() > 32 ? "value" : mode;
+        structuredOutputWarnings.add(
+                "providers." + id + ".structured-output '" + shown + "' is unknown. Using auto.");
+        return null;
     }
 
     private String substitute(String value) {

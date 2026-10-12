@@ -1,17 +1,26 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.NexusAI;
+import io.github.neareststep.nexusai.budget.QuotaGroups;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.ai.KeyRing;
 import io.github.neareststep.nexusai.api.ContextRequest;
+import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.command.SenderTasks;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.context.ContextBlock;
 import io.github.neareststep.nexusai.context.ContextVariables;
+import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.prompt.PromptContext;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
@@ -30,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -50,14 +60,9 @@ public final class DialogueService {
     private final ExecutorService httpExecutor;
     private final ScheduledExecutorService scheduler;
     private final MemoryStore memory;
-    /**
-     * True after the live file has been loaded. Stays false while persistence is off, and until the
-     * first off-to-on load finishes, so a save cannot run in that gap.
-     */
-    private volatile boolean memoryLoadedFromDisk;
-    /** Background load started by {@link #onReload}. Null when none is running. */
-    private Thread diskLoader;
+    private final DialogueMemoryPersistence memoryFiles;
     private final DialogueEngine engine;
+    private final DialogueRouter router;
     private final SummaryStats summaryStats;
     private final ConcurrentHashMap<UUID, RecentChat> recentChat = new ConcurrentHashMap<>();
     /** Spelling of the character id that opened the current session. Later lines reuse it. */
@@ -70,11 +75,19 @@ public final class DialogueService {
         this.httpExecutor = httpExecutor;
         this.scheduler = scheduler;
         this.memory = new MemoryStore();
+        memory.secrets(() -> plugin.getPluginConfig().configuredSecrets());
+        this.memoryFiles = new DialogueMemoryPersistence(
+                memory,
+                this::memoryFile,
+                () -> plugin.getPluginConfig().dialogueSettings(),
+                () -> plugin.getPluginConfig().configuredSecrets(),
+                plugin.getLogger(),
+                System::currentTimeMillis);
         DialogueSettings initial = plugin.getPluginConfig().dialogueSettings();
         java.util.List<String> secrets = plugin.getPluginConfig().configuredSecrets();
         if (initial.persistMemory()) {
             memory.load(memoryFile(), System.currentTimeMillis(), initial.memoryExpiryMillis(), plugin.getLogger(), secrets);
-            memoryLoadedFromDisk = true;
+            memoryFiles.loadedAtStartup();
         } else {
             MemoryStore.redactOnDisk(memoryFile(), secrets, plugin.getLogger(), memory);
         }
@@ -86,7 +99,7 @@ public final class DialogueService {
                     io.github.neareststep.nexusai.ai.HttpPool pool = plugin.getHttpPool();
                     return pool == null ? io.github.neareststep.nexusai.ai.HttpGate.unlimited() : pool.gate();
                 });
-        DialogueRouter router = new DialogueRouter(
+        this.router = new DialogueRouter(
                 ignored -> plugin.getPluginConfig(),
                 ignored -> plugin.getModelQueue(),
                 this::ring,
@@ -163,9 +176,24 @@ public final class DialogueService {
                 new DialogueBudget(),
                 new GreetingCache(),
                 router::route,
-                this::runAction,
-                new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
-                        () -> plugin.getPluginConfig().dialogueSettings().actionLog()),
+                new DialogueEngine.ActionSink() {
+                    @Override
+                    public String run(UUID playerId, CharacterAction action, String command) {
+                        return runAction(playerId, action, command, 0L, "");
+                    }
+
+                    @Override
+                    public String run(
+                            UUID playerId,
+                            CharacterAction action,
+                            String command,
+                            long requestId,
+                            String characterId
+                    ) {
+                        return runAction(playerId, action, command, requestId, characterId);
+                    }
+                },
+                actionLog(),
                 ZoneId.systemDefault(),
                 summaries,
                 plugin.getLogger(),
@@ -186,38 +214,14 @@ public final class DialogueService {
      * is loaded before the next save. The read runs off this thread. A file that could not be copied
      * aside stays in place.
      */
+    /** Attaches token accounting. The router survives reload, so this can be called again. */
+    public void tokenAccounting(io.github.neareststep.nexusai.budget.TokenAccounting accounting) {
+        router.tokenAccounting(accounting);
+    }
+
     public void onReload() {
         resetSummaryStats();
-        Thread worker;
-        synchronized (this) {
-            if (memoryLoadedFromDisk || diskLoader != null) {
-                return;
-            }
-            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
-            if (!settings.persistMemory()) {
-                return;
-            }
-            long now = System.currentTimeMillis();
-            long expiry = settings.memoryExpiryMillis();
-            List<String> secrets = List.copyOf(plugin.getPluginConfig().configuredSecrets());
-            File file = memoryFile();
-            worker = new Thread(() -> {
-                try {
-                    if (memory.loadForPersistence(file, now, expiry, plugin.getLogger(), secrets)) {
-                        memoryLoadedFromDisk = true;
-                    }
-                } catch (RuntimeException e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to load dialogue-memory.yml", e);
-                } finally {
-                    synchronized (DialogueService.this) {
-                        diskLoader = null;
-                    }
-                }
-            }, "nexusai-memory-load");
-            worker.setDaemon(true);
-            diskLoader = worker;
-            worker.start();
-        }
+        memoryFiles.onReload();
     }
 
     public void start() {
@@ -232,18 +236,7 @@ public final class DialogueService {
         if (save != null) {
             save.cancel(false);
         }
-        Thread pending;
-        synchronized (this) {
-            pending = diskLoader;
-        }
-        if (pending != null) {
-            try {
-                pending.join(5_000L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        saveMemory();
+        memoryFiles.shutdown();
     }
 
     public boolean capturesChat(UUID player) {
@@ -297,10 +290,18 @@ public final class DialogueService {
         }
     }
 
+    public void quotas(QuotaPolicy policy) {
+        router.quotas(policy);
+    }
+
     public void quit(UUID player) {
         engine.sessions().close(player);
         if (player != null) {
             talkLabels.remove(player);
+        }
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (policy != null) {
+            policy.forget(player);
         }
     }
 
@@ -419,6 +420,7 @@ public final class DialogueService {
             case TOO_LONG -> messages.send(player, "talk.too-long", Map.of("max", Integer.toString(result.limit())));
             case REPLIES -> messages.send(player, "talk.replies");
             case DAILY -> messages.send(player, "talk.daily");
+            case QUOTA -> messages.send(player, "talk.quota");
             case BUSY -> messages.send(player, "talk.busy");
             case FAILED -> messages.send(player, "talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.send(player, "talk.empty");
@@ -438,6 +440,7 @@ public final class DialogueService {
             case COOLDOWN -> messages.format("talk.cooldown");
             case TOO_LONG -> messages.format("talk.too-long", Map.of("max", Integer.toString(result.limit())));
             case DAILY -> messages.format("talk.daily");
+            case QUOTA -> messages.format("talk.quota");
             case BUSY -> messages.format("talk.busy");
             case FAILED -> messages.format("talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.format("talk.empty");
@@ -507,6 +510,13 @@ public final class DialogueService {
     private Prepared build(Player player, String characterId, String message, boolean sessionChat) {
         PluginConfig config = plugin.getPluginConfig();
         NamedPrompt prompt = plugin.getPromptCatalog().find(characterId).orElse(null);
+        QuotaPolicy policy = plugin.getQuotaPolicy();
+        if (policy != null) {
+            policy.noteName(player.getUniqueId(), player.getName());
+            if (policy.groupsConfigured()) {
+                policy.remember(player.getUniqueId(), QuotaGroups.held(player, policy.groupNames()));
+            }
+        }
         Location location = player.getLocation();
         String world = location.getWorld() == null ? "" : location.getWorld().getName();
         if (prompt == null) {
@@ -527,6 +537,15 @@ public final class DialogueService {
         Predicate<String> permissions = node -> Boolean.TRUE.equals(grants.get(node));
         String fallback = prompt.fallback() != null ? prompt.fallback() : config.getFallback();
         String instruction = formatInstruction(prompt, config);
+        String previous = "";
+        if (message != null && !message.isBlank()) {
+            previous = memory.lastUserLine(
+                    player.getUniqueId(),
+                    characterId,
+                    System.currentTimeMillis(),
+                    config.dialogueSettings().memoryExpiryMillis());
+        }
+        String knowledgeBlock = talkKnowledge(prompt, config, plugin.getKnowledgeBase(), message, previous);
         String summaryBlock = "";
         if (config.dialogueSettings().summaryEnabled()) {
             summaryBlock = DialogueSummary.block(memory.summary(
@@ -544,7 +563,7 @@ public final class DialogueService {
                 sessionChat,
                 false,
                 false,
-                characterSystem(prompt, config, player, summaryBlock),
+                characterSystem(prompt, config, player, summaryBlock, knowledgeBlock),
                 fallback,
                 prompt.dialogue(),
                 prompt.actions(),
@@ -597,6 +616,19 @@ public final class DialogueService {
      * in that same gap, after the summary.
      */
     static String characterSystem(NamedPrompt prompt, PluginConfig config, Player player, String summaryBlock) {
+        return characterSystem(prompt, config, player, summaryBlock, "");
+    }
+
+    /**
+     * Knowledge, when present, sits after the summary and before the context block and the format instruction.
+     */
+    static String characterSystem(
+            NamedPrompt prompt,
+            PluginConfig config,
+            Player player,
+            String summaryBlock,
+            String knowledgeBlock
+    ) {
         String sheet = prompt.render(
                 template -> VarSubstitutor.resolve(player, template),
                 ContextVariables.capture(player)
@@ -611,10 +643,43 @@ public final class DialogueService {
         if (summaryBlock != null && !summaryBlock.isEmpty()) {
             system.append("\n\n").append(summaryBlock);
         }
+        if (knowledgeBlock != null && !knowledgeBlock.isEmpty()) {
+            system.append("\n\n").append(knowledgeBlock);
+        }
         if (instruction != null && !instruction.isBlank()) {
             system.append("\n\n").append(instruction);
         }
         return system.toString();
+    }
+
+    /**
+     * Talk attaches knowledge only in keywords mode. Full mode keeps the 1.1 system string.
+     * A greeting has no player line, so only {@code knowledge-keywords} are used.
+     */
+    static String talkKnowledge(
+            NamedPrompt prompt,
+            PluginConfig config,
+            KnowledgeBase knowledge,
+            String message,
+            String previousLine
+    ) {
+        if (prompt == null || knowledge == null || prompt.knowledge().isEmpty() || config == null) {
+            return "";
+        }
+        if (KnowledgeRequests.effective(prompt.knowledgeSelect(), config.knowledgeSelect()) != KnowledgeSelect.KEYWORDS) {
+            return "";
+        }
+        String query;
+        if (message == null || message.isBlank()) {
+            query = "";
+        } else {
+            String previous = previousLine == null ? "" : previousLine;
+            query = previous.isBlank() ? message : message + "\n" + previous;
+        }
+        return knowledge.render(
+                prompt.knowledge(),
+                new KnowledgeRequest(KnowledgeSelect.KEYWORDS, query, prompt.knowledgeKeywords())
+        ).block();
     }
 
     static String formatInstruction(NamedPrompt prompt, PluginConfig config) {
@@ -630,28 +695,56 @@ public final class DialogueService {
                 GenerationOverrides.none(), null, "", 0, 0, 0, ignored -> false, System.currentTimeMillis());
     }
 
-    private String runAction(UUID playerId, CharacterAction action, String command) {
+    private String runAction(UUID playerId, CharacterAction action, String command, long requestId, String characterId) {
+        AtomicBoolean expired = new AtomicBoolean();
         CompletableFuture<String> done = new CompletableFuture<>();
         try {
             plugin.getServer().getGlobalRegionScheduler().run(plugin, task -> {
+                if (expired.get()) {
+                    done.complete(null);
+                    return;
+                }
                 Player online = Bukkit.getPlayer(playerId);
                 if (online == null) {
                     done.complete("failed: player unavailable");
                     return;
                 }
                 if (action.console()) {
-                    done.complete(dispatch(true, online, command));
+                    done.complete(runCommand(expired, true, online, action, command, requestId, characterId));
                     return;
                 }
-                online.getScheduler().run(plugin, scheduled -> done.complete(dispatch(false, online, command)), () ->
-                        done.complete("failed: player unavailable"));
+                online.getScheduler().run(plugin, scheduled -> {
+                    if (expired.get()) {
+                        done.complete(null);
+                        return;
+                    }
+                    done.complete(runCommand(expired, false, online, action, command, requestId, characterId));
+                }, () -> done.complete("failed: player unavailable"));
             });
-            return done.get(5, TimeUnit.SECONDS);
+            String result = done.get(5, TimeUnit.SECONDS);
+            return result == null ? "failed: timed out" : result;
         } catch (TimeoutException e) {
+            expired.set(true);
             return "failed: timed out";
         } catch (Exception e) {
+            expired.set(true);
             return "failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    private static String runCommand(
+            AtomicBoolean expired,
+            boolean console,
+            Player player,
+            CharacterAction action,
+            String command,
+            long requestId,
+            String characterId
+    ) {
+        return ActionExecution.execute(
+                expired,
+                () -> EventDispatcher.get().action(player, characterId, action.name(), command, console, requestId),
+                () -> dispatch(console, player, command));
     }
 
     private static String dispatch(boolean console, Player player, String command) {
@@ -688,19 +781,25 @@ public final class DialogueService {
     }
 
     private void saveMemory() {
-        try {
-            DialogueSettings settings = plugin.getPluginConfig().dialogueSettings();
-            if (!settings.persistMemory() || !memoryLoadedFromDisk) {
-                return;
-            }
-            memory.save(memoryFile(), plugin.getLogger(), settings.summaryEnabled());
-        } catch (Throwable thrown) {
-            plugin.getLogger().fine("Skipped dialogue memory save: " + thrown.getMessage());
-        }
+        memoryFiles.save();
     }
 
     private File memoryFile() {
         return new File(plugin.getDataFolder(), "dialogue-memory.yml");
+    }
+
+    private ActionLog actionLog() {
+        ActionLog log = new ActionLog(plugin.getLogger(), new File(plugin.getDataFolder(), "actions.log"),
+                () -> plugin.getPluginConfig().dialogueSettings().actionLog());
+        log.secrets(() -> plugin.getPluginConfig().configuredSecrets());
+        return log;
+    }
+
+    /**
+     * The reload loader's warning. The stack stays at FINE, and a key in the data-directory path is masked.
+     */
+    static void logMemoryLoadFailure(java.util.logging.Logger logger, Throwable error, Iterable<String> secrets) {
+        LogRedaction.warning(logger, "Failed to load dialogue-memory.yml", error, secrets);
     }
 
     private KeyRing ring(String providerId) {
@@ -711,14 +810,7 @@ public final class DialogueService {
     }
 
     private static boolean owns(Player player) {
-        try {
-            if (Bukkit.getServer() == null) {
-                return true;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return true;
-        }
+        return RegionOwnership.owned(player);
     }
 
     private record RecentChat(String text, long at) {

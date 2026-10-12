@@ -3,8 +3,26 @@ package io.github.neareststep.nexusai.load;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.HttpPool;
 import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.api.CacheMode;
+import io.github.neareststep.nexusai.api.GenerationError;
+import io.github.neareststep.nexusai.api.GenerationRequest;
+import io.github.neareststep.nexusai.api.GenerationResult;
+import io.github.neareststep.nexusai.api.JsonGenerationResult;
+import io.github.neareststep.nexusai.api.JsonSchema;
 import io.github.neareststep.nexusai.api.NexusAIApi;
+import io.github.neareststep.nexusai.api.NexusErrorKind;
+import io.github.neareststep.nexusai.api.QuotaStatus;
+import io.github.neareststep.nexusai.api.event.NexusActionEvent;
+import io.github.neareststep.nexusai.api.event.NexusGenerateFailEvent;
+import io.github.neareststep.nexusai.api.event.NexusModerationFlagEvent;
+import io.github.neareststep.nexusai.api.event.NexusPostGenerateEvent;
+import io.github.neareststep.nexusai.api.event.NexusPreGenerateEvent;
+import io.github.neareststep.nexusai.api.event.NexusProviderErrorEvent;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextService;
+import io.github.neareststep.nexusai.dialogue.ActionExecution;
+import io.github.neareststep.nexusai.event.EventDispatcher;
 import me.clip.placeholderapi.PlaceholderAPI;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -13,6 +31,7 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.plugin.Plugin;
@@ -30,10 +49,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * RCON entry point {@code naiload <scenario> <rate> <seconds> <viewers>}.
+ * RCON entry points {@code naiload <scenario> <rate> <seconds> <viewers>},
+ * {@code naiload api <prompt|template> <n>}, {@code naiload events}, and {@code naiload json}.
  * The command returns immediately. MSPT, call time, and the HTTP pool are sampled on the
  * server thread. The report is {@code plugins/NexusAI-LoadDriver/report.json}.
  */
@@ -46,14 +68,19 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
     static final int DRAIN_SECONDS = 30;
     static final int POOL_BURST_PER_TICK = 40;
     static final String HIT = "%ainexus_cached_load_hit%";
+    static final String KW = "%ainexus_cached_load_kw%";
     static final String CONTEXT = "%ainexus_cached_load_ctx%";
+    static final String REPEAT = "Reply with the single word pong.";
+    static final String UNIQUE_PREFIX = "Reply with the single word pong. case ";
 
     private static final Set<String> SCENARIOS = Set.of(
-            "baseline", "S1", "S2", "S2-over", "S3", "S4", "S5", "S-pool");
+            "baseline", "S1", "S1-keywords", "S2", "S2-over", "S2-probe", "S3", "S4", "S5", "S6", "S-pool");
 
+    private final EmptyEventProbe eventProbe = new EmptyEventProbe();
     private LoadContextProviders providers;
     private Run run;
     private BukkitTask heartbeat;
+    private boolean eventProbeRegistered;
 
     @Override
     public void onEnable() {
@@ -85,6 +112,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             heartbeat.cancel();
             heartbeat = null;
         }
+        unregisterEventProbe();
         if (providers != null) {
             NexusAIApi.unregisterContextProvider(this, providers.fast.id());
             NexusAIApi.unregisterContextProvider(this, providers.slow.id());
@@ -94,6 +122,15 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length > 0 && "api".equals(args[0])) {
+            return apiGenerate(sender, args);
+        }
+        if (args.length > 0 && "events".equals(args[0])) {
+            return smokeEvents(sender);
+        }
+        if (args.length > 0 && "json".equals(args[0])) {
+            return smokeJson(sender);
+        }
         if (args.length != 4) {
             sender.sendMessage("usage: naiload <scenario> <rate> <seconds> <viewers>");
             return true;
@@ -101,7 +138,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         String scenario = args[0];
         if (!SCENARIOS.contains(scenario)) {
             sender.sendMessage("unknown scenario " + scenario
-                    + ". expected baseline, S1, S2, S2-over, S3, S4, S5, S-pool");
+                    + ". expected baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S4, S5, S6, S-pool");
             return true;
         }
         int rate;
@@ -136,11 +173,170 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             return true;
         }
         run = next;
+        if ("S2-probe".equals(scenario)) {
+            registerEventProbe();
+        }
         getLogger().info("SCENARIO_START " + scenario + " rate=" + rate + " seconds=" + seconds
                 + " viewers=" + viewers);
         heartbeat = Bukkit.getScheduler().runTaskTimer(this, this::heartbeat, 1L, 1L);
         sender.sendMessage("naiload queued " + scenario + " for " + seconds + "s");
         return true;
+    }
+
+    /**
+     * {@code naiload api <prompt|template> <n>}. Each of the {@code n} calls is scheduled on the
+     * command thread and again on an async task. The command does not join the futures.
+     */
+    private boolean apiGenerate(CommandSender sender, String[] args) {
+        if (args.length != 3 || (!"prompt".equals(args[1]) && !"template".equals(args[1]))) {
+            sender.sendMessage("usage: naiload api <prompt|template> <n>");
+            return true;
+        }
+        int count;
+        try {
+            count = Integer.parseInt(args[2]);
+        } catch (NumberFormatException ex) {
+            sender.sendMessage("n must be an integer");
+            return true;
+        }
+        if (count < 1 || count > 100) {
+            sender.sendMessage("n must be from 1 to 100");
+            return true;
+        }
+        if (!NexusAIApi.isAvailable()) {
+            getLogger().info("API_FAIL");
+            sender.sendMessage("naiload api unavailable");
+            return true;
+        }
+        String mode = args[1];
+        AtomicInteger remaining = new AtomicInteger(count * 2);
+        for (int i = 0; i < count; i++) {
+            dispatchApi(mode, remaining);
+        }
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            for (int i = 0; i < count; i++) {
+                dispatchApi(mode, remaining);
+            }
+        });
+        sender.sendMessage("naiload api queued " + mode + " x" + count);
+        return true;
+    }
+
+    /**
+     * One cached placeholder and one console character action.
+     * The action runs inside the global region task, which is where {@code as: console} runs.
+     * The placeholder text is logged only after the expansion returns the model reply.
+     */
+    private boolean smokeEvents(CommandSender sender) {
+        AtomicInteger polls = new AtomicInteger();
+        Bukkit.getScheduler().runTaskTimer(this, task -> {
+            if (polls.incrementAndGet() > 20 * 45) {
+                getLogger().info("PLACEHOLDER_TEXT timeout");
+                task.cancel();
+                return;
+            }
+            String value;
+            try {
+                value = PlaceholderAPI.setPlaceholders((OfflinePlayer) null, HIT);
+            } catch (Throwable thrown) {
+                getLogger().info("PLACEHOLDER_TEXT error=" + thrown.getClass().getSimpleName());
+                task.cancel();
+                return;
+            }
+            if (value != null && value.contains("pong")) {
+                getLogger().info("PLACEHOLDER_TEXT text=pong");
+                task.cancel();
+            }
+        }, 1L, 10L);
+        getServer().getGlobalRegionScheduler().run(this, scheduled -> {
+            String result = ActionExecution.execute(
+                    new AtomicBoolean(),
+                    () -> EventDispatcher.get().action(null, "smoke", "wave", "say smoke", true, 1L),
+                    () -> "ran");
+            getLogger().info("ACTION_DONE result=" + (result == null ? "null" : result));
+        });
+        sender.sendMessage("naiload events queued");
+        return true;
+    }
+
+    /**
+     * {@code naiload json}. One {@code generateJson} call. The command does not join the future.
+     */
+    private boolean smokeJson(CommandSender sender) {
+        if (!NexusAIApi.isAvailable()) {
+            getLogger().info("NEXUSAI_JSON success=false mode= error=unavailable");
+            sender.sendMessage("naiload json unavailable");
+            return true;
+        }
+        JsonSchema schema;
+        try {
+            schema = JsonSchema.parse("""
+                    {"type":"object","additionalProperties":false,
+                     "required":["title","goal","reward"],
+                     "properties":{
+                       "title":{"type":"string","maxLength":40},
+                       "goal":{"type":"string","maxLength":200},
+                       "reward":{"type":"integer","minimum":1,"maximum":1000}}}
+                    """);
+        } catch (RuntimeException ex) {
+            getLogger().info("NEXUSAI_JSON success=false mode= error=schema");
+            sender.sendMessage("naiload json schema");
+            return true;
+        }
+        CompletableFuture<JsonGenerationResult> future = NexusAIApi.generateJson(
+                this,
+                GenerationRequest.template("Invent a short fetch quest for a village blacksmith.")
+                        .cacheMode(CacheMode.FRESH)
+                        .label("load-json")
+                        .build(),
+                schema);
+        future.whenComplete((result, error) -> {
+            if (error != null || result == null) {
+                String name = error == null ? "null" : error.getClass().getSimpleName();
+                getLogger().info("NEXUSAI_JSON success=false mode= error=" + name);
+                return;
+            }
+            getLogger().info("NEXUSAI_JSON success=" + result.success() + " mode=" + result.mode().name());
+        });
+        sender.sendMessage("naiload json queued");
+        return true;
+    }
+
+    private void dispatchApi(String mode, AtomicInteger remaining) {
+        long started = System.nanoTime();
+        CompletableFuture<GenerationResult> future = NexusAIApi.generate(this, apiRequest(mode));
+        long elapsed = System.nanoTime() - started;
+        getLogger().info("API_CALL thread=" + Thread.currentThread().getName() + " nanos=" + elapsed);
+        future.whenComplete((result, error) -> {
+            logApiResult(result);
+            if (remaining.decrementAndGet() == 0) {
+                getLogger().info("API_DONE");
+            }
+        });
+    }
+
+    private static GenerationRequest apiRequest(String mode) {
+        if ("prompt".equals(mode)) {
+            return GenerationRequest.prompt("load_api").label("load-api").build();
+        }
+        return GenerationRequest.template("Reply with the single word pong.").label("load-api").build();
+    }
+
+    private void logApiResult(GenerationResult result) {
+        if (result == null) {
+            getLogger().info("API_RESULT success=false source=FALLBACK text= provider= model= finish= attempts=0 totalTokens=0 reported=false");
+            return;
+        }
+        String text = result.text().replace('\r', ' ').replace('\n', ' ');
+        getLogger().info("API_RESULT success=" + result.success()
+                + " source=" + result.source().name()
+                + " text=" + text
+                + " provider=" + result.providerId()
+                + " model=" + result.model()
+                + " finish=" + result.finishReason()
+                + " attempts=" + result.attempts()
+                + " totalTokens=" + result.usage().totalTokens()
+                + " reported=" + result.usage().reported());
     }
 
     @EventHandler
@@ -204,6 +400,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             }
             if (current.phase == Phase.DRAIN) {
                 boolean settled = poolIdle();
+                if ("S6".equals(current.scenario)) {
+                    settled = settled && current.futuresOpen.get() == 0;
+                }
                 if (settled || now - current.drainStartedAt >= current.drainMillis) {
                     finish(current, settled);
                 }
@@ -221,7 +420,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             return;
         }
         current.warmAttempts++;
-        String value = PlaceholderAPI.setPlaceholders((OfflinePlayer) null, HIT);
+        String token = "S1-keywords".equals(current.scenario) ? KW : HIT;
+        String value = PlaceholderAPI.setPlaceholders((OfflinePlayer) null, token);
         if (value != null && value.contains("pong")) {
             current.phase = Phase.LOAD;
             current.startedAt = now;
@@ -253,9 +453,16 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             finish(current, false);
             return;
         }
+        if ("S6".equals(current.scenario)) {
+            ensureReservation(current);
+        }
         for (int i = 0; i < count; i++) {
-            if ("S1".equals(current.scenario)) {
-                resolve(current, HIT, null, measure);
+            if ("S1".equals(current.scenario) || "S1-keywords".equals(current.scenario)) {
+                resolve(current, "S1".equals(current.scenario) ? HIT : KW, null, measure);
+                continue;
+            }
+            if ("S6".equals(current.scenario)) {
+                generateQuota(current, measure);
                 continue;
             }
             if ("S4".equals(current.scenario)) {
@@ -316,6 +523,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
                 current.series.add(point);
             }
         }
+        if ("S6".equals(current.scenario)) {
+            sampleQuota(current);
+        }
         if (measure) {
             double[] tps = Bukkit.getServer().getTPS();
             if (tps.length > 0) {
@@ -359,6 +569,10 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         if (current.phase == Phase.DONE && current.reported) {
             return;
         }
+        unregisterEventProbe();
+        if ("S6".equals(current.scenario)) {
+            sampleQuota(current);
+        }
         current.phase = Phase.DONE;
         current.settled = settled;
         current.drainActualMillis = current.drainStartedAt == 0L
@@ -400,6 +614,13 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         root.put("resolutions", current.resolutions);
         root.put("uniquePrompts", current.unique);
         root.put("talkCommands", current.talkCommands);
+        root.put("tokensSpent", current.tokensSpent);
+        root.put("quotaLimit", current.quotaLimit);
+        root.put("reservedInFlight", current.reservedInFlight);
+        root.put("quotaDenied", current.quotaDenied.get());
+        root.put("futuresOpen", current.futuresOpen.get());
+        root.put("quotaExhaustedEpochMillis", current.quotaExhaustedEpochMillis);
+        root.put("quotaExhaustedOffsetMillis", current.quotaExhaustedOffsetMillis);
         root.put("note", note(current));
 
         Map<String, Object> mspt = new LinkedHashMap<>();
@@ -504,12 +725,123 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         if ("S-pool".equals(current.scenario)) {
             return "Burst of unique cache misses. A full HTTP pool must fail with HTTP queue is full.";
         }
-        if ("S1".equals(current.scenario)) {
+        if ("S1".equals(current.scenario) || "S1-keywords".equals(current.scenario)) {
             return "Mode A. One warmed cached_ placeholder, resolved on the server thread at the requested rate. "
-                    + "Viewers are synthetic: PlaceholderAPI is called with a null player.";
+                    + "Viewers are synthetic: PlaceholderAPI is called with a null player. "
+                    + "S1-keywords uses load_kw, which selects knowledge by keywords.";
+        }
+        if ("S2-probe".equals(current.scenario)) {
+            return "Mode A. Same misses as S2. Empty listeners are registered for this scenario only.";
+        }
+        if ("S6".equals(current.scenario)) {
+            return "Mode A. generate() on the server thread. One call in five is a new template. "
+                    + "The rest repeat one template. Quotas are on.";
         }
         return "Mode A. Unique literal cached_ prompts, null player. S2 and S2-over resolve each prompt three times "
                 + "so in-flight dedup is visible. S3 resolves each prompt once.";
+    }
+
+    private void generateQuota(Run current, boolean measure) {
+        int seq = current.apiSeq++;
+        boolean unique = seq % 5 == 0;
+        String text = unique
+                ? UNIQUE_PREFIX + String.format(Locale.ROOT, "%06d", seq)
+                : REPEAT;
+        boolean leader = unique || !current.repeatSent;
+        if (!unique) {
+            current.repeatSent = true;
+        }
+        long start = System.nanoTime();
+        CompletableFuture<GenerationResult> future;
+        try {
+            future = NexusAIApi.generate(this, GenerationRequest.template(text).build());
+        } catch (RuntimeException | Error thrown) {
+            noteError(current, thrown);
+            current.resolutions++;
+            if (measure) {
+                current.calls.add(System.nanoTime() - start);
+            }
+            return;
+        }
+        long took = System.nanoTime() - start;
+        current.resolutions++;
+        if (measure) {
+            current.calls.add(took);
+        }
+        if (unique) {
+            current.unique++;
+        }
+        current.futuresOpen.incrementAndGet();
+        if (leader) {
+            noteInFlight(current, current.httpOpen.incrementAndGet());
+        }
+        future.whenComplete((result, error) -> finishQuotaCall(current, leader, result));
+    }
+
+    private void finishQuotaCall(Run current, boolean leader, GenerationResult result) {
+        if (result != null && result.error().map(GenerationError::kind).orElse(null) == NexusErrorKind.QUOTA_EXCEEDED) {
+            current.quotaDenied.incrementAndGet();
+        }
+        if (leader) {
+            current.httpOpen.decrementAndGet();
+        }
+        current.futuresOpen.decrementAndGet();
+    }
+
+    private void ensureReservation(Run current) {
+        if (current.reservation > 0L) {
+            return;
+        }
+        NexusAI nexus = nexus();
+        if (nexus == null || nexus.getPluginConfig() == null) {
+            return;
+        }
+        current.reservation = QuotaEstimates.forCall(
+                nexus.getPluginConfig(),
+                UNIQUE_PREFIX + "000000",
+                GenerationOverrides.none(),
+                "load-model");
+    }
+
+    private void noteInFlight(Run current, int open) {
+        if (current.quotaExhaustedEpochMillis != 0L || current.reservation <= 0L || open < 0) {
+            return;
+        }
+        long reserved = (long) open * current.reservation;
+        if (reserved > current.reservedInFlight) {
+            current.reservedInFlight = reserved;
+        }
+    }
+
+    private void sampleQuota(Run current) {
+        QuotaStatus status = NexusAIApi.quota(this);
+        long spent = status.tokensToday();
+        long limit = status.tokensPerDay().orElse(0L);
+        current.tokensSpent = spent;
+        current.quotaLimit = limit;
+        if (limit > 0L && spent >= limit && current.quotaExhaustedEpochMillis == 0L) {
+            long now = System.currentTimeMillis();
+            current.quotaExhaustedEpochMillis = now;
+            current.quotaExhaustedOffsetMillis = Math.max(0L, now - current.startedAt);
+        } else if (current.quotaExhaustedEpochMillis == 0L) {
+            noteInFlight(current, current.httpOpen.get());
+        }
+    }
+
+    private void registerEventProbe() {
+        if (eventProbeRegistered) {
+            return;
+        }
+        getServer().getPluginManager().registerEvents(eventProbe, this);
+        eventProbeRegistered = true;
+    }
+
+    private void unregisterEventProbe() {
+        if (!eventProbeRegistered) {
+            return;
+        }
+        HandlerList.unregisterAll(eventProbe);
+        eventProbeRegistered = false;
     }
 
     private static String missToken(int id) {
@@ -619,6 +951,17 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         private int httpWaitCapacity;
         private long workerRejected;
         private long httpRejected;
+        private final AtomicInteger futuresOpen = new AtomicInteger();
+        private final AtomicInteger httpOpen = new AtomicInteger();
+        private final AtomicInteger quotaDenied = new AtomicInteger();
+        private int apiSeq;
+        private boolean repeatSent;
+        private long reservation;
+        private long reservedInFlight;
+        private long tokensSpent;
+        private long quotaLimit;
+        private long quotaExhaustedEpochMillis;
+        private long quotaExhaustedOffsetMillis;
 
         private Run(String scenario, int rate, int seconds, int viewers) {
             this.scenario = scenario;
@@ -635,10 +978,40 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             } else {
                 this.drainMillis = DRAIN_SECONDS * 1000L;
             }
-            this.phase = "S1".equals(scenario) ? Phase.WARM : Phase.LOAD;
+            this.phase = "S1".equals(scenario) || "S1-keywords".equals(scenario) ? Phase.WARM : Phase.LOAD;
             this.startedAt = this.warmStartedAt;
             this.lastAux = this.startedAt;
             this.rejectedAtStart = rejectedNow();
+        }
+    }
+
+    /**
+     * Registered only for S2-probe. The bodies are empty so the dispatcher creates the events
+     * and the scenario does not log them.
+     */
+    static final class EmptyEventProbe implements Listener {
+        @EventHandler
+        public void onPre(NexusPreGenerateEvent event) {
+        }
+
+        @EventHandler
+        public void onPost(NexusPostGenerateEvent event) {
+        }
+
+        @EventHandler
+        public void onFail(NexusGenerateFailEvent event) {
+        }
+
+        @EventHandler
+        public void onProvider(NexusProviderErrorEvent event) {
+        }
+
+        @EventHandler
+        public void onAction(NexusActionEvent event) {
+        }
+
+        @EventHandler
+        public void onModeration(NexusModerationFlagEvent event) {
         }
     }
 }

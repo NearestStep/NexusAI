@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.ai.ReasoningModels;
+import io.github.neareststep.nexusai.ai.ResponseUsage;
 import io.github.neareststep.nexusai.ai.dto.ContentTexts;
+import io.github.neareststep.nexusai.ai.dto.UsageJson;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -82,11 +84,27 @@ public final class DialogueProtocol {
         JsonNode choice = tree.path("choices").path(0);
         JsonNode message = choice.path("message");
         String finishReason = textOrNull(choice.get("finish_reason"));
+        ResponseUsage usage = UsageJson.read(tree.get("usage"));
         if (message.isMissingNode() || message.isNull()) {
-            return new ParsedCompletion(null, List.of(), finishReason);
+            return new ParsedCompletion(null, List.of(), finishReason, usage);
         }
         String content = ContentTexts.read(message.get("content"));
-        return new ParsedCompletion(content, toolNames(message), finishReason);
+        return new ParsedCompletion(content, toolNames(message), finishReason, usage);
+    }
+
+    /**
+     * Code points of the system and chat messages {@link #requestJson} sends.
+     * The system text includes the player-input guard when that method appends it.
+     */
+    public static int promptChars(String system, List<MemoryLine> messages) {
+        int chars = ResponseUsage.chars(PlayerInput.appendGuard(system, guardNeeded(system, messages)));
+        if (messages == null) {
+            return chars;
+        }
+        for (MemoryLine line : messages) {
+            chars += ResponseUsage.chars(line == null ? null : line.text());
+        }
+        return chars;
     }
 
     /**
@@ -162,7 +180,16 @@ public final class DialogueProtocol {
     public record MemoryLine(String role, String text) {
     }
 
-    public record ParsedCompletion(String content, List<String> toolNames, String finishReason) {
+    public record ParsedCompletion(String content, List<String> toolNames, String finishReason, ResponseUsage usage) {
+        public ParsedCompletion(String content, List<String> toolNames, String finishReason) {
+            this(content, toolNames, finishReason, ResponseUsage.none());
+        }
+
+        public ParsedCompletion {
+            if (usage == null) {
+                usage = ResponseUsage.none();
+            }
+        }
     }
 
     private static String textOrNull(JsonNode node) {

@@ -1,6 +1,6 @@
 # NexusAI
 
-Plugin for Paper and Purpur. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
+Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
 
 `%ainexus_cached_*%` returns a cached answer. On a miss it starts a background request when requests are allowed, and returns a stored pooled answer without removing it, or the fallback string. `%ainexus_generate_*%` removes one pooled answer, or returns the fallback string.
 
@@ -9,23 +9,31 @@ Plugin for Paper and Purpur. It requests text from an OpenAI-compatible model an
 - [Quick start](docs/quickstart.md) — install, a key, one prompt, `/nai test`, `/nai status`
 - [FAQ](docs/faq.md) — no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
 - [Migration from 1.0.x](docs/migration-1.1.0.md)
+- [Migration to 1.2.0](docs/migration-1.2.0.md)
+- [Plugin API](docs/api.md)
 - [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
 
 ## Requirements
 
-- Paper or Purpur **1.20.6 through 26.2**, Java **21** or newer
-- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6+ (soft-depend)
+- Paper or Purpur **1.20.6 through 26.2**, or Folia **1.21.8, 1.21.11, 26.1.2, or 26.2**, Java **21** or newer
+- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. Folia needs PlaceholderAPI 2.11.7 or newer, because an older PlaceholderAPI does not load on Folia by itself. The plugin does not check that version at runtime. The compile-only dependency is PlaceholderAPI 2.11.6.
 - API key for an OpenAI-compatible provider, unless you use a local endpoint such as Ollama
 
 ## Compatibility
 
-One jar runs on Paper and Purpur from 1.20.6 through 26.2. It is built with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. `api-version` is `1.20.6`: Paper has accepted a minor api-version since 1.20.5, and 1.20.6 is the oldest release this jar is built for. Paper and Purpur from 1.20.6 through 26.2 load that api-version. There is no separate jar per Minecraft version.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only.
 
-Supported servers are Paper and Purpur 1.20.6 through 26.2. Folia is not supported, and `plugin.yml` sets `folia-supported: false`. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
+
+One jar runs on those servers. It is built with JDK 25 and `--release 21` (class file 65) against paper-api 1.20.6. `api-version` is `1.20.6`: Paper has accepted a minor api-version since 1.20.5, and 1.20.6 is the oldest release this jar is built for. There is no separate jar per Minecraft version. `plugin.yml` sets `folia-supported: true`.
+
+Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
+
+`generate` may be called from any thread. The future completes on a NexusAI thread, not on a region thread. Do not join that future on the main thread or a region thread. When the request has a player, NexusAI reads that player's state on the thread that owns the player: immediately when the caller already owns the player, otherwise by scheduling that read. On Paper the owning thread is the main thread. On Folia it is the player's region thread.
 
 ## Installation
 
-1. Put `NexusAI-1.1.2.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.1.2.jar`. `version` in `build.gradle.kts` is `1.1.2`.
+1. Put `NexusAI-1.2.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0.jar`. `version` in `build.gradle.kts` is `1.2.0`.
 2. Install PlaceholderAPI
 3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 
@@ -37,7 +45,7 @@ $env:NEXUSAI_API_KEY = "sk-..."
 export NEXUSAI_API_KEY=sk-...
 ```
 
-Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets). On a POSIX system, `config.yml` and `prompts.yml` created by the plugin on first start are mode `0600`. A file that is already there keeps its mode. `/nai prompts import` creates a missing `prompts.yml` the same way.
+Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets). On a POSIX system, `config.yml` and `prompts.yml` created by the plugin on first start are mode `0600`. A file that is already there keeps its mode. `/nai prompts import` creates a missing `prompts.yml` the same way. `actions.log` and `moderation.log` are also created and kept as mode `0600`, including after a looser mode or a rotation.
 
 Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`, including the bracketed form `[::1]`, a host ending in `.local`, or any base URL on port `11434`) are called without an `Authorization` header.
 
@@ -60,7 +68,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | `pool` | `enabled`, `max-total-prompts`, `persist`, `save-delay-seconds`, `entries[]` (`prompt`, `size`, `min-threshold`, optional `vars`, optional `system-prompt` / `temperature` / `max-tokens`) |
 | `prewarm` | `enabled`, `refresh-before-ttl` (seconds), `prompts[]` (supports `{player}`) |
 | `fallback-model` | `provider` and `model`. Leave either blank to disable it. A prompt may set its own pair. See [Providers, keys, and the model queue](#providers-keys-and-the-model-queue) |
-| `knowledge` | `max-chars` (one request) and `max-file-chars` (one file). Files are under `plugins/NexusAI/knowledge/`. See [Knowledge](#knowledge) |
+| `knowledge` | `max-chars` (one request), `max-file-chars` (one file in `full` mode), and `select` (`full` or `keywords`). Files are under `plugins/NexusAI/knowledge/`. See [Knowledge](#knowledge) |
 | `moderation` | Opt-in chat check. `enabled` (default **false**), `provider`, `model`, `max-checks-per-minute`, `player-cooldown-seconds`, `min-length`, `system-prompt`, `temperature`, `max-tokens`. See [Chat moderation](#chat-moderation) |
 | `dialogue` | `/nai talk` limits. `enabled` defaults to **true**. See [Dialogues](#dialogues) |
 | `actions` | Tool actions for dialogues. `enabled` defaults to **true**. `log` defaults to **true**. See [Actions](#actions) |
@@ -87,7 +95,7 @@ Bundled locales: `en` (default), `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_B
 
 On Groq, use a Qwen model as the default. In a 15-attack prompt-injection check, `allam-2-7b` complied with 5 attacks and `qwen/qwen3.8-27b` complied with none. The same run sent 30 benign prompts (15 to each model) and recorded no false refusals. `allam-2-7b` is a weak default for this guard. Groq also caps output tokens per minute. On one account that cap was 1000, and a request with no `max_tokens` was counted as 1028 and rejected with HTTP 429. The default `api.max-tokens` of 256 keeps a short placeholder or talk reply under that cap. Set `0` or a negative value only when you want the field left off. If you do that while a groq provider is in `model-queue` or is the `fallback-model`, startup and `/nai reload` log one warning. Groq's free tier has a per-minute output-token quota per account. `max-tokens` 256 does not remove that quota. Frequent long `/nai talk` turns, or many long placeholders, can still return HTTP 429 and pause every request. Use a longer `cache.ttl` or per-prompt `ttl`, and shorter prompts, so those calls are not sent again on every refresh.
 
-An explicit `api.base-url` still fills the legacy path. When `providers:` is present, that block is the endpoint and key source. On startup the log prints: `Using provider: …, base-url: …, model: …` and, when keys are set, `API keys: ****abcd`. A key read from a file is `API keys: ****abcd (file)`. A key taken from the environment is `API keys: ****abcd (env)`. A literal key in `config.yml` stays `****abcd` with no suffix. Full keys are never printed. The `url` value is not masked, so do not put a key in the query string.
+An explicit `api.base-url` still fills the legacy path. When `providers:` is present, that block is the endpoint and key source. On startup the log prints: `Using provider: …, base-url: …, model: …` and, when keys are set, `API keys: ****abcd`. A key read from a file is `API keys: ****abcd (file)`. A key taken from the environment is `API keys: ****abcd (env)`. A literal key in `config.yml` stays `****abcd` with no suffix. Full keys are never printed. A provider `url` shown in `/nai status`, the startup line, errors, and FINE logs masks query-parameter values as `***` and userinfo as `***@`. Prefer `api-key` or `api-key-file` over putting a key in the query string; the HTTP request still sends a `?key=` value when one is configured.
 
 A provider key can be set in three ways:
 
@@ -119,7 +127,7 @@ NexusAI compared with a typical AI plugin:
 | | Typical plugin | NexusAI |
 |--|----------------|---------|
 | Where the key lives | Plain text in `config.yml` | Plain text, or `${ENV:VAR}` / `${VAR}`, or `api-key-file` |
-| Masking in logs, errors, and `/nai status` | The full key often appears in an error or a status line | Masked to the last four characters (`****abcd`). File keys are marked `(file)`. Environment keys are marked `(env)`. A token shaped like an OpenAI (`sk-`), Groq (`gsk_`), or Google (`AIza`) key is masked the same way even when it is not in the config: NPC replies, placeholder answers, `/nai test`, `actions.log`, server logs, and stored dialogue lines. It must have that vendor's length, a digit, and both letter cases, and it must not be a run of ordinary words. A lowercase slug is left as written. A key that is all lowercase or all uppercase, such as a hex key, is masked only when it is configured |
+| Masking in logs, errors, and `/nai status` | The full key often appears in an error or a status line | Masked to the last four characters (`****abcd`). File keys are marked `(file)`. Environment keys are marked `(env)`. A token shaped like an OpenAI (`sk-`), Groq (`gsk_`), or Google (`AIza`) key is masked the same way even when it is not in the config: NPC replies, placeholder answers, `/nai test`, `actions.log`, server logs, and stored dialogue lines. It must have that vendor's length, a digit, and both letter cases, and it must not be a run of ordinary words. A lowercase slug is left as written. A CamelCase name with a short abbreviation, such as `sk-NexusAIPluginForMinecraft2026`, is left as written. These one-case shapes are masked even when they are not configured: DeepSeek `sk-` plus 32 hex digits, OpenRouter `sk-or-v1-` plus 64 hex digits, Groq `gsk_` plus 52 letters or digits, and a lowercase Anthropic key `sk-ant-api03-` or `sk-ant-admin01-` plus 93 characters ending in `aa`. Any other all-lowercase or all-uppercase key is masked only when it is configured. A `_` after a vendor key in a path is kept |
 | Leak check | Usually none | A unit test sends a canary key through HTTP 401, HTTP 429, a timeout, diagnostics, `/nai status` redaction, and `/nai reload`, and fails if the canary appears |
 | Permissions of `.bak` | A copy is often world-readable | The copy keeps the source mode (`COPY_ATTRIBUTES`) |
 | Encryption in the config | Sometimes described as protection | None. A key kept out of `config.yml` is the better option, because encryption the plugin can undo uses material stored on the same server |
@@ -222,14 +230,15 @@ Alias: `/nexusai`. The `/nai` command in `plugin.yml` has no permission of its o
 | `/nai help` | `nexusai.command` lists every line that sender may run. `nexusai.talk` without `nexusai.command` lists only `/nai talk` and `/nai talk end` | Show command help |
 | `/nai version` | `nexusai.command` | Plugin version and the authors from `plugin.yml` (`PluginMeta.getAuthors()`) |
 | `/nai reload` | `nexusai.command` and `nexusai.reload` | Reload config, `prompts.yml`, knowledge files, and lang files; rebuild cache, pool, and prewarm |
-| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, queue strategy and the next row, fallback model, moderation on/off, today's checks and flags, dialogue summaries (`off`, or `on (N ok, M failed today)`), and context providers (id, plugin, priority, timeout, ok or suspended, timeout count). Context values are not printed |
-| `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml` |
+| `/nai status` | `nexusai.command` and `nexusai.status` | Provider, model, masked keys, pool, cache, named prompts, knowledge file count, PlaceholderAPI, last error, provider pause, model queue, queue strategy and the next row, fallback model, moderation on/off, today's checks and flags, dialogue summaries (`off`, or `on (N ok, M failed today)`), context providers (id, plugin, priority, timeout, ok or suspended, timeout count), tokens used today (and the server limit, when one is set), and whether quotas are on. Context values are not printed |
+| `/nai usage [players\|consumers\|history]` | `nexusai.command` and `nexusai.status` | Today's token totals. With no argument: server, providers, queue rows, and origins. `players` is the top 10 by tokens. `consumers` is every API plugin. `history` is the last 30 days. Names are masked the same way as logs |
+| `/nai prompts` | `nexusai.command` | List named prompt ids from `prompts.yml`, then prompts a plugin registered from code |
 | `/nai prompts import <file> [--overwrite]` | `nexusai.command` and `nexusai.import` | Import prompt definitions from `plugins/NexusAI/import/<file>` into `prompts.yml` |
 | `/nai test [prompt]` | `nexusai.command` and `nexusai.test` | One live request. Prints the answer and latency. With no prompt, asks the model to reply `pong`. Extra words are part of the prompt and are sanitized and wrapped as player input. A single argument that is a prompt id sends that named prompt (tab completion lists ids). This command does not apply `limits.max-prompt-length` to literal text, does not clear, start, or extend a provider pause, and does not start or extend a model-queue cooldown. It still calls the provider while an entry is cooling down. A daily cap still blocks it |
 | `/nai talk <id> [message]` | `nexusai.talk` or `nexusai.command` | Talk to the character `id` from `prompts.yml`. A message is one reply. With no message, a session opens and later chat goes to that character |
 | `/nai talk end` | `nexusai.talk` or `nexusai.command` | End your dialogue session |
 
-`/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. `/nai prompts import` accepts `--overwrite` only as its last argument. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`. From the console, target a player with `/nai talk <player> <id> [message]`. A missing id prints that usage line. An unknown character or an offline player is reported to the console, not to the named player. The character's reply still goes to the player.
+`/nai help`, `/nai version`, `/nai reload`, and `/nai status` reject unexpected extra arguments and point at `/nai help`. `/nai usage` accepts one optional argument (`players`, `consumers`, or `history`). `/nai prompts import` accepts `--overwrite` only as its last argument. Locale codes are matched without case: `RU` loads `ru`, and `PT-br` loads `pt_BR`. From the console, target a player with `/nai talk <player> <id> [message]`. A missing id prints that usage line. An unknown character or an offline player is reported to the console, not to the named player. The character's reply still goes to the player.
 
 Listing ids does not change files. Import rewrites `prompts.yml`, so it needs `nexusai.import` as well as `nexusai.command`. Put a `.yml` or `.yaml` file in `plugins/NexusAI/import/`. The path must stay inside that folder: absolute paths, backslashes, and `..` are rejected. Ids and fields are checked the same way `prompts.yml` is loaded. New ids are added. An id that already exists is reported as conflicting and is not replaced unless you pass `--overwrite`. Invalid ids are skipped. Before the file changes, NexusAI copies `prompts.yml` to `prompts.yml.bak`, or `prompts.yml.bak.<timestamp>` when that backup already exists. It then reloads prompts.
 
@@ -239,9 +248,9 @@ Defaults come from `plugin.yml`. OP receives every node whose default is `op`. `
 
 | Permission | Default | Effect |
 |------------|---------|--------|
-| `nexusai.command` | op | Admin subcommands: help, version, reload, status, test, and `prompts`. Also allows `/nai talk` |
+| `nexusai.command` | op | Admin subcommands: help, version, reload, status, usage, test, and `prompts`. Also allows `/nai talk` |
 | `nexusai.reload` | op | `/nai reload`. Also requires `nexusai.command` |
-| `nexusai.status` | op | `/nai status`. Also requires `nexusai.command` |
+| `nexusai.status` | op | `/nai status` and `/nai usage`. Also requires `nexusai.command` |
 | `nexusai.test` | op | `/nai test`. Also requires `nexusai.command` |
 | `nexusai.import` | op | `/nai prompts import`. Also requires `nexusai.command`. Listing ids does not use this node |
 | `nexusai.talk` | op | `/nai talk` and `/nai talk end`. Grant this to the players who should talk. They do not need `nexusai.command` |
@@ -249,6 +258,8 @@ Defaults come from `plugin.yml`. OP receives every node whose default is `op`. `
 | `nexusai.moderation.bypass` | false | Skip the chat check. Operators do not receive this node unless it is granted |
 
 An action's `permission` field is a node you write on that action. It is not registered in `plugin.yml`. The example `nexusai.action.give_iron` is checked only when that action is about to run.
+
+`nexusai.quota.<name>` is also not in `plugin.yml`. It selects a row under `quotas.groups.<name>` when quotas are on. See [Token usage and quotas](#token-usage-and-quotas).
 
 ## Dialogues
 
@@ -269,7 +280,7 @@ Omit `dialogue.greeting` and NexusAI asks the model for one greeting and may cac
 
 A session ends when `dialogue.session-timeout-seconds` passes with no line, the player moves farther than `dialogue.leave-radius` blocks from where the session started, they run `/nai talk end`, or they quit. While it is open, their chat is cancelled at the highest priority so it is not broadcast. Listeners that run earlier still see the line.
 
-The model sees the character prompt and the last `dialogue.memory-turns` turns (default 8; the loader accepts 1 through 16). The player-input guard is included when a turn contains wrapped player text. Memory is kept per player and character, capped by `dialogue.memory-max-chars`, and optionally written to `plugins/NexusAI/dialogue-memory.yml` (`dialogue.persist-memory`). `dialogue.memory-expiry-hours` drops a saved transcript that has gone quiet. `0` keeps it. On startup, a summary or transcript line that still contains a configured API key, or a vendor-shaped key (both letter cases, a digit, and the vendor's length; not a run of ordinary words), is masked and written back. The summary and the lines stay. A file with nothing to mask is left as it is, and that rewrite does not create a `.bak`. On a POSIX file system the rewritten file is mode `0600`. A line the player just typed is masked the same way when it is stored; the request body for that line is unchanged. A key that is all lowercase or all uppercase, such as a hex key, is masked only when it is configured. With `persist-memory: false` the file is still masked and is not loaded, and an unreadable file is still moved to `dialogue-memory.yml.corrupt`. A file that cannot be parsed is copied there with keys masked and mode `0600`. The copy appears only after it has been fully written. A file that is not valid UTF-8 is copied as its original bytes, with ASCII keys masked. If that copy cannot be written, the original stays, is restricted to owner-only permissions, and is not overwritten. The log says what happened and to repair the copy, replace `dialogue-memory.yml`, and restart. Temp files named `dialogue-memory.yml.<id>.tmp` left by an interrupted save are removed on startup. `/nai reload` keeps the running dialogue. The first time `dialogue.persist-memory` changes from false to true, NexusAI loads the file before any save. For a character that is in the file, the lines on disk replace lines said while persistence was off. A character that is only in memory stays. Later reloads do not read the file again. Turning persistence off and then on keeps the in-memory transcript, and the next save writes that transcript, including over a hand edit. A hand edit of `dialogue-memory.yml` while the server is running is overwritten by the next save, the same as in 1.1.1. A save does not write the file until that first load has finished.
+The model sees the character prompt and the last `dialogue.memory-turns` turns (default 8; the loader accepts 1 through 16). The player-input guard is included when a turn contains wrapped player text. Memory is kept per player and character, capped by `dialogue.memory-max-chars`, and optionally written to `plugins/NexusAI/dialogue-memory.yml` (`dialogue.persist-memory`). `dialogue.memory-expiry-hours` drops a saved transcript that has gone quiet. `0` keeps it. On startup, a summary or transcript line that still contains a configured API key, or a vendor-shaped key (both letter cases, a digit, and the vendor's length; not a run of ordinary words; or an exact one-case DeepSeek, OpenRouter, Groq, or lowercase Anthropic key), is masked and written back. The summary and the lines stay. A file with nothing to mask is left as it is, and that rewrite does not create a `.bak`. On a POSIX file system the rewritten file is mode `0600`. A line the player just typed is masked the same way when it is stored; the request body for that line is unchanged. A CamelCase name with a short abbreviation, such as `sk-NexusAIPluginForMinecraft2026`, is left as written. A DeepSeek key (`sk-` plus 32 hex digits), an OpenRouter key (`sk-or-v1-` plus 64 hex digits), a Groq key (`gsk_` plus 52 letters or digits) in one letter case, and a lowercase Anthropic key (`sk-ant-api03-` or `sk-ant-admin01-` plus 93 characters ending in `aa`) are masked even when they are not configured. Any other key that is all lowercase or all uppercase is masked only when it is configured. A `_` after a vendor key in a path is kept; an underscore inside the key stays inside the mask. With `persist-memory: false` the file is still masked and is not loaded, and an unreadable file is still moved to `dialogue-memory.yml.corrupt`. A file that cannot be parsed is copied there with keys masked and mode `0600`. The copy appears only after it has been fully written. A file that is not valid UTF-8 is copied as its original bytes, with ASCII keys masked. If that copy cannot be written, the original stays, is restricted to owner-only permissions, and is not overwritten. The log says what happened and to repair the copy, replace `dialogue-memory.yml`, and restart. Temp files named `dialogue-memory.yml.<id>.tmp` left by an interrupted save are removed on startup. `/nai reload` keeps the running dialogue. The first time `dialogue.persist-memory` changes from false to true, NexusAI loads the file before any save. For a character that is in the file, the lines on disk replace lines said while persistence was off. A character that is only in memory stays. Later reloads do not read the file again. Turning persistence off and then on keeps the in-memory transcript, and the next save writes that transcript, including over a hand edit. A hand edit of `dialogue-memory.yml` while the server is running is overwritten by the next save, the same as in 1.1.1. A save does not write the file until that first load has finished.
 
 `dialogue.summary.enabled` defaults to false. While it is false, `/nai talk` requests and `dialogue-memory.yml` stay as they were in 1.0.2: lines outside the window are dropped. While it is true, those lines wait until `dialogue.summary.threshold-turns` player lines have dropped, then one model call folds them with the previous summary. The new summary is at most `dialogue.summary.max-chars` and is wrapped as player input in the character system prompt, after the character sheet and ahead of the format instruction. A context block for that prompt is inserted after the summary and still before the format instruction. The recent window is unchanged. Each summary is a separate request. Once the window is full, that is about one extra request for every `threshold-turns` player lines. A refused summary (rate limit, provider pause, queue backoff, exhausted daily cap, error, timeout, or empty or rejected text) drops the waiting lines and keeps the previous summary. The waiting lines are not saved. A restart before the call trims them. With `persist-memory: true` and summaries on, the file stores `summary` and `summary-updated` and `format: 2`. The first time that rewrite replaces a file that is not format 2, NexusAI copies it to `dialogue-memory.yml.bak` (or `dialogue-memory.yml.bak.<timestamp>` when that backup exists) and does not write another backup on later saves. The save writes a temporary file and then moves it into place. `dialogue.summary` is global, like `persist-memory`. The summary prompt is not configurable. `provider` and `model` together pin that one call and do not move either round-robin position; leave either blank and the summary uses the model queue. An unpinned summary has its own round-robin position, so it does not move the position that player replies use. A new `dialogue-memory.yml` is created as mode `0600` on a POSIX file system. A save of a file that already exists copies that file's mode and, when the process may, its owner, onto the temporary file before the move. `max-tokens` applies only to the summary call, and `0` or a negative value omits the field.
 
@@ -319,11 +330,27 @@ Actions are fixed commands the model may choose by name. `actions.enabled` defau
       permission: nexusai.action.give_iron
 ```
 
-`as` is `player` (the default) or `console`. The model cannot add arguments. `{player}` and `{uuid}` are the only tokens filled in, and the player name must match `[A-Za-z0-9_.]{1,32}` or the action is refused. A newline in the command is refused. Permission, cooldown, and the daily cap are checked before the command runs. A refusal is passed back to the character so it can say why. The command itself runs on the global region scheduler (`console`) or the player's entity scheduler (`player`).
+`as` is `player` (the default) or `console`. The model cannot add arguments. `{player}` and `{uuid}` are the only tokens filled in, and the player name must match `[A-Za-z0-9_.]{1,32}` or the action is refused. A newline in the command is refused. Permission, cooldown, and the daily cap are checked before the command runs. A refusal is passed back to the character so it can say why. The command itself runs on the global region scheduler (`console`) or the player's entity scheduler (`player`). `NexusActionEvent` is fired on that same thread before the command. Cancelling it tells the model `refused: blocked by server` and does not spend the cooldown or the daily counter. If the action task starts after the 5 second wait, the event is not fired and the command does not run.
 
-`actions.max-per-reply` (default 1) is how many actions from one model reply may run. Every attempt is written to the server log as `action player=… character=… action=… result=…`. `actions.log` defaults to true. When it is true, the same line is appended to `plugins/NexusAI/actions.log`.
+`actions.max-per-reply` (default 1) is how many actions from one model reply may run. Every attempt is written to the server log as `action player=… character=… action=… result=…`. `actions.log` defaults to true. When it is true, the same line is appended to `plugins/NexusAI/actions.log`. On POSIX that file is mode `0600` when created and after each append.
 
 A console action runs as the server. The model only picks the moment. Put a cooldown and a daily limit on anything that gives items, money, or permissions. An action is not a safe place for a command whose arguments should change.
+
+## Events
+
+Other plugins can listen for generation, character actions, and moderation flags. The classes are in `io.github.neareststep.nexusai.api.event`. With no listeners registered, a request does the same work it did before, apart from the action timeout fix above. `API_VERSION` stays 3.
+
+One real model call fires `NexusPreGenerateEvent`, then zero or more `NexusProviderErrorEvent`, then exactly one of `NexusPostGenerateEvent` or `NexusGenerateFailEvent`. A cache hit, an in-flight join, and a pooled answer do not fire those events. Moderation does not fire them either. A placeholder, `/nai talk` (including a greeting), a pool refill, prewarm, `/nai test`, and a dialogue summary that is refused by a limit, a quota, or a pause fires neither Pre nor Fail. Fail without Pre is allowed only for an API call, and an API call fires Fail for every failure, including one that never reached HTTP. Pre is after admission and before the first HTTP attempt. Post carries the cleaned text and is fired before that text is written to the cache or the future is completed. Cancelling Pre skips HTTP, releases the quota reservation, and completes as `CANCELLED`.
+
+Those four events, plus `NexusProviderErrorEvent` and `NexusModerationFlagEvent`, are asynchronous. They run on a `nexusai-http-*` thread or an `HttpClient` thread, never on a region thread. A handler that blocks holds that worker. `NexusActionEvent` is synchronous on the thread that is about to run the command. On Paper that thread is the main thread, so a listener sees `Bukkit.isPrimaryThread()` as true. A player action on Folia must also see `Bukkit.isOwnedByCurrentRegion(player)`. Folia smoke checks that ownership. `NexusProviderErrorEvent` also fires for a failed moderation HTTP attempt. `NexusModerationFlagEvent` fires after the moderation log line and before the staff notice.
+
+The order, the threads, and a listener example are in [docs/api.md](docs/api.md). Handlers must be fast. A call slower than 50 ms logs one warning per event class per five minutes, with the listener plugin names.
+
+## Structured JSON
+
+`NexusAIApi.generateJson` asks the model for one JSON object and checks it against a `JsonSchema` before the future succeeds. The schema is a subset: objects, arrays, strings, integers, numbers, booleans, null, `properties`, `required`, `additionalProperties` as true or false, `items`, `enum`, and length or numeric bounds. The root must be an object. A schema larger than 16 KiB, deeper than 5, or with more than 100 properties is rejected, as is any other keyword.
+
+`providers.<id>.structured-output` is optional. Leave it unset for `auto`. The other values are `json-schema`, `json-object`, and `prompt`. `auto` sends `response_format` `json_schema` first. If that provider answers HTTP 400 or 422 and the error names `response_format`, `json_schema`, or `json_object`, the same call is sent as `json_object`, then as a system instruction only. The lower mode is remembered for that provider and model until `/nai reload`. One reply that does not match the schema is retried once on the same model. That retry does not fire a second `NexusPreGenerateEvent`. Values still have to be checked before they go into a command, a name, or a path. The call, the result fields, and a quest example are in [docs/api.md](docs/api.md).
 
 ## Language files
 
@@ -343,7 +370,21 @@ guide:
     - rules
 ```
 
-`lore.md` (or `lore.txt` when no `.md` is present) and `rules` are concatenated into the system message inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`, after the admin system prompt and before the format instruction. When the request contains wrapped player input, the player-input guard stays last. `knowledge.max-chars` in `config.yml` caps one request. `knowledge.max-file-chars` caps one file. Truncation logs one warning. An unknown name logs a warning when prompts are loaded. `/nai reload` reads the folder again. The cache key includes a hash of the injected text, so editing a file changes the cached answer. There is no vector search and no embeddings.
+`lore.md` (or `lore.txt` when no `.md` is present) and `rules` are concatenated into the system message inside `----- KNOWLEDGE -----` … `----- END KNOWLEDGE -----`, after the admin system prompt and before the format instruction. When the request contains wrapped player input, the player-input guard stays last. `knowledge.max-chars` in `config.yml` caps one request. `knowledge.max-file-chars` caps one file in `full` mode. Truncation logs one warning, and in `full` mode that warning is only for a file a `full` prompt actually lists. An unknown name logs a warning when prompts are loaded. `/nai reload` reads the folder again and rebuilds the keyword index. The cache key includes a hash of the injected text, so a different selection is a different cached answer. There is no vector search and no embeddings.
+
+`knowledge.select` defaults to `full`, which is the behaviour above. `keywords` sends only paragraphs that match the request. A prompt may set `knowledge-select` (`full` or `keywords`) and `knowledge-keywords` (words always added to the query, including words that are also stop words). Those keys are optional and are not written into an existing `prompts.yml`.
+
+A paragraph is the text between blank lines. A line that starts with `#` is a section heading: it is not sent as its own paragraph, and its words count toward every paragraph in that section. `<!-- keywords: ban, mute -->` inside a paragraph, or in the blank-line block just before it, adds words for that paragraph. In `keywords` mode every `<!-- ... -->` comment is removed before the text is sent. In `full` mode the file is sent as written, including comments, so do not leave secrets in comments. A paragraph longer than `knowledge.keywords.max-paragraph-chars` is cut at a sentence end. The block is still capped by `knowledge.max-chars`.
+
+`knowledge.keywords.max-file-chars` caps a file only in `keywords` mode (default 200000). `on-no-match` is `none` (no block) or `first` (the first paragraph of each listed file). `min-matches` is how many query words a paragraph needs. `stop-words` adds words to the built-in English and Russian lists. Matching is exact, or a shared 5-character prefix for words of length 5 or more (`правила` / `правилам`, `teleport` / `teleporting`). There is no stemming dictionary. Chinese, Japanese, and Korean runs are matched as adjacent character pairs.
+
+`/nai talk` attaches that block only when the character's effective mode is `keywords`. It is placed after the summary and before the context block and the format instruction. The player-input guard stays last. The query is the current player line, the previous player line, and `knowledge-keywords`. A greeting uses only `knowledge-keywords`. A character that lists knowledge while the mode is `full` behaves as before, and one info line at load names those characters. Placeholders, the pool, prewarm, and `/nai test` use the resolved prompt text plus `knowledge-keywords`. `GenerationRequest.knowledgeQuery` replaces that prompt text for `generate` and `generateJson`. The context block is not part of the query.
+
+`/nai test` prints `command.test-knowledge` before the request when the prompt lists knowledge, for example `Knowledge: rules#3, faq#1 (keywords)` or `Knowledge: rules, faq (full)`.
+
+Keyword selection runs on the thread that already calls `KnowledgeComposer.prepare`. For a placeholder that is the caller's thread. For `generate` and `generateJson` it is a NexusAI thread. The selection was left on that thread. No load measurement showed it missing the MSPT budget.
+
+Break long files into paragraphs. One paragraph for the whole file is still one candidate, cut at `max-paragraph-chars`.
 
 ## Chat moderation
 
@@ -353,7 +394,7 @@ When it is on, a public chat line is still delivered immediately. The plugin doe
 
 The model must answer with one JSON object: `flagged` (true or false), `category` (`toxicity`, `insult`, `veiled insult`, `harassment`, `spam`, or `none`), and a short `reason`. A markdown fence or a sentence around the object is accepted. A reply that is not that object is treated as not flagged, and the server log records that at FINE.
 
-A flagged line notifies every online player with `nexusai.moderation.notify` and is appended to `plugins/NexusAI/moderation.log`. The notice contains the player, the message, the category, and the reason. The helper does not punish, mute, kick, ban, or run a command. There is no `moderation.command-on-flag` setting.
+A flagged line notifies every online player with `nexusai.moderation.notify` and is appended to `plugins/NexusAI/moderation.log`. On POSIX that file is mode `0600` when created and after each append. The notice contains the player, the message, the category, and the reason. The helper does not punish, mute, kick, ban, or run a command. There is no `moderation.command-on-flag` setting.
 
 `nexusai.moderation.bypass` skips the check. Messages shorter than `moderation.min-length` (trimmed) are ignored. `moderation.max-checks-per-minute` is a server-wide cap. `moderation.player-cooldown-seconds` is the gap before the same player is checked again (`0` disables that gap). Each check that is actually sent spends the selected model-queue row's `daily-request-limit` in `usage.yml`. A row with no daily limit is not capped that way. `/nai status` shows whether moderation is on and how many checks and flags were recorded today. Those two counters live in `usage.yml` and reset at server-local midnight.
 
@@ -366,6 +407,47 @@ NexusAI does not send analytics, metrics, or usage data. The build has no bStats
 The only outbound HTTP is `POST /chat/completions` on a base URL from `providers` (or the legacy `api.base-url` / provider default). The admin sets that URL. Placeholders, the pool, prewarm, `/nai test`, and `/nai talk` use that request. A talk request may include the action tool list. Running an action is a local command.
 
 When `moderation.enabled` is true, each checked public chat line is sent to the moderation provider as the same kind of request. The message body is included. The player name is not. When moderation is off, chat is not sent. A local base URL such as Ollama or LM Studio (`http://localhost:11434/v1`) keeps that request on the machine. A remote provider receives the text of every checked message.
+
+## Token usage and quotas
+
+Every request that reaches HTTP is counted in memory and saved to `plugins/NexusAI/token-usage.yml`. That file is separate from `usage.yml`, which still stores daily request caps. Counts reset at server-local midnight. A missing `usage` object is estimated as about one token per four characters when `quotas.missing-usage` is `estimate` (the default). `ignore` skips that response. The estimate is rough for Cyrillic and CJK text, because those characters are not one token each.
+
+`quotas.enabled` defaults to false. Counters still move, and `/nai status` and `/nai usage` can show them. No request is rejected for a token cap while quotas are off. `limits.*` is unchanged.
+
+When quotas are on, a call is admitted only when `spent + reserved` is still below every cap that applies. The reservation is `ceil(characters / 4)` of the text that will be sent, plus `max_tokens`. If that field is left unset, the reserve uses 1024, and a reasoning model reserves at least 2048. The reservation is released when the call succeeds, fails, or is cancelled. The ledger then stores the provider's real usage, so the next check sees what was spent. One call that is already in flight can finish above the cap. Later calls wait until midnight. A rejected call does not pause a provider, does not start prompt backoff, and does not cool a queue row.
+
+Caps, all daily, and `0` means no cap:
+
+- `quotas.server-tokens-per-day` applies to every origin, including moderation.
+- `quotas.player-tokens-per-day` applies to a player who has none of the groups below. Player slices are placeholders, `/nai talk`, greetings, dialogue summaries, and API calls made for that player. Moderation, the pool, prewarm, and `/nai test` do not spend a player cap.
+- `quotas.groups.<name>` applies when the player has `nexusai.quota.<name>`. That node is not registered in `plugin.yml`. The most generous matching group wins, separately for tokens and for requests. A `0` on one field beats every positive number. `requests-per-day` on a group replaces `limits.player-requests-per-day` for that player. The per-minute limit stays. The permission is read on the thread that owns the player and remembered for 60 seconds. Reload and quit clear it.
+- `quotas.consumers.<plugin>` applies only to `NexusAIApi.generate` for that plugin's `Plugin.getName()`. `consumers.default` is used by each plugin that has no row of its own. It is not one shared pot.
+- `daily-token-limit` on a `model-queue` row is optional and is not written into an existing `config.yml`. The row is skipped until midnight once spent and reserved tokens reach it, the same way `daily-request-limit` skips a row. A fallback model with the same provider and model shares that row. If every row is out of tokens, the call fails locally. A daily request cap on the queue is still the existing local limit.
+
+`/nai talk` answers a quota rejection with `talk.quota` (`Your AI limit for today is used up.`). That line is not stored in the dialogue. `NexusAIApi.generate` completes with `NexusErrorKind.QUOTA_EXCEEDED` and does not call HTTP. `NexusAIApi.quota(plugin)` returns today's tokens and requests for that plugin, with empty limits when quotas are off or that consumer has no cap. It reads memory on any thread. `API_VERSION` stays 3.
+
+The first time each cap is reached on a day, one info line is logged: `Token quota reached: server 200000/200000`. A player or plugin line includes the name and not the request text. Configured secrets are masked.
+
+Placeholders, resolved for the viewer and never by starting a request:
+
+```
+%ainexus_usage_server_tokens%
+%ainexus_usage_server_limit%
+%ainexus_usage_server_remaining%
+%ainexus_usage_server_percent%
+%ainexus_usage_server_requests%
+%ainexus_usage_player_tokens%
+%ainexus_usage_player_limit%
+%ainexus_usage_player_remaining%
+%ainexus_usage_player_percent%
+%ainexus_usage_player_requests%
+%ainexus_usage_consumer_tokens_<plugin>%
+%ainexus_usage_consumer_requests_<plugin>%
+```
+
+Token and request counts are shown even when quotas are off. Limit, remaining, and percent are empty when quotas are off or that cap is 0. Remaining is `max(0, limit - spent)` and does not subtract in-flight reservations. Percent is 0–100. Without a player, every `usage_player_*` value is empty. An unknown `usage_*` name is empty.
+
+`/nai usage` prints the same numbers. See [Commands](#commands).
 
 ## Placeholders
 
@@ -396,7 +478,21 @@ welcome:
 
 `prompt` may be a string, a block scalar (`|`), or a list of lines. A list is joined with newlines. `{biome}` is replaced before the request. `%player_biome%` is resolved for the player who is looking. The cache and the pool use that finished text, so a player in a plains biome never sees a desert player's answer. `welcome` is not prewarmed and is not filled on startup, because the value depends on the player. `survival_tips` has no player-specific vars, so every viewer shares one cache entry.
 
-If the id is missing from `prompts.yml`, the placeholder text is sent as a literal prompt, same as before.
+A `vars:` value that contains `%` is resolved only on the thread that owns the player. The synchronous placeholder call does not wait for a hop. A read off the main thread on Paper (a scoreboard, or another plugin's async task) can leave those `%` variables empty in that immediate result. The cached or background answer is resolved on the owning thread, and so is a pool refill. A later read from a thread that does not own the player returns that cached answer. A `vars:` value that contains `%` is still not resolved on the calling thread. `generate` and `/nai talk` already read after an ownership check or a hop. A foreign PlaceholderAPI expansion used from `vars:` is called on that owning thread. After the call, the expansion author's own behaviour applies. NexusAI does not make a third-party expansion safe on Folia.
+
+If the id is missing from `prompts.yml` and no plugin has registered it, the placeholder text is sent as a literal prompt, same as before.
+
+A plugin registers its own prompt with `NexusAIApi.registerPrompt(plugin, localId, definition)`. The id is `namespace:localId`. The namespace is the plugin name in lower case, and any character outside `[a-z0-9_-]` becomes `_` (`My Plugin` and `my_plugin` are the same namespace). `localId` matches `[a-z0-9_-]{1,64}`. The same plugin may register that id again to replace it. A second plugin with the same namespace gets `IllegalStateException` naming both plugins. The prompt is not written to a file. `NexusAIApi.generate`, `%ainexus_cached_<id>%`, and `/nai test <id>` can use it. `/nai reload` keeps it. Disabling the owner plugin removes it.
+
+A code prompt cannot set `actions`, `dialogue`, or `context`, and its `vars` are plain defaults (a `%` placeholder is rejected). An admin overrides that id in `prompts.yml`. Quote a key that contains a colon:
+
+```yaml
+"quests:intro":
+  prompt: "Use the server's intro instead."
+  context: all
+```
+
+The file entry replaces the whole prompt, so it can add `actions`, `dialogue`, and `context`. A schema stored on the code prompt stays the code schema. Removing the file entry reveals the code prompt again, without a reload of the plugin.
 
 `pool.entries[].prompt` and `prewarm.prompts` accept the same id:
 
@@ -415,7 +511,7 @@ Optional keys on a prompt: `ttl` (cache seconds), `fallback`, `max-prompt-length
 
 HTTP 401 and 403 are reported as an invalid or unauthorized key. HTTP 429 is reported as a provider rate limit. The words "provider paused" are used only when requests to that provider are actually paused. `/nai test` does not start that pause.
 
-`/nai reload` reads `prompts.yml` again. `/nai prompts` prints the ids. The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded.
+`/nai reload` reads `prompts.yml` again and does not drop prompts registered from code. `/nai prompts` prints the file ids, then one line of registered prompts with the plugin name (`quests:intro (Quests)`). The file is created on first run and is not overwritten after that. A syntax error on startup disables named prompts from the file and leaves literal placeholders working. A syntax error on `/nai reload` keeps the prompts already loaded. Registered prompts stay either way.
 
 ### Unique answers (pool)
 
@@ -488,7 +584,7 @@ shop_tip:
 
 Register with Bukkit's services manager (`softdepend: [NexusAI]`, compile against the NexusAI jar). `NexusAIApi.registerContextProvider` is the same registry. `ServicePriority` does not set the order. Order is `priority()` (lower first), then `id()`. The id matches `[a-z0-9_]{1,32}`. A duplicate id keeps the first plugin and logs one warning. An invalid id is ignored. Disabling the owner plugin removes its provider from `/nai status` without `/nai reload`. The registry itself survives reload.
 
-`provide()` runs on `nexusai-context-N` (2 daemon threads, queue of 256). It is never called on the main thread. Return a future immediately. If the call is still running when its timeout expires, NexusAI interrupts that thread. A provider that blocks, including one that sleeps, should stop when it is interrupted. The timed-out value is skipped. A full queue skips the provider. Each provider is limited to `min(provider.timeout(), context.max-provider-timeout-millis)` (default ceiling 200 ms, provider default 100 ms). The whole collect is limited to `context.total-timeout-millis` (300 ms). A timeout or an exception skips that provider. The collect does not fail the request. After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is suspended for `context.suspend-seconds` (60) and `/nai status` shows `suspended until`. `ContextRequest` has no `Player`. Read Bukkit state on the main thread (event or sync timer) into your own map, and return that map from `provide()`.
+`provide()` runs on `nexusai-context-N` (2 daemon threads, queue of 256). It is never called on the main thread on Paper or on a region thread on Folia. Return a future immediately. If the call is still running when its timeout expires, NexusAI interrupts that thread. A provider that blocks, including one that sleeps, should stop when it is interrupted. The timed-out value is skipped. A full queue skips the provider. Each provider is limited to `min(provider.timeout(), context.max-provider-timeout-millis)` (default ceiling 200 ms, provider default 100 ms). The whole collect is limited to `context.total-timeout-millis` (300 ms). A timeout or an exception skips that provider. The collect does not fail the request. After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is suspended for `context.suspend-seconds` (60) and `/nai status` shows `suspended until`. `ContextRequest` has no `Player`. Read Bukkit state on the main thread on Paper, or on the region owner's thread on Folia, into your own map, and return that map from `provide()`.
 
 Each value is untrusted. NexusAI always removes `§`, legacy `&` codes, hex, MiniMessage, and JSON click/hover components, even when `sanitize.allow-markup` is true. Newlines become spaces. The line is cut to `context.max-chars-per-provider` on a code point, then `…`. Lines are `id: value`, highest priority first. Lines that do not fit in `context.max-chars` are dropped whole, from the end. The block is wrapped in `§§§ PLAYER INPUT §§§` … `§§§ END §§§`, so the player-input guard is sent. For `cached_`, the block is appended to the user prompt (`Player context:` plus the wrapped block) and is part of the cache key. For `/nai talk`, it is inserted in the character system after the sheet and after a stored dialogue summary, and still before the format instruction. Values are not logged.
 
@@ -513,6 +609,7 @@ package io.github.neareststep.nexusai.context;
 import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.api.NexusContextProvider;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -528,14 +625,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Example context provider. A sync timer on the main thread reads online balances into a map.
- * {@link #provide} only returns that map and does not touch Bukkit.
+ * Example context provider. A global-region timer reads online balances into a map.
+ * On Paper that timer is the main thread. On Folia each balance is read on the region
+ * owner's thread. {@link #provide} only returns that map and does not touch Bukkit.
  * Vault is optional: {@code Economy#getBalance} is called by reflection when the plugin is installed.
  * Compile this class against the NexusAI jar ({@code compileOnly}). Register with {@code softdepend: [NexusAI]}.
  */
 public final class ExampleBalanceProvider implements NexusContextProvider, Listener {
 
     private final ConcurrentHashMap<UUID, String> balances = new ConcurrentHashMap<>();
+    private Plugin owner;
+    private ScheduledTask refreshTask;
 
     @Override
     public String id() {
@@ -561,14 +661,18 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     public void register(Plugin plugin) {
+        this.owner = plugin;
         Bukkit.getServicesManager().register(NexusContextProvider.class, this, plugin, ServicePriority.Normal);
         Bukkit.getPluginManager().registerEvents(this, plugin);
-        Bukkit.getScheduler().runTaskTimer(plugin, this::refresh, 100L, 100L);
+        this.refreshTask = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, task -> refresh(), 100L, 100L);
     }
 
     public void shutdown(Plugin plugin) {
         Bukkit.getServicesManager().unregister(NexusContextProvider.class, this);
-        Bukkit.getScheduler().cancelTasks(plugin);
+        if (refreshTask != null) {
+            refreshTask.cancel();
+            refreshTask = null;
+        }
     }
 
     @EventHandler
@@ -587,9 +691,16 @@ public final class ExampleBalanceProvider implements NexusContextProvider, Liste
     }
 
     private void refresh() {
+        Plugin plugin = owner;
+        if (plugin == null) {
+            return;
+        }
         Object economy = economy();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            remember(player.getUniqueId(), balance(economy, player));
+            if (player == null) {
+                continue;
+            }
+            player.getScheduler().run(plugin, task -> remember(player.getUniqueId(), balance(economy, player)), null);
         }
     }
 
@@ -648,7 +759,7 @@ The player-input boundary and the output filter reduce prompt-injection risk. Th
 
 ## FAQ
 
-Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, and dialogue summaries. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md). Copy-paste configs are in [examples/](examples/README.md).
+Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md) and [Migration to 1.2.0](docs/migration-1.2.0.md). Copy-paste configs are in [examples/](examples/README.md).
 
 ## Build
 
@@ -679,6 +790,7 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `ContextRegistry` / `ContextService` / `ContextSnapshots` — context providers, timeouts, and the `cached_` snapshot used in the cache key
 - `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. Those calls use the Paper region scheduler on Paper and Purpur.
 - `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
+- `api.event` / `EventDispatcher` — Bukkit events for a real model call, a character action, and a moderation flag. An event object is created only when that event has listeners.
 - `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
 
 ## License

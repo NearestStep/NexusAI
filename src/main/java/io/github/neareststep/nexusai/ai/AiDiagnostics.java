@@ -51,12 +51,12 @@ public final class AiDiagnostics {
      * @param paused {@code true} only when this failure actually paused requests to the provider
      */
     public void report(AiErrorKind kind, String detail, boolean paused) {
-        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED
-                || kind == AiErrorKind.MARKUP_ONLY) {
+        if (kind == null || kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.LOCAL_QUOTA
+                || kind == AiErrorKind.REJECTED || kind == AiErrorKind.MARKUP_ONLY) {
             return;
         }
         Iterable<String> known = secrets.get();
-        String message = SecretMask.redact(format(kind, detail, paused), known == null ? List.of() : known);
+        String message = SecretMask.redactUrl(format(kind, detail, paused), known == null ? List.of() : known);
         // One pool refill finishes on several threads at once. The cooldown and the
         // logged text have to be decided together, or each thread writes the same line.
         synchronized (logGate) {
@@ -87,6 +87,7 @@ public final class AiDiagnostics {
             case UNKNOWN_MODEL -> "AI provider does not recognize the configured model.";
             case TIMEOUT -> "AI provider request timed out.";
             case LOCAL_LIMIT -> "Local rate limit reached.";
+            case LOCAL_QUOTA -> "Local quota reached.";
             case REJECTED -> "AI answer rejected.";
             case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case MARKUP_ONLY -> PlayerInput.MARKUP_ONLY;

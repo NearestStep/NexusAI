@@ -1,12 +1,18 @@
 package io.github.neareststep.nexusai.pool;
 
+import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.AiRequestException;
+import io.github.neareststep.nexusai.ai.CallTrace;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.PoolEntry;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.placeholder.VarSubstitutor;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
@@ -205,11 +211,17 @@ public final class PoolService {
                 return;
             }
             String httpPrompt = VarSubstitutor.appendVarsRules(poolKey, entry.vars());
-            GenerationOverrides overrides = overridesFor(configuredPrompt).withNoticeId(configuredPrompt);
-            CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides);
+            GenerationOverrides overrides = overridesFor(configuredPrompt, poolKey).withNoticeId(configuredPrompt);
+            CallTrace trace = CallTrace.start(
+                    RequestOrigin.POOL, null, configuredPrompt == null ? "" : configuredPrompt, "");
+            CompletableFuture<String> job = httpClient.generateFreshAsync(httpPrompt, poolKey, overrides, trace);
             if (!job.isDone()) {
                 int left = remaining - 1;
                 job.whenComplete((answer, error) -> {
+                    if (quotaBlocked(error)) {
+                        pauseForQuota(configuredPrompt, poolKey, memory);
+                        return;
+                    }
                     acceptFill(memory, entry, duplicates, storedUnique, answer, error);
                     fillOne(configuredPrompt, poolKey, memory, entry, left, duplicates, storedUnique);
                 });
@@ -223,12 +235,28 @@ public final class PoolService {
                 } catch (CompletionException e) {
                     error = e;
                 }
+                if (quotaBlocked(error)) {
+                    pauseForQuota(configuredPrompt, poolKey, memory);
+                    return;
+                }
                 acceptFill(memory, entry, duplicates, storedUnique, null, error);
             } else {
                 acceptFill(memory, entry, duplicates, storedUnique, job.join(), null);
             }
             remaining--;
         }
+    }
+
+    /** A quota refusal stops this wave and waits a minute instead of spinning. */
+    private void pauseForQuota(String configuredPrompt, String poolKey, String memory) {
+        AtomicBoolean flag = replenishing.computeIfAbsent(memory, ignored -> new AtomicBoolean(false));
+        flag.set(false);
+        scheduleRetry(configuredPrompt, poolKey, 60_000L);
+    }
+
+    private static boolean quotaBlocked(Throwable error) {
+        AiRequestException typed = AiErrors.find(error);
+        return typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA;
     }
 
     private void acceptFill(
@@ -311,7 +339,7 @@ public final class PoolService {
         return false;
     }
 
-    private GenerationOverrides overridesFor(String configuredPrompt) {
+    private GenerationOverrides overridesFor(String configuredPrompt, String rendered) {
         PoolEntry entry = entriesByPrompt.get(configuredPrompt);
         GenerationOverrides entryOverrides = entry == null ? GenerationOverrides.none() : entry.overrides();
         NamedPrompt named = catalog.find(configuredPrompt).orElse(null);
@@ -329,7 +357,8 @@ public final class PoolService {
                 merged,
                 config.getSystemPrompt(),
                 knowledge,
-                named == null ? List.of() : named.knowledge()
+                named == null ? List.of() : named.knowledge(),
+                KnowledgeRequests.of(named, config.knowledgeSelect(), rendered)
         ).overrides();
     }
 

@@ -1,10 +1,13 @@
 package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.ai.AiErrorKind;
+import io.github.neareststep.nexusai.ai.CallTrace;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.ai.AiErrors;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.event.GenerationEvents;
 import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.time.ZoneId;
@@ -151,7 +154,17 @@ public final class DialogueEngine {
                 profile.leaveRadius(settings.leaveRadius()),
                 request.nowMillis()
         );
-        String greeting = greeting(request);
+        String greeting;
+        try {
+            greeting = greeting(request);
+        } catch (RuntimeException error) {
+            AiRequestException typed = AiErrors.find(error);
+            if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+                sessions.close(request.playerId());
+                return TalkResult.of(TalkCode.QUOTA, request.characterId());
+            }
+            throw error;
+        }
         remember(request, "assistant", greeting);
         foldIfNeeded(request);
         return TalkResult.text(TalkCode.STARTED, request.characterId(), greeting);
@@ -205,6 +218,7 @@ public final class DialogueEngine {
         trimWindow(messages, request.profile().memoryTurns(request.settings().memoryTurns()), request.settings().memoryMaxChars());
         List<CharacterAction> tools = offeredTools(request);
         String system = systemFor(request);
+        CallTrace trace = CallTrace.start(RequestOrigin.TALK, request.playerId(), characterId(request), "");
         ModelReply first;
         try {
             first = model.complete(new ModelCall(
@@ -214,14 +228,16 @@ public final class DialogueEngine {
                     noticed(request),
                     request.formatId(),
                     request.playerId(),
-                    wrapped
+                    wrapped,
+                    trace
             ));
         } catch (RuntimeException e) {
+            GenerationEvents.failIfNeeded(trace, e);
             return failure(request, e);
         }
         String spoken = first.text();
         if (!tools.isEmpty() && !first.toolsUnsupported() && !first.toolNames().isEmpty()) {
-            String note = runTools(request, first.toolNames(), tools);
+            String note = runTools(request, first.toolNames(), tools, trace.requestId());
             List<DialogueProtocol.MemoryLine> follow = new ArrayList<>(messages);
             if (spoken != null && !spoken.isBlank()) {
                 follow.add(new DialogueProtocol.MemoryLine("assistant", spoken));
@@ -234,15 +250,20 @@ public final class DialogueEngine {
                         noticed(request),
                         request.formatId(),
                         request.playerId(),
-                        wrapped
+                        wrapped,
+                        trace
                 ));
                 spoken = second.text();
             } catch (RuntimeException e) {
+                GenerationEvents.failIfNeeded(trace, e);
                 return failure(request, e);
             }
         }
         if (spoken == null || spoken.isBlank()) {
+            GenerationEvents.failIfNeeded(trace, new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null));
             spoken = request.fallback();
+        } else {
+            GenerationEvents.postText(trace, spoken);
         }
         remember(request, "user", sanitized);
         remember(request, "assistant", spoken);
@@ -265,6 +286,9 @@ public final class DialogueEngine {
                 || typed.kind() == AiErrorKind.MARKUP_ONLY)) {
             return TalkResult.text(TalkCode.REPLY, request.characterId(), request.fallback());
         }
+        if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+            return TalkResult.of(TalkCode.QUOTA, request.characterId());
+        }
         String detail = typed != null && typed.getMessage() != null ? typed.getMessage() : error.getMessage();
         if (shouldLogFailure(typed, detail)) {
             logProviderFailure(detail);
@@ -282,6 +306,9 @@ public final class DialogueEngine {
      * line was not sent.
      */
     private static boolean shouldLogFailure(AiRequestException typed, String detail) {
+        if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+            return false;
+        }
         if (typed == null || typed.kind() != AiErrorKind.LOCAL_LIMIT) {
             return true;
         }
@@ -303,12 +330,19 @@ public final class DialogueEngine {
             return;
         }
         List<String> known = secrets == null || secrets.get() == null ? List.of() : secrets.get();
-        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redact(detail, known));
+        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redactUrl(detail, known));
     }
 
     /**
      * Length-trim notices key on the persona, not the rendered character sheet.
      */
+    private static String characterId(TalkRequest request) {
+        if (request == null || request.characterId() == null) {
+            return "";
+        }
+        return request.characterId().trim();
+    }
+
     private static GenerationOverrides noticed(TalkRequest request) {
         String persona = request.characterId();
         if (persona == null || persona.isBlank()) {
@@ -328,6 +362,7 @@ public final class DialogueEngine {
                 return cached;
             }
         }
+        CallTrace trace = CallTrace.start(RequestOrigin.TALK_GREETING, request.playerId(), characterId(request), "");
         ModelReply reply;
         try {
             reply = model.complete(new ModelCall(
@@ -337,12 +372,23 @@ public final class DialogueEngine {
                     noticed(request),
                     request.formatId(),
                     request.playerId(),
-                    ""
+                    "",
+                    trace
             ));
         } catch (RuntimeException e) {
+            GenerationEvents.failIfNeeded(trace, e);
+            AiRequestException typed = AiErrors.find(e);
+            if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
+                throw e;
+            }
             return request.fallback();
         }
         String text = reply.text() == null || reply.text().isBlank() ? request.fallback() : reply.text();
+        if (reply.text() == null || reply.text().isBlank()) {
+            GenerationEvents.failIfNeeded(trace, new AiRequestException(AiErrorKind.EMPTY_REPLY, 0, PlayerInput.EMPTY_REPLY, null));
+        } else {
+            GenerationEvents.postText(trace, text);
+        }
         if (request.settings().cacheGreeting()) {
             greetings.put(cacheKey, text, request.nowMillis(), request.settings().greetingCacheSeconds() * 1000L);
         }
@@ -356,7 +402,7 @@ public final class DialogueEngine {
         return request.actions();
     }
 
-    private String runTools(TalkRequest request, List<String> names, List<CharacterAction> defined) {
+    private String runTools(TalkRequest request, List<String> names, List<CharacterAction> defined, long requestId) {
         StringBuilder note = new StringBuilder(
                 "Server action results. Tell the player in character. Do not invent actions or claim one ran when it was refused.");
         int ran = 0;
@@ -392,7 +438,7 @@ public final class DialogueEngine {
             }
             String result;
             try {
-                result = sink.run(request.playerId(), action, command);
+                result = sink.run(request.playerId(), action, command, requestId, request.characterId());
             } catch (RuntimeException e) {
                 result = "failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             }
@@ -550,6 +596,13 @@ public final class DialogueEngine {
 
     public interface ActionSink {
         String run(UUID playerId, CharacterAction action, String command);
+
+        /**
+         * The talk turn and character this command belongs to. The three-argument form is the default.
+         */
+        default String run(UUID playerId, CharacterAction action, String command, long requestId, String characterId) {
+            return run(playerId, action, command);
+        }
     }
 
     public enum CallKind {
@@ -567,7 +620,8 @@ public final class DialogueEngine {
             String wrappedUser,
             CallKind kind,
             String pinProvider,
-            String pinModel
+            String pinModel,
+            CallTrace trace
     ) {
         public ModelCall(
                 String system,
@@ -578,13 +632,45 @@ public final class DialogueEngine {
                 UUID playerId,
                 String wrappedUser
         ) {
-            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "");
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "", null);
+        }
+
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser,
+                CallTrace trace
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, CallKind.DIALOGUE, "", "", trace);
+        }
+
+        public ModelCall(
+                String system,
+                List<DialogueProtocol.MemoryLine> messages,
+                List<CharacterAction> tools,
+                GenerationOverrides overrides,
+                String formatId,
+                UUID playerId,
+                String wrappedUser,
+                CallKind kind,
+                String pinProvider,
+                String pinModel
+        ) {
+            this(system, messages, tools, overrides, formatId, playerId, wrappedUser, kind, pinProvider, pinModel, null);
         }
 
         public ModelCall {
             kind = kind == null ? CallKind.DIALOGUE : kind;
             pinProvider = pinProvider == null ? "" : pinProvider;
             pinModel = pinModel == null ? "" : pinModel;
+            if (trace == null) {
+                RequestOrigin origin = kind == CallKind.SUMMARY ? RequestOrigin.SUMMARY : RequestOrigin.TALK;
+                trace = CallTrace.start(origin, playerId, "", "");
+            }
         }
 
         public boolean summaryPinned() {

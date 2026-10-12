@@ -4,9 +4,11 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionRequest;
 import io.github.neareststep.nexusai.ai.dto.ChatCompletionResponse;
+import io.github.neareststep.nexusai.ai.dto.UsageJson;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -94,14 +96,17 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         // Kept so the constructor argument stays part of the call path for callers that still pass a pool.
         Objects.requireNonNull(executor, "executor");
         return gate.schedule(() -> exchangeAsync(
-                prompt, effective, config.getBaseUrl(), config.getApiKey(), null, true
+                prompt, effective, config.getBaseUrl(), config.getApiKey(), null, true, null
         ).thenApply(ChatExchange::text));
     }
 
     public static ChatCompletionRequest buildBody(PluginConfig config, String prompt, GenerationOverrides overrides) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        boolean json = StructuredOutputSupport.isJson(effective);
         String system = blankToNull(effective.systemPrompt(config.getSystemPrompt()));
-        String instruction = config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
+        String instruction = json
+                ? StructuredOutputSupport.instruction(effective)
+                : config.presetFor(effective.formatOr(config.defaultFormatId())).instruction();
         if (instruction != null && !instruction.isBlank()) {
             system = system == null ? instruction : system + "\n\n" + instruction;
         }
@@ -110,7 +115,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             system = null;
         }
         Double temperature = effective.temperature(config.getTemperature());
-        Integer maxTokens = effective.maxTokens(config.getMaxTokens());
+        Integer maxTokens = json
+                ? jsonMaxTokens(effective)
+                : effective.maxTokens(config.getMaxTokens());
         String model = effective.model(config.getModel());
         Integer maxCompletionTokens = null;
         String reasoningEffort = null;
@@ -132,7 +139,23 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             messages.add(new ChatCompletionRequest.Message("system", system));
         }
         messages.add(new ChatCompletionRequest.Message("user", prompt));
-        return new ChatCompletionRequest(model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort);
+        if (json) {
+            messages.addAll(StructuredOutputSupport.extraMessages(effective));
+        }
+        Object responseFormat = json ? StructuredOutputSupport.responseFormat(effective) : null;
+        return new ChatCompletionRequest(
+                model, List.copyOf(messages), temperature, maxTokens, maxCompletionTokens, reasoningEffort, responseFormat);
+    }
+
+    /**
+     * JSON uses the request or prompt cap. When neither is set the cap is 1024, not {@code api.max-tokens}.
+     * Zero and negative values still omit the field.
+     */
+    private static Integer jsonMaxTokens(GenerationOverrides effective) {
+        if (effective.maxTokensSpecified()) {
+            return effective.maxTokens(null);
+        }
+        return StructuredOutputSupport.DEFAULT_MAX_TOKENS;
     }
 
     /**
@@ -146,7 +169,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
-        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true)));
+        return exchange(prompt, overrides, baseUrl, apiKey, model, null);
+    }
+
+    public ChatExchange exchange(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            CallTrace trace
+    ) {
+        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true, trace)));
     }
 
     @Override
@@ -157,7 +191,19 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
-        return exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true);
+        return exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true, null);
+    }
+
+    @Override
+    public CompletableFuture<ChatExchange> exchangeAsync(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            CallTrace trace
+    ) {
+        return exchangeAsync(prompt, overrides, baseUrl, apiKey, model, true, trace);
     }
 
     /**
@@ -172,7 +218,18 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String apiKey,
             String model
     ) {
-        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, false)));
+        return exchangeRaw(prompt, overrides, baseUrl, apiKey, model, null);
+    }
+
+    public ChatExchange exchangeRaw(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            CallTrace trace
+    ) {
+        return join(gate.schedule(() -> exchangeAsync(prompt, overrides, baseUrl, apiKey, model, false, trace)));
     }
 
     private CompletableFuture<ChatExchange> exchangeAsync(
@@ -181,19 +238,24 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String baseUrl,
             String apiKey,
             String model,
-            boolean filterAnswer
+            boolean filterAnswer,
+            CallTrace trace
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         if (model != null && !model.isBlank()) {
             effective = effective.withModel(model);
         }
+        final boolean keepFilters = filterAnswer && !StructuredOutputSupport.isJson(effective);
         String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
         URI parsedUri = ChatEndpoints.chatCompletions(root);
-        logger.log(Level.FINE, "POST {0}", parsedUri);
+        logger.log(Level.FINE, "POST {0}", SecretMask.redactUrl(parsedUri.toString(), secrets(apiKey)));
         final GenerationOverrides callOverrides = effective;
+        final String callModel = effective.model(config.getModel());
         final HttpRequest request;
+        final int promptChars;
         try {
             ChatCompletionRequest body = buildBody(config, prompt, effective);
+            promptChars = promptChars(body);
             byte[] json = objectMapper.writeValueAsBytes(body);
 
             HttpRequest.Builder builder = HttpRequest.newBuilder()
@@ -209,12 +271,28 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         } catch (Exception e) {
             return CompletableFuture.failedFuture(toAi(e, parsedUri, apiKey));
         }
+        CallTrace.delivered(trace);
+        long started = System.nanoTime();
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString()).handle((response, error) -> {
+            long httpNanos = Math.max(0L, System.nanoTime() - started);
             if (error != null) {
                 throw toAi(unwrap(error), parsedUri, apiKey);
             }
-            return readExchange(response, parsedUri, prompt, apiKey, callOverrides, filterAnswer);
+            return readExchange(response, parsedUri, prompt, apiKey, callOverrides, keepFilters, callModel, promptChars, httpNanos);
         });
+    }
+
+    private static int promptChars(ChatCompletionRequest body) {
+        int chars = 0;
+        if (body.getMessages() == null) {
+            return 0;
+        }
+        for (ChatCompletionRequest.Message message : body.getMessages()) {
+            if (message != null) {
+                chars += ResponseUsage.chars(message.getContent());
+            }
+        }
+        return chars;
     }
 
     private ChatExchange readExchange(
@@ -223,7 +301,10 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             String prompt,
             String apiKey,
             GenerationOverrides effective,
-            boolean filterAnswer
+            boolean filterAnswer,
+            String model,
+            int promptChars,
+            long httpNanos
     ) {
         try {
             String responseBody = response.body() == null ? "" : response.body();
@@ -239,7 +320,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
                         parsedUri,
                         retryAfterSeconds(response.headers().firstValue("Retry-After").orElse(null)),
                         headers
-                );
+                ).withUsage(UsageJson.fromDocument(responseBody));
             }
             if (htmlBody) {
                 throw new AiRequestException(
@@ -256,15 +337,19 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             // are removed is classified below and does not use this error.
             if (parsed.getChoices() == null || parsed.getChoices().isEmpty()
                     || parsed.getChoices().getFirst().getMessage() == null) {
-                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
+                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null)
+                        .withUsage(parsed.usage());
             }
             ChatCompletionResponse.Choice choice = parsed.getChoices().getFirst();
             String text = choice.getMessage().visibleText();
             if (text == null || text.isBlank()) {
-                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null);
+                throw new AiRequestException(AiErrorKind.OTHER, response.statusCode(), "OpenAI response missing choices/message/content", null)
+                        .withUsage(parsed.usage());
             }
+            ResponseUsage usage = usageOf(parsed.usage(), promptChars, text);
+            String finishReason = choice.getFinishReason() == null ? "" : choice.getFinishReason();
             if (!filterAnswer) {
-                return new ChatExchange(SecretMask.redact(text, secrets), headers);
+                return exchanged(SecretMask.redact(text, secrets), headers, model, usage, finishReason, httpNanos);
             }
             boolean lengthLimited = LengthCutoff.isLength(choice.getFinishReason());
             boolean allowMarkup = config.allowMarkup();
@@ -281,27 +366,52 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             if (PlayerInput.stripSectionSigns(text, allowMarkup).isBlank()) {
                 if (PlayerInput.emptiedByMarkup(text, allowMarkup)) {
                     throw new AiRequestException(
-                            AiErrorKind.MARKUP_ONLY, response.statusCode(), PlayerInput.MARKUP_ONLY, null);
+                            AiErrorKind.MARKUP_ONLY, response.statusCode(), PlayerInput.MARKUP_ONLY, null)
+                            .withUsage(usage);
                 }
                 throw new AiRequestException(
-                        AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null);
+                        AiErrorKind.EMPTY_REPLY, response.statusCode(), PlayerInput.EMPTY_REPLY, null)
+                        .withUsage(usage);
             }
             String reason = PlayerInput.rejectionReason(text, prompt);
             if (reason == null) {
                 reason = PlayerInput.rejectionReason(formatted, prompt);
             }
             if (reason != null) {
-                throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null);
+                throw new AiRequestException(AiErrorKind.REJECTED, response.statusCode(), reason, null)
+                        .withUsage(usage);
             }
             if (lengthLimited) {
                 LengthTrimNotices.note(logger, noticeId(effective, prompt));
             }
-            return new ChatExchange(formatted, headers);
+            return exchanged(formatted, headers, model, usage, finishReason, httpNanos);
         } catch (AiRequestException e) {
             throw e;
         } catch (Exception e) {
             throw toAi(e, parsedUri, apiKey);
         }
+    }
+
+    /**
+     * Provider numbers win. A 200 response with no {@code usage} object is estimated from the
+     * request messages and the raw completion. Quota accounting can ignore that estimate later.
+     */
+    private static ResponseUsage usageOf(ResponseUsage parsed, int promptChars, String rawCompletion) {
+        if (parsed != null && parsed.reported()) {
+            return parsed;
+        }
+        return ResponseUsage.estimate(promptChars, ResponseUsage.chars(rawCompletion));
+    }
+
+    private static ChatExchange exchanged(
+            String text,
+            Map<String, List<String>> headers,
+            String model,
+            ResponseUsage usage,
+            String finishReason,
+            long httpNanos
+    ) {
+        return new ChatExchange(text, headers, null, "", model, usage, finishReason, 0, false, httpNanos);
     }
 
     private static ChatExchange join(CompletableFuture<ChatExchange> future) {
@@ -347,7 +457,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         }
         AiErrorKind kind = AiErrors.classify(cause);
         String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
-        return new AiRequestException(kind, 0, SecretMask.redact(message, secrets(apiKey)), cause);
+        return new AiRequestException(kind, 0, SecretMask.redactUrl(message, secrets(apiKey)), cause);
     }
 
     /**
@@ -396,7 +506,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
     ) {
         String truncated = truncate(body);
         AiErrorKind kind = AiErrors.classifyHttp(status, body, html);
-        String host = uri.getHost() == null ? uri.toString() : uri.getHost();
+        String host = uri.getHost() == null
+                ? SecretMask.redactUrl(uri.toString(), List.of())
+                : uri.getHost();
         String message = switch (kind) {
             case RATE_LIMIT -> "HTTP 429 rate limit from " + host + ": " + truncated;
             case QUOTA -> "HTTP " + status + " quota or insufficient balance from " + host + ": " + truncated;
@@ -406,6 +518,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
             case UNKNOWN_MODEL -> "HTTP " + status + " unknown model from " + host + ": " + truncated;
             case TIMEOUT -> "Request timed out calling " + host;
             case LOCAL_LIMIT -> "Local rate limit reached";
+            case LOCAL_QUOTA -> "Local quota reached";
             case REJECTED -> "Rejected model answer from " + host;
             case EMPTY_REPLY -> PlayerInput.EMPTY_REPLY;
             case MARKUP_ONLY -> PlayerInput.MARKUP_ONLY;

@@ -1,9 +1,19 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.api.NexusErrorKind;
+import io.github.neareststep.nexusai.api.TokenUsage;
+import io.github.neareststep.nexusai.budget.QuotaEstimates;
+import io.github.neareststep.nexusai.budget.QuotaPolicy;
 import io.github.neareststep.nexusai.cache.AiCache;
+import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.event.GenerationEvents;
+import io.github.neareststep.nexusai.event.PreCancelled;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.limit.RateLimiter;
+import org.jetbrains.annotations.ApiStatus;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -31,7 +41,8 @@ public final class AiHttpClient {
     private final RequestGate gate;
     private final AiDiagnostics diagnostics;
     private final Logger logger;
-    private final ConcurrentHashMap<String, CompletableFuture<String>> inFlight = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CompletableFuture<SharedCompletion>> inFlight = new ConcurrentHashMap<>();
+    private volatile QuotaPolicy quotas;
 
     public AiHttpClient(
             AiCache cache,
@@ -47,6 +58,11 @@ public final class AiHttpClient {
         this.gate = Objects.requireNonNull(gate, "gate");
         this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
         this.logger = Objects.requireNonNull(logger, "logger");
+    }
+
+    /** Server, player, and consumer caps for placeholder, pool, prewarm, and {@code /nai test}. */
+    public void quotas(QuotaPolicy policy) {
+        this.quotas = policy;
     }
 
     /**
@@ -90,6 +106,38 @@ public final class AiHttpClient {
             Duration cacheTtl,
             String knowledgeHash
     ) {
+        return requestAsync(prompt, playerId, overrides, cacheTtl, knowledgeHash, null);
+    }
+
+    /**
+     * @param trace entrance that asked for this completion, or null for a caller that has none
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl,
+            String knowledgeHash,
+            CallTrace trace
+    ) {
+        return requestAsync(prompt, playerId, overrides, cacheTtl, knowledgeHash, trace, null);
+    }
+
+    /**
+     * @param admissionKey backoff id. Blank keeps the rendered prompt, which is what a literal
+     *                     placeholder and prewarm already use. A named prompt passes its id so it
+     *                     shares backoff with {@code generate} for that prompt. An inline template
+     *                     stays {@code api:<owner>:<16 hex SHA-256>} on the generate path.
+     */
+    public CompletableFuture<String> requestAsync(
+            String prompt,
+            UUID playerId,
+            GenerationOverrides overrides,
+            Duration cacheTtl,
+            String knowledgeHash,
+            CallTrace trace,
+            String admissionKey
+    ) {
         Objects.requireNonNull(prompt, "prompt");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         String key = cacheKey(
@@ -101,7 +149,38 @@ public final class AiHttpClient {
         if (cached.isPresent()) {
             return CompletableFuture.completedFuture(cached.get());
         }
-        return startShared(key, prompt, prompt, playerId, false, true, effective, cacheTtl);
+        String admit = admissionKey == null || admissionKey.isBlank() ? prompt : admissionKey;
+        return startShared(key, prompt, admit, playerId, false, true, effective, cacheTtl, trace);
+    }
+
+    /**
+     * One slot in this client's in-flight map. {@code generate} and {@link #requestAsync} both
+     * attach here, so the same cache key shares one provider call for this runtime.
+     * A reload builds a new client and therefore a new map.
+     */
+    @ApiStatus.Internal
+    public Flight attach(String cacheKey) {
+        Objects.requireNonNull(cacheKey, "cacheKey");
+        CompletableFuture<SharedCompletion> created = new CompletableFuture<>();
+        CompletableFuture<SharedCompletion> existing = inFlight.putIfAbsent(cacheKey, created);
+        if (existing != null) {
+            return new Flight(false, existing);
+        }
+        return new Flight(true, created);
+    }
+
+    /**
+     * Completes the leader's slot once and drops it. A second completion is ignored.
+     */
+    @ApiStatus.Internal
+    public void completeShared(String cacheKey, CompletableFuture<SharedCompletion> owned, SharedCompletion completion) {
+        if (owned == null || cacheKey == null) {
+            return;
+        }
+        owned.complete(completion == null
+                ? SharedCompletion.fail(new IllegalStateException("Missing completion"), null)
+                : completion);
+        inFlight.remove(cacheKey, owned);
     }
 
     /**
@@ -124,21 +203,44 @@ public final class AiHttpClient {
             String admissionKey,
             GenerationOverrides overrides
     ) {
+        return generateFreshAsync(prompt, admissionKey, overrides, null);
+    }
+
+    /**
+     * Pool refills are the only production caller. A null trace is recorded as {@code POOL}.
+     */
+    public CompletableFuture<String> generateFreshAsync(
+            String prompt,
+            String admissionKey,
+            GenerationOverrides overrides,
+            CallTrace trace
+    ) {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(admissionKey, "admissionKey");
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        CallTrace call = trace == null
+                ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.POOL, null, "", "")
+                : trace;
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(null, admissionKey, false);
         if (rejection.isPresent()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.LOCAL_LIMIT, rejection.get());
             return rejected(rejection.get());
+        }
+        QuotaPolicy.Decision quota = reserve(prompt, effective, call);
+        if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
+            return quotaRejected(quota.message());
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        CompletableFuture<String> created = new CompletableFuture<>();
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false);
-        return created;
+        CompletableFuture<SharedCompletion> created = new CompletableFuture<>();
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, false, null, effective, null, true, false, call,
+                quota == null ? null : quota.hold());
+        return adapt(created);
     }
 
     /**
@@ -152,20 +254,38 @@ public final class AiHttpClient {
     }
 
     public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides) {
+        return testAsync(prompt, overrides, null);
+    }
+
+    /**
+     * {@code /nai test} is the only production caller. A null trace is recorded as {@code TEST}.
+     */
+    public CompletableFuture<String> testAsync(String prompt, GenerationOverrides overrides, CallTrace trace) {
         Objects.requireNonNull(prompt, "prompt");
+        CallTrace call = trace == null
+                ? CallTrace.start(io.github.neareststep.nexusai.api.RequestOrigin.TEST, null, "", "")
+                : trace;
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
         Optional<String> rejection = gate.tryAdmit(RateLimiter.SERVER_SENTINEL, prompt, true);
         if (rejection.isPresent()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.LOCAL_LIMIT, rejection.get());
             return rejected(rejection.get());
+        }
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        QuotaPolicy.Decision quota = reserve(prompt, effective, call);
+        if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(call, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
+            return quotaRejected(quota.message());
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(prompt);
-        CompletableFuture<String> created = new CompletableFuture<>();
-        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
-        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true);
-        return created;
+        CompletableFuture<SharedCompletion> created = new CompletableFuture<>();
+        dispatch(prompt, prompt, pauseStamp, failureEpoch, created, false, null, effective, null, false, true, call,
+                quota == null ? null : quota.hold());
+        return adapt(created);
     }
 
     public boolean isAdmissionBlocked(String admissionKey) {
@@ -223,30 +343,59 @@ public final class AiHttpClient {
             boolean bypassBackoffAndPause,
             boolean writeCache,
             GenerationOverrides overrides,
-            Duration cacheTtl
+            Duration cacheTtl,
+            CallTrace trace
     ) {
-        CompletableFuture<String> existing = inFlight.get(cacheKey);
-        if (existing != null) {
-            return existing;
-        }
         if (!config.canSendChatRequests()) {
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.NOT_CONFIGURED, "NexusAI API key is not configured");
             return CompletableFuture.failedFuture(new IllegalStateException("NexusAI API key is not configured"));
         }
-        CompletableFuture<String> created = new CompletableFuture<>();
-        CompletableFuture<String> raced = inFlight.putIfAbsent(cacheKey, created);
-        if (raced != null) {
-            return raced;
+        Flight flight = attach(cacheKey);
+        CompletableFuture<String> adapted = adapt(flight.future());
+        if (!flight.leader()) {
+            return adapted;
         }
         Optional<String> rejection = gate.tryAdmit(playerId, admissionKey, bypassBackoffAndPause);
         if (rejection.isPresent()) {
-            inFlight.remove(cacheKey, created);
-            created.completeExceptionally(new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejection.get(), null));
-            return created;
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.LOCAL_LIMIT, rejection.get());
+            completeShared(
+                    cacheKey,
+                    flight.future(),
+                    SharedCompletion.fail(new AiRequestException(AiErrorKind.LOCAL_LIMIT, 0, rejection.get(), null), null));
+            return adapted;
+        }
+        QuotaPolicy.Decision quota = reserve(prompt, overrides, trace);
+        if (quota != null && !quota.allowed()) {
+            GenerationEvents.admissionRefused(trace, NexusErrorKind.QUOTA_EXCEEDED, quota.message());
+            completeShared(
+                    cacheKey,
+                    flight.future(),
+                    SharedCompletion.fail(new AiRequestException(AiErrorKind.LOCAL_QUOTA, 0, quota.message(), null), null));
+            return adapted;
         }
         long pauseStamp = gate.pauseStamp();
         long failureEpoch = gate.failureEpoch(admissionKey);
-        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, created, writeCache, cacheKey, overrides, cacheTtl, true, false);
-        return created;
+        dispatch(prompt, admissionKey, pauseStamp, failureEpoch, flight.future(), writeCache, cacheKey, overrides, cacheTtl, true, false, trace,
+                quota == null ? null : quota.hold());
+        return adapted;
+    }
+
+    private static CompletableFuture<String> adapt(CompletableFuture<SharedCompletion> shared) {
+        CompletableFuture<String> text = new CompletableFuture<>();
+        shared.whenComplete((completion, error) -> {
+            if (error != null || completion == null || !completion.ok()) {
+                Throwable failure = error != null
+                        ? error
+                        : completion == null || completion.failure() == null
+                        ? new IllegalStateException("Missing completion")
+                        : completion.failure();
+                text.completeExceptionally(AiErrors.unwrap(failure));
+                return;
+            }
+            String value = completion.answer().text();
+            text.complete(value == null ? "" : value);
+        });
+        return text;
     }
 
     private void dispatch(
@@ -254,30 +403,34 @@ public final class AiHttpClient {
             String admissionKey,
             long pauseStamp,
             long failureEpoch,
-            CompletableFuture<String> created,
+            CompletableFuture<SharedCompletion> created,
             boolean writeCache,
             String cacheKey,
             GenerationOverrides overrides,
             Duration cacheTtl,
             boolean clearPause,
-            boolean ignoreCooldown
+            boolean ignoreCooldown,
+            CallTrace trace,
+            QuotaPolicy.Hold quotaHold
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
         CompletableFuture<ModelAnswer> upstream;
         try {
-            upstream = provider.answer(prompt, effective, ignoreCooldown);
+            upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause);
+            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause, quotaHold, trace);
             return;
         }
         upstream.whenComplete((answer, error) -> {
             try {
-                String value = answer == null ? null : answer.text();
-                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, value, error, writeCache,
-                        effectiveCacheTtl(cacheTtl, answer), clearPause);
+                finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
+                        effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold, trace);
             } catch (Throwable thrown) {
                 logger.log(Level.WARNING, "AI completion handler failed", thrown);
                 created.completeExceptionally(thrown);
+                if (cacheKey != null) {
+                    inFlight.remove(cacheKey, created);
+                }
             }
         });
     }
@@ -299,14 +452,23 @@ public final class AiHttpClient {
             String admissionKey,
             long pauseStamp,
             long failureEpoch,
-            CompletableFuture<String> created,
-            String value,
+            CompletableFuture<SharedCompletion> created,
+            ModelAnswer answer,
             Throwable error,
             boolean writeCache,
             Duration cacheTtl,
-            boolean clearPause
+            boolean clearPause,
+            QuotaPolicy.Hold quotaHold,
+            CallTrace trace
     ) {
+        String value = answer == null ? null : answer.text();
         try {
+            if (PreCancelled.find(error) != null) {
+                PreCancelled cancelled = PreCancelled.find(error);
+                GenerationEvents.failIfNeeded(trace, cancelled);
+                created.complete(SharedCompletion.fail(cancelled, null));
+                return;
+            }
             if (error == null && PlayerInput.emptiedByMarkup(value, config.allowMarkup())) {
                 error = new AiRequestException(AiErrorKind.MARKUP_ONLY, 0, PlayerInput.MARKUP_ONLY, null);
                 value = null;
@@ -316,17 +478,32 @@ public final class AiHttpClient {
                 value = null;
             }
             if (error == null && value != null && !value.isBlank()) {
+                if (trace != null) {
+                    EventDispatcher.get().post(
+                            trace,
+                            value,
+                            answer == null ? "" : answer.providerId(),
+                            answer == null ? "" : answer.model(),
+                            answer != null && answer.fallbackModelUsed(),
+                            TokenUsage.from(answer == null ? null : answer.usage()),
+                            answer == null ? "" : answer.finishReason(),
+                            answer == null ? 0 : answer.attempts(),
+                            null);
+                }
                 if (writeCache && cacheKey != null) {
+                    String providerId = answer == null ? "" : answer.providerId();
+                    String model = answer == null ? "" : answer.model();
                     if (cacheTtl != null) {
-                        cache.put(cacheKey, value, cacheTtl);
+                        cache.put(cacheKey, value, providerId, model, cacheTtl);
                     } else {
-                        cache.put(cacheKey, value);
+                        cache.put(cacheKey, value, providerId, model);
                     }
                 }
                 gate.recordSuccess(admissionKey, pauseStamp, failureEpoch, clearPause);
-                created.complete(value);
+                created.complete(SharedCompletion.ok(answer));
             } else if (error != null || value == null || value.isBlank()) {
                 if (AiErrors.localMissingKey(error)) {
+                    GenerationEvents.failIfNeeded(trace, error);
                     created.completeExceptionally(AiErrors.unwrap(error));
                     return;
                 }
@@ -338,7 +515,8 @@ public final class AiHttpClient {
                     // clearPause is false for /nai test, so a probe does not start the hold.
                     gate.recordFailure(admissionKey, kind, 0L, clearPause);
                     logger.fine(PlayerInput.MARKUP_ONLY);
-                } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.REJECTED) {
+                } else if (kind != AiErrorKind.LOCAL_LIMIT && kind != AiErrorKind.LOCAL_QUOTA
+                        && kind != AiErrorKind.REJECTED) {
                     AiRequestException typed = AiErrors.find(failure);
                     long retryAfter = typed == null ? 0L : typed.retryAfterSeconds();
                     gate.recordFailure(
@@ -346,20 +524,41 @@ public final class AiHttpClient {
                     diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
                 }
                 if (kind == AiErrorKind.REJECTED) {
-                    logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
+                    logger.log(Level.FINE, "Rejected model answer: {0}",
+                            SecretMask.redactUrl(AiErrors.detail(failure), config.configuredSecrets()));
                 } else {
-                    logger.log(Level.FINE, "AI request failed", failure);
+                    logger.log(Level.FINE, "AI request failed",
+                            LogRedaction.redactThrowable(failure, config.configuredSecrets()));
                 }
-                created.completeExceptionally(AiErrors.unwrap(failure));
+                GenerationEvents.failIfNeeded(trace, failure);
+                created.complete(SharedCompletion.fail(AiErrors.unwrap(failure), null));
             }
         } catch (RuntimeException e) {
             logger.log(Level.WARNING, "AI completion handler failed", e);
             created.completeExceptionally(e);
         } finally {
+            if (quotaHold != null) {
+                quotaHold.releaseWith(quotas);
+            }
             if (cacheKey != null) {
                 inFlight.remove(cacheKey, created);
             }
         }
+    }
+
+    private QuotaPolicy.Decision reserve(String prompt, GenerationOverrides overrides, CallTrace trace) {
+        QuotaPolicy policy = quotas;
+        if (policy == null) {
+            return null;
+        }
+        GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        long estimate = QuotaEstimates.forCall(config, prompt, effective, effective.model(config.getModel()));
+        return policy.tryReserve(QuotaPolicy.Charge.of(trace, estimate, null));
+    }
+
+    private static CompletableFuture<String> quotaRejected(String reason) {
+        return CompletableFuture.failedFuture(new AiRequestException(
+                AiErrorKind.LOCAL_QUOTA, 0, reason == null || reason.isBlank() ? "Token quota reached" : reason, null));
     }
 
     private String failureDetail(String admissionKey, AiErrorKind kind, Throwable failure) {
@@ -421,7 +620,8 @@ public final class AiHttpClient {
             return;
         }
         AiErrorKind kind = AiErrors.classify(error);
-        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.REJECTED || kind == AiErrorKind.MARKUP_ONLY) {
+        if (kind == AiErrorKind.LOCAL_LIMIT || kind == AiErrorKind.LOCAL_QUOTA || kind == AiErrorKind.REJECTED
+                || kind == AiErrorKind.MARKUP_ONLY) {
             return;
         }
         AiRequestException typed = AiErrors.find(error);
@@ -450,5 +650,12 @@ public final class AiHttpClient {
             return routing.sharedRing(providerId);
         }
         return new io.github.neareststep.nexusai.ai.KeyRing(java.util.List.of());
+    }
+
+    /**
+     * Leader or joiner of one cache key on this client.
+     */
+    @ApiStatus.Internal
+    public record Flight(boolean leader, CompletableFuture<SharedCompletion> future) {
     }
 }

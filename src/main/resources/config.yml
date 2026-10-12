@@ -58,13 +58,19 @@ api:
 # Its name is logged. The value is not. Empty string "" or empty list [].
 # Optional api-key-file reads one raw key per line (UTF-8). A relative path is under this folder.
 #   api-key-file: secrets/groq.key
-# A non-empty api-key-file replaces api-key for that provider. Do not put a key in url.
+# A non-empty api-key-file replaces api-key for that provider. Prefer api-key over a key in url.
+# Status and logs mask every query value in url as *** (the HTTP request still sends them).
+# Only secret-looking query names (key, api_key, token, sig, …) are also stripped from error
+# text and replies; api-version and model stay as ordinary words. A secret-named key shorter
+# than 6 characters is only masked in the displayed URL, so short keys belong in api-key.
 # Keys are masked to the last 4 characters in status and logs. A file source is marked (file).
 providers:
   openai:
     type: openai-compatible
     url: "https://api.openai.com/v1"
     api-key: ""
+    # auto | json-schema | json-object | prompt
+    # structured-output: auto
     # api-key:
     #   - "${OPENAI_KEY_A}"
     #   - "${OPENAI_KEY_B}"
@@ -107,6 +113,7 @@ model-queue:
   - provider: openai
     model: gpt-4o-mini
     # daily-request-limit: 1000
+    # daily-token-limit: 300000
   # - provider: groq
   #   model: llama-3.3-70b-versatile
   #   daily-request-limit: 500
@@ -126,12 +133,29 @@ fallback-model:
 # A prompt lists file names without the extension: knowledge: [lore, rules]
 # The text is added to the system message after the admin system prompt and before the format instruction.
 # When the request contains wrapped player input, the player-input guard stays last.
-# max-chars is the cap for one request. max-file-chars is the cap for one file.
-# Longer text is truncated and one warning is logged. /nai reload reads the folder again.
+# max-chars is the cap for one request. max-file-chars is the cap for one file in full mode.
+# Longer text is truncated. In full mode that warning is logged only for files a full-mode prompt uses.
+# select: full sends whole files (the 1.1 behaviour). keywords sends only paragraphs that match the request.
+# There is no vector search and no embeddings.
+# /nai reload reads the folder again.
 # The example file is created once and is never overwritten.
 knowledge:
   max-chars: 6000
   max-file-chars: 4000
+  select: full
+  keywords:
+    # Paragraphs sent per request. 1..50.
+    max-paragraphs: 6
+    # A longer paragraph is cut at a sentence end. 100..10000.
+    max-paragraph-chars: 1200
+    # File cap in keywords mode. max-file-chars applies to full mode only. 1000..2000000.
+    max-file-chars: 200000
+    # Matching words needed for a paragraph. 1..10.
+    min-matches: 1
+    # When nothing matches: none (no knowledge block) or first (first paragraph of each listed file).
+    on-no-match: none
+    # Extra words to ignore, added to the built-in English and Russian lists.
+    stop-words: []
 
 # format: presets. Prompts inherit formats.default when they omit format.
 # A reply cut off by max_tokens keeps a sentence ending only past the halfway point.
@@ -382,6 +406,36 @@ context:
   refresh-seconds: 30                # 1..3600, snapshot age for cached_ placeholders
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
+
+# Java API for other plugins (NexusAIApi.generate and generateJson).
+# API calls spend limits.* like placeholders, and the quotas below when quotas.enabled is true.
+plugin-api:
+  enabled: true
+  # Longest inline template a plugin may send. 100..100000.
+  max-template-chars: 8000
+  # Longest value of one variable. 10..20000.
+  max-var-chars: 1000
+
+# Token accounting and daily quotas. Usage is always counted in token-usage.yml.
+# Limits below apply only when enabled is true. 0 = no limit. Days reset at local midnight.
+quotas:
+  enabled: false
+  # When a provider sends no usage: estimate (characters / 4, marked as estimated) or ignore (tokens = 0).
+  # The estimate is rough and low for Cyrillic and CJK. ignore counts the request and stores zero tokens.
+  missing-usage: estimate
+  server-tokens-per-day: 0
+  # Players without a quota group.
+  player-tokens-per-day: 0
+  # Permission nexusai.quota.<name>. The most generous matching group wins.
+  # requests-per-day here replaces limits.player-requests-per-day for that player.
+  groups: {}
+  # Plugins that call the Java API, by plugin name. default applies to each other plugin separately.
+  consumers:
+    default:
+      tokens-per-day: 0
+      requests-per-day: 0
+  # How often token-usage.yml is written. 1..300.
+  save-interval-seconds: 10
 
 # WARNING: allow-markup true lets MiniMessage click/hover tags, hex colours, and JSON click/hover components reach plugins that read NexusAI placeholders. A consumer can run a click such as run_command. Leave this false unless you accept that. Legacy § and & codes are always removed.
 sanitize:

@@ -13,7 +13,7 @@ python3 .github/scripts/paper-load.py --self-check
 ./gradlew test loadDriverJar
 ```
 
-Mode A, local Paper. The plugin jar and the driver jar are passed in separately. The default scenario list is `S1,S2,S2-over,S3,S-pool`.
+Mode A, local Paper. The plugin jar and the driver jar are passed in separately. The default scenario list is `S1,S1-keywords,S2,S2-over,S2-probe,S3,S6,S-pool`.
 
 ```bash
 python3 .github/scripts/paper-load.py \
@@ -49,7 +49,7 @@ naiload <scenario> <rate> <seconds> <viewers>
 
 The report is `plugins/NexusAI-LoadDriver/report.json`. The harness copies it to `load-out/report-<scenario>.json` and writes `load-out/report.json` plus `load-out/jfr-summary.txt`.
 
-CI (`.github/workflows/build.yml`, job `load`) runs `S1,S2,S3,S-pool` on Paper 1.20.6 (Java 21) and 26.2 (Java 25), `timeout-minutes: 30`. Artifacts: `report.json`, `mock-requests.jsonl`, `jfr-summary.txt`. A pull request runs build and smoke, not this job.
+CI (`.github/workflows/build.yml`, job `load`) runs `S1,S1-keywords,S2,S2-probe,S3,S6,S-pool` on Paper 1.20.6 (Java 21) and 26.2 (Java 25), `timeout-minutes: 30`. S2-over stays local. Artifacts: `report.json`, `mock-requests.jsonl`, `jfr-summary.txt`. A pull request runs build and smoke, not this job. The load job still runs only on `workflow_dispatch` or a `v*` tag.
 
 ## What is measured
 
@@ -59,7 +59,9 @@ MSPT is `ServerTickEndEvent#getTickDuration()` (paper-api 1.20.6). Placeholder w
 
 The driver registers three context providers: `fast` (returns `coins ~12k`), `slow` (`Thread.sleep` 2s inside `provide()`), and `boom` (throws). It counts `provide()` calls where `Bukkit.isPrimaryThread()` is true.
 
-Config for the run: pool off, prewarm off, `limits.error-log-cooldown-seconds: 30`. S3 uses the 1.0.x caps (30/min, 1000/day, 10 and 200 per player). Every other scenario raises those four to 100000 and reloads. Prompt ids are `load_hit` (no context), `load_ctx` (`context: all`), and `harbor` (dialogue). `load_hit` and `load_ctx` share prompt text, so startup logs one warning that they share a cache entry. That line is outside the scenario windows.
+Config for the run: pool off, prewarm off, `limits.error-log-cooldown-seconds: 30`, `api.max-tokens: 256`. S3 uses the 1.0.x caps (30/min, 1000/day, 10 and 200 per player) and leaves quotas off. Every other scenario raises those four request caps to 100000 and reloads. S1-keywords turns `quotas.enabled` on with `consumers.default.tokens-per-day: 0`, so nothing is rejected. S6 turns quotas on with that consumer cap at 7200 and `missing-usage: estimate`. Prompt ids are `load_hit` (no context), `load_ctx` (`context: all`), `load_kw` (`knowledge: [rules]`, `knowledge-select: keywords`), and `harbor` (dialogue). Other prompts stay on full selection. `load_hit` and `load_ctx` share prompt text, so startup logs one warning that they share a cache entry. That line is outside the scenario windows. `plugins/NexusAI/knowledge/rules.md` is a short file the harness writes for `load_kw`.
+
+Keyword selection stays on the thread that already calls `KnowledgeComposer.prepare`. For a cached placeholder, including S1 and S1-keywords, that is the caller's thread. For `generate` it is a NexusAI thread inside the generation pipeline. It was left on that thread. The recorded 1.2.0 run measured S1 and S1-keywords. Neither missed the MSPT budget.
 
 `nexusai-context-*` threads are started at enable (`ContextService.newWorkerPool` calls `prestartAllCoreThreads`). Before that, a scenario that never called a provider saw zero context threads even though the pool size was 2. The HTTP pool already kept its four threads. The regression is `ContextServiceTest.workerPoolPrestartsTheConfiguredDaemonThreads`.
 
@@ -71,18 +73,51 @@ Every scenario: no `ERROR]: [NexusAI]`, no NexusAI stack frame outside the load-
 |----------|------|------|------|
 | baseline | A | idle 60s | MSPT reference. Not a gate. |
 | S1 | A | 1000 cached resolutions/s (100 synthetic viewers × 10/s), cache warmed | mean MSPT − baseline ≤ 1.0 ms; p99 of one main-thread call ≤ 200 µs |
+| S1-keywords | A | S1, prompt `load_kw`, `knowledge-select: keywords`, quotas on with a 0 cap | same gates as S1. Keyword selection runs on every cached resolve, including hits |
 | S2 | A | 10 unique misses/s, mock latency 300 ms, each prompt resolved 3 times in one tick | ΔMSPT ≤ 2.0 ms; max tick ≤ 100 ms; TPS ≥ 19.8; JFR NexusAI share of Server-thread samples ≤ 2%; mock requests ≤ unique prompts; pool idle within 30s |
+| S2-probe | A | S2, with an empty listener on every Nexus generation, provider-error, action, and moderation event | same gates as S2. The listeners are registered only for this scenario and removed when it finishes, so S2 itself is unchanged |
 | S2-over | A | 50 unique misses/s, same latency and dedup | ΔMSPT ≤ 2.0 ms; queue depths stay inside the snapshot caps; no OOM. Queue growth is recorded, not failed, when the depths stay capped. |
 | S3 | A | 200 misses/s at the default 30/min cap | ΔMSPT ≤ 2.0 ms; mock requests fit a tumbling 60s window of 30 + 1 (a sliding minute may see 60 when the window resets once); NexusAI warnings ≤ `seconds / 30 + 2` |
 | S-pool | A | 40 unique misses per tick for 3s | at least one new rejection; the log contains `HTTP queue is full`; call p99 ≤ 50 ms; depths stay inside the caps; the pool drains |
+| S6 | A | 50 `generate()` calls/s on the server thread for 120s. One call in five uses a new template (`Reply with the single word pong. case ` plus six digits, 44 characters). The rest repeat `Reply with the single word pong.` Quotas are on. `consumers.default.tokens-per-day` is 7200 | ΔMSPT ≤ 2.0 ms; p99 of the `generate()` call, not of the future, ≤ 200 µs; after today's tokens reach the cap, mock timestamps stop once the mock latency plus one second has passed; token overshoot ≤ the peak in-flight reservation seen while spend was still under the cap; every future is done within 30s of stop; `token-usage.yml` parses (`format: 1` and a day) |
 | S4 | B | 20 bots, `cached_` with `context: all` | ΔMSPT ≤ 2.0 ms; `provide()` on the main thread = 0; the slow provider is suspended; a mock body contains `coins ~12k` inside `§§§ PLAYER INPUT §§§` … `§§§ END §§§`; `load-boom-secret` is not in a body |
 | S5 | B | 20 bots, `/nai talk` every 3s, `dialogue.summary.enabled: true` | ΔMSPT ≤ 2.0 ms; no `Dialogue failed`; at least one talk command or bot reply |
 
 S-pool is the overflow check. Fifty misses per second at 300 ms is about 15 calls in flight. The cap is 64 in flight and 64 waiting, so S2-over does not fill the pool. The old picture (an unbounded queue, or four blocking threads near 13 requests/s) does not describe this build.
 
+S6 spends the cap near the middle of the 120s window when each unique call records about 12 tokens: 11 from the 44-character template (`ceil(44 / 4)`) and 1 from the mock reply `pong`. The reservation is those prompt tokens plus `api.max-tokens` 256, about 267, because the load config sets no system prompt and the `simple` format instruction is empty. A cache hit does not reserve. An in-flight join of the repeated template does not reserve. The first copy of that repeated template does. Admission can refuse a call while other calls are still reserved and then allow a later call, until tokens spent reach 7200. The HTTP-stop check uses that spent total, not the first `QUOTA_EXCEEDED`. The mock writes its journal time after the latency sleep, so a call sent before the cap can still appear for about that latency afterwards. The judge allows one extra second. Overshoot is `max(0, tokens spent − cap)` and must be no larger than the peak of open HTTP leaders times the reservation, sampled while spend was still under the cap.
+
 The JFR 2% line is a gate only when the recording has at least 200 Server-thread samples. `jdk.ExecutionSample` hits a thread only while it is running. On an idle or lightly loaded server the server thread is parked, and a 110s recording can contain 2 to 5 samples. A share computed from that handful is noise: 1 of 5 is 20% and is not a measurement of a 2% budget. Below that sample count, treat the JFR share as not enough data. Do not fail the scenario on it. Judge the run by the tick delta, the max tick, and the p99 of the placeholder or talk call, which the plugin records itself.
 
 `RateLimiter` is a tumbling 60s window opened at construction, not a sliding minute. S3's judge accepts a series when some alignment keeps every 60s bucket at or under 31. Thirty requests, a reset, then thirty more, is a pass. Sixty requests at one instant is a fail. `LOCAL_LIMIT` is not logged, so S3's warning count can be 0 and still pass.
+
+## Recorded run — 1.2.0
+
+Manual run, 2026-10-09. Commit 4446cbb, Paper 1.21.8 build 60, OpenJDK 25.0.4.1 (Temurin), 8 × Intel Xeon vCPU, Debian 13, kernel 6.12. Mock provider, latency 300 ms; baseline 60 s, load 120 s. S2-over and S-pool were not part of this run and are not recorded. The tables under Recorded run — 1.1.1 and Recorded run — 1.1.0, below, are not 1.2.0 results.
+
+### Mode A
+
+No players. Baseline MSPT 0.68 ms, TPS min 20.0.
+
+| Scenario | ΔMSPT | tick max | call p99 | notes | result |
+|----------|-------|----------|----------|-------|--------|
+| S1 | −0.19 | 6.8 ms | 37 µs | 119 900 resolutions, 1 request | pass |
+| S1-keywords | +0.05 | 128 ms | 101 µs | keyword knowledge on | pass |
+| S2 | −0.35 | 26 ms | 273 µs | 1199 requests = 1199 unique prompts | pass |
+| S2-over | | | | not recorded | |
+| S2-probe | −0.37 | 10 ms | 145 µs | events probe attached | pass |
+| S3 | −0.25 | 23 ms | 164 µs | 23 990 resolutions, 90 requests | pass |
+| S6 | −0.37 | 12 ms | 77 µs | 7209/7200 tokens, exhausted at 58 % | pass |
+| S-pool | | | | not recorded | |
+
+### Mode B
+
+20 mineflayer bots. Baseline MSPT 1.88 ms, TPS min 20.0.
+
+| Scenario | ΔMSPT | tick max | call p99 | notes | result |
+|----------|-------|----------|----------|-------|--------|
+| S4 | +0.01 | 31 ms | 403 µs | 4798 resolutions, 0 provide on main | pass |
+| S5 | −0.17 | 119 ms | — | 820 talk commands, 0 provide on main | pass |
 
 ## Recorded run — 1.1.1
 

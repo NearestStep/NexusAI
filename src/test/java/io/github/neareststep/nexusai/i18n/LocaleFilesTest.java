@@ -28,15 +28,39 @@ class LocaleFilesTest {
             "command.prompts-header",
             "command.prompts-line",
             "command.prompts-empty",
+            "command.prompts-registered",
             "command.status-prompts",
             "command.test-sending",
             "command.test-ok",
             "command.test-fail",
+            "command.test-knowledge",
             "command.status-last-error",
             "command.status-provider-pause",
             "command.status-queue-strategy",
+            "command.status-queue-header",
+            "command.status-queue-line",
             "command.status-moderation",
             "command.status-dialogue-summary",
+            "command.help-usage",
+            "command.status-tokens",
+            "command.status-quotas",
+            "command.usage-limit-suffix",
+            "command.usage-estimated-suffix",
+            "command.usage-on",
+            "command.usage-off",
+            "command.usage-header",
+            "command.usage-server",
+            "command.usage-title-providers",
+            "command.usage-title-rows",
+            "command.usage-title-origins",
+            "command.usage-line",
+            "command.usage-empty",
+            "command.usage-players-header",
+            "command.usage-consumers-header",
+            "command.usage-history-header",
+            "command.usage-history-line",
+            "command.usage-unknown",
+            "command.usage-denied",
             "moderation.notify",
             "common.none",
             "common.yes",
@@ -48,6 +72,7 @@ class LocaleFilesTest {
             "error.unknown-model",
             "error.timeout",
             "error.other",
+            "error.local-quota",
             "command.help-talk",
             "command.help-talk-end",
             "talk.disabled",
@@ -66,6 +91,7 @@ class LocaleFilesTest {
             "talk.replies",
             "talk.daily",
             "talk.busy",
+            "talk.quota",
             "talk.failed",
             "talk.empty",
             "talk.reply"
@@ -83,6 +109,33 @@ class LocaleFilesTest {
             for (String key : REQUIRED) {
                 assertTrue(yaml.contains(key), file.getFileName() + " missing " + key);
                 assertFalse(yaml.getString(key).isBlank(), file.getFileName() + " blank " + key);
+            }
+            assertTrue(yaml.getString("command.prompts-registered").contains("{prompts}"),
+                    file.getFileName() + " prompts-registered {prompts}");
+            assertTrue(yaml.getString("command.status-tokens").contains("{tokens}"), file.getFileName() + " {tokens}");
+            assertTrue(yaml.getString("command.status-tokens").contains("{detail}"), file.getFileName() + " {detail}");
+            assertTrue(yaml.getString("command.status-quotas").contains("{state}"), file.getFileName() + " {state}");
+            assertTrue(yaml.getString("command.status-queue-line").contains("{entry}"), file.getFileName() + " {entry}");
+            if (!file.getFileName().toString().equals("en.yml")) {
+                assertFalse(yaml.getString("command.status-queue-header").contains("Model queue"),
+                        file.getFileName() + " status-queue-header still English");
+            }
+            assertTrue(yaml.getString("command.usage-limit-suffix").contains("{limit}"), file.getFileName() + " {limit}");
+            assertTrue(yaml.getString("command.usage-estimated-suffix").contains("{percent}"), file.getFileName() + " {percent}");
+            String usageServer = yaml.getString("command.usage-server");
+            for (String token : List.of("{requests}", "{tokens}", "{prompt}", "{completion}", "{estimated}")) {
+                assertTrue(usageServer.contains(token), file.getFileName() + " " + token);
+            }
+            assertTrue(yaml.getString("command.usage-line").contains("{name}"), file.getFileName() + " {name}");
+            assertTrue(yaml.getString("command.usage-history-line").contains("{day}"), file.getFileName() + " {day}");
+            if (file.getFileName().toString().equals("en.yml")) {
+                assertTrue(yaml.getString("talk.quota").contains("Your AI limit for today is used up."),
+                        "en.yml talk.quota");
+            } else {
+                assertFalse(yaml.getString("talk.quota").contains("Your AI limit for today is used up."),
+                        file.getFileName() + " talk.quota still English");
+                assertFalse(yaml.getString("command.help-usage").contains("Show today's token usage"),
+                        file.getFileName() + " help-usage still English");
             }
             String version = yaml.getString("command.version");
             assertTrue(version != null && version.contains("{version}"), file.getFileName() + " {version}");
@@ -112,6 +165,8 @@ class LocaleFilesTest {
             if (!file.getFileName().toString().equals("en.yml")) {
                 assertFalse(yaml.getString("command.help-prompts-import").contains("Import prompts from the import folder"),
                         file.getFileName() + " help-prompts-import still English");
+                assertFalse(yaml.getString("command.prompts-registered").contains("Registered by plugins"),
+                        file.getFileName() + " prompts-registered still English");
                 assertFalse(yaml.getString("command.status-unpooled").contains("requested but not pooled"),
                         file.getFileName() + " status-unpooled still English");
                 assertTrue(yaml.getString("command.prompts-import-ok").contains("{file}"), file.getFileName() + " {file}");

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.github.neareststep"
-version = "1.1.2"
+version = "1.2.0"
 
 java {
     toolchain {
@@ -40,6 +40,7 @@ dependencies {
     implementation("com.github.ben-manes.caffeine:caffeine:3.2.0")
 
     testImplementation("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
+    testImplementation("me.clip:placeholderapi:2.11.6")
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -75,12 +76,14 @@ tasks {
     }
 
     build {
-        dependsOn(shadowJar, "loadDriverJar")
+        dependsOn(shadowJar, "loadDriverJar", "eventsProbeJar")
     }
 
     test {
         useJUnitPlatform()
         dependsOn("loadtestTest")
+        minHeapSize = System.getenv("NEXUS_TEST_MIN_HEAP") ?: "512m"
+        maxHeapSize = System.getenv("NEXUS_TEST_MAX_HEAP") ?: "1g"
     }
 
     compileJava {
@@ -98,7 +101,25 @@ tasks {
         description = "Paper load-test plugin. Not shaded into the release jar."
         archiveFileName.set("NexusAI-LoadDriver.jar")
         destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
-        from(sourceSets["loadtest"].output)
+        from(sourceSets["loadtest"].output) {
+            exclude("**/EventsProbePlugin.class")
+            exclude("**/EventsProbePlugin$*.class")
+        }
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
+
+    register<Jar>("eventsProbeJar") {
+        group = "build"
+        description = "Logs NexusAI events for the smoke script. Not shaded into the release jar."
+        archiveFileName.set("nexusai-events-probe.jar")
+        destinationDirectory.set(layout.buildDirectory.dir("loadtest"))
+        from(sourceSets["loadtest"].output) {
+            include("**/EventsProbePlugin.class")
+            include("**/EventsProbePlugin$*.class")
+        }
+        from("src/loadtest/probe") {
+            include("plugin.yml")
+        }
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 

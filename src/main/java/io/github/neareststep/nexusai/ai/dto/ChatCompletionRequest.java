@@ -14,6 +14,7 @@ public final class ChatCompletionRequest {
     private final Integer maxTokens;
     private final Integer maxCompletionTokens;
     private final String reasoningEffort;
+    private final Object responseFormat;
 
     public ChatCompletionRequest(
             String model,
@@ -23,12 +24,25 @@ public final class ChatCompletionRequest {
             Integer maxCompletionTokens,
             String reasoningEffort
     ) {
+        this(model, messages, temperature, maxTokens, maxCompletionTokens, reasoningEffort, null);
+    }
+
+    public ChatCompletionRequest(
+            String model,
+            List<Message> messages,
+            Double temperature,
+            Integer maxTokens,
+            Integer maxCompletionTokens,
+            String reasoningEffort,
+            Object responseFormat
+    ) {
         this.model = model;
         this.messages = messages;
         this.temperature = temperature;
         this.maxTokens = maxTokens;
         this.maxCompletionTokens = maxCompletionTokens;
         this.reasoningEffort = reasoningEffort;
+        this.responseFormat = responseFormat;
     }
 
     public String getModel() {
@@ -56,6 +70,11 @@ public final class ChatCompletionRequest {
     @JsonProperty("reasoning_effort")
     public String getReasoningEffort() {
         return reasoningEffort;
+    }
+
+    @JsonProperty("response_format")
+    public Object getResponseFormat() {
+        return responseFormat;
     }
 
     public static final class Message {

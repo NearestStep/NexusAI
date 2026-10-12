@@ -1,6 +1,10 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.budget.ModelQueue;
+import io.github.neareststep.nexusai.budget.TokenAccounting;
+import io.github.neareststep.nexusai.budget.TokenLedger;
+import io.github.neareststep.nexusai.budget.TokenLedgerStore;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
@@ -8,11 +12,16 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -380,6 +389,66 @@ class RoutingProviderTest {
         assertEquals(0, calls.get());
     }
 
+    @Test
+    void unknownModelBlocksOnlyThatModel() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AtomicInteger calls = new AtomicInteger();
+        List<String> models = new ArrayList<>();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            models.add(model);
+            if ("llama-3.1-8b-instant".equals(model)) {
+                throw new AiRequestException(
+                        AiErrorKind.UNKNOWN_MODEL,
+                        404,
+                        "HTTP 404 unknown model: model_not_found llama-3.1-8b-instant",
+                        null);
+            }
+            return new ChatExchange("ok", Map.of());
+        };
+        Harness harness = harness(List.of(entry("groq", "llama-3.1-8b-instant", 0)), clock, http);
+        AiRequestException first = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, first.kind());
+        assertTrue(first.getMessage().contains("llama-3.1-8b-instant"), first.getMessage());
+        assertEquals(1, calls.get());
+
+        String other = harness.provider().complete(
+                "ping", GenerationOverrides.none().withModel("openai/gpt-oss-20b"), false).join();
+        assertEquals("ok", other);
+        assertEquals(List.of("llama-3.1-8b-instant", "openai/gpt-oss-20b"), models);
+        assertEquals(2, calls.get());
+
+        AiRequestException again = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, again.kind());
+        assertTrue(again.getMessage().contains("llama-3.1-8b-instant"), again.getMessage());
+        assertEquals(2, calls.get());
+
+        CompletionException probe = assertThrows(CompletionException.class,
+                () -> harness.provider().complete("ping", GenerationOverrides.none(), true).join());
+        assertEquals(AiErrorKind.UNKNOWN_MODEL, AiErrors.find(probe).kind());
+        assertEquals(3, calls.get());
+    }
+
+    @Test
+    void otherErrorsStillCoolTheWholeRow() {
+        AtomicLong clock = new AtomicLong(10_000L);
+        AtomicInteger calls = new AtomicInteger();
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            calls.incrementAndGet();
+            throw new AiRequestException(AiErrorKind.OTHER, 500, "HTTP 500 from api.groq.com: down", null);
+        };
+        Harness harness = harness(List.of(entry("groq", "llama-3.1-8b-instant", 0)), clock, http);
+        AiRequestException first = failure(harness.provider(), false);
+        assertEquals(AiErrorKind.OTHER, first.kind());
+        assertEquals(1, calls.get());
+
+        CompletionException error = assertThrows(CompletionException.class,
+                () -> harness.provider().complete(
+                        "ping", GenerationOverrides.none().withModel("openai/gpt-oss-20b"), false).join());
+        assertNotNull(AiErrors.find(error));
+        assertEquals(1, calls.get());
+    }
+
     private static String failover(AiRequestException firstError) {
         AtomicInteger calls = new AtomicInteger();
         ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
@@ -396,6 +465,112 @@ class RoutingProviderTest {
         assertEquals(2, calls.get());
         assertTrue(harness.queue().status(8_000L).getFirst().state().startsWith("COOLDOWN"));
         return answer;
+    }
+
+    @Test
+    void reportedUsageLandsOnThePlaceholderSlices() throws Exception {
+        UUID player = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        AtomicLong clock = new AtomicLong(1_000L);
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> new ChatExchange(
+                "pong",
+                Map.of(),
+                null,
+                "",
+                model,
+                ResponseUsage.reported(100, 20, 120, null),
+                "stop",
+                1,
+                false,
+                1L);
+        Counted counted = counted(List.of(entry("openai", "gpt-4o-mini", 0)), clock, http);
+        try {
+            counted.provider().answer(
+                    "ping",
+                    GenerationOverrides.none(),
+                    false,
+                    CallTrace.start(RequestOrigin.PLACEHOLDER, player, "greet", "")).get();
+            TokenLedger.Snapshot snap = counted.ledger().snapshot();
+            assertEquals(1L, snap.server().requests());
+            assertEquals(100L, snap.server().prompt());
+            assertEquals(20L, snap.server().completion());
+            assertEquals(120L, snap.server().total());
+            assertEquals(0L, snap.server().estimated());
+            assertEquals(120L, snap.providers().get("openai").total());
+            assertEquals(120L, snap.rows().get("0|openai|gpt-4o-mini").total());
+            assertEquals(120L, snap.origins().get("placeholder").total());
+            assertEquals(120L, snap.consumers().get("nexusai").total());
+            assertEquals(120L, snap.players().get(player.toString()).total());
+        } finally {
+            counted.executor().shutdownNow();
+        }
+    }
+
+    @Test
+    void aRejectedAttemptIsCountedAndAReplyWithoutUsageIsNot() throws Exception {
+        UUID player = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        AtomicLong clock = new AtomicLong(1_000L);
+        ChatCaller rejected = (prompt, overrides, baseUrl, apiKey, model) -> {
+            throw new AiRequestException(AiErrorKind.REJECTED, 200, "no", null)
+                    .withUsage(ResponseUsage.reported(10, 2, 12, null));
+        };
+        Counted rejectedCall = counted(List.of(entry("openai", "gpt-4o-mini", 0)), clock, rejected);
+        try {
+            assertThrows(ExecutionException.class, () -> rejectedCall.provider().answer(
+                    "ping",
+                    GenerationOverrides.none(),
+                    false,
+                    CallTrace.start(RequestOrigin.TEST, player, "probe", "")).get());
+            TokenLedger.Snapshot snap = rejectedCall.ledger().snapshot();
+            assertEquals(1L, snap.server().requests());
+            assertEquals(12L, snap.server().total());
+            assertTrue(snap.players().isEmpty());
+            assertEquals(12L, snap.origins().get("test").total());
+        } finally {
+            rejectedCall.executor().shutdownNow();
+        }
+
+        ChatCaller empty = (prompt, overrides, baseUrl, apiKey, model) -> new ChatExchange("pong", Map.of());
+        Counted emptyCall = counted(List.of(entry("openai", "gpt-4o-mini", 0)), clock, empty);
+        try {
+            emptyCall.provider().answer(
+                    "ping",
+                    GenerationOverrides.none(),
+                    false,
+                    CallTrace.start(RequestOrigin.PLACEHOLDER, player, "greet", "")).get();
+            assertEquals(0L, emptyCall.ledger().snapshot().server().requests());
+        } finally {
+            emptyCall.executor().shutdownNow();
+        }
+    }
+
+    @Test
+    void aDedicatedFallbackIsNotStoredAsAQueueRow() throws Exception {
+        UUID player = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        AtomicLong clock = new AtomicLong(1_000L);
+        ChatCaller http = (prompt, overrides, baseUrl, apiKey, model) -> {
+            if ("gpt-4o-mini".equals(model)) {
+                throw new AiRequestException(AiErrorKind.RATE_LIMIT, 429, "HTTP 429", null);
+            }
+            return new ChatExchange(
+                    "pong", Map.of(), null, "", model, ResponseUsage.reported(4, 1, 5, null), "stop", 1, false, 1L);
+        };
+        Counted counted = counted(List.of(entry("openai", "gpt-4o-mini", 0)), clock, http);
+        try {
+            counted.provider().answer(
+                    "ping",
+                    GenerationOverrides.none().withFallbackModel("groq", "llama"),
+                    false,
+                    CallTrace.start(RequestOrigin.TALK, player, "npc", "")).get();
+            TokenLedger.Snapshot snap = counted.ledger().snapshot();
+            assertEquals(1L, snap.server().requests());
+            assertEquals(5L, snap.server().total());
+            assertEquals(5L, snap.fallback().get("groq|llama").total());
+            assertTrue(snap.rows().isEmpty());
+            assertEquals(5L, snap.players().get(player.toString()).total());
+            assertEquals(5L, snap.origins().get("talk").total());
+        } finally {
+            counted.executor().shutdownNow();
+        }
     }
 
     private static AiRequestException failure(RoutingProvider provider, boolean probe) {
@@ -427,6 +602,38 @@ class RoutingProviderTest {
     }
 
     private record Harness(ModelQueue queue, RoutingProvider provider) {
+    }
+
+    private static Counted counted(List<QueueEntryConfig> entries, AtomicLong clock, ChatCaller http) {
+        ModelQueue queue = new ModelQueue(
+                entries,
+                0,
+                60_000L,
+                300_000L,
+                null,
+                clock::get,
+                () -> LocalDate.of(2026, 10, 7),
+                ZoneId.of("UTC"),
+                Logger.getLogger("route-tokens"));
+        ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "route-tokens");
+            thread.setDaemon(true);
+            return thread;
+        });
+        RoutingProvider provider = new RoutingProvider(
+                config(), queue, http, executor, Logger.getLogger("route-tokens"), clock::get);
+        TokenLedger ledger = new TokenLedger(() -> LocalDate.of(2026, 10, 7), Logger.getLogger("route-tokens"));
+        provider.tokenAccounting(new TokenAccounting(new TokenLedgerStore(
+                null,
+                null,
+                ledger,
+                Logger.getLogger("route-tokens"),
+                () -> OffsetDateTime.of(2026, 10, 7, 12, 0, 0, 0, ZoneOffset.UTC),
+                clock::get)));
+        return new Counted(provider, ledger, executor);
+    }
+
+    private record Counted(RoutingProvider provider, TokenLedger ledger, ExecutorService executor) {
     }
 
     private static PluginConfig config() {

@@ -6,10 +6,21 @@ import java.util.List;
  * One configured provider: wire type, endpoint, and the resolved API keys (never logged in full).
  * The four-argument constructor remains for callers that do not name a {@link KeySource}.
  */
-public record ProviderSettings(String id, String type, String url, List<String> apiKeys, KeySource keySource) {
+public record ProviderSettings(
+        String id,
+        String type,
+        String url,
+        List<String> apiKeys,
+        KeySource keySource,
+        String structuredOutput
+) {
 
     public ProviderSettings(String id, String type, String url, List<String> apiKeys) {
-        this(id, type, url, apiKeys, KeySource.CONFIG);
+        this(id, type, url, apiKeys, KeySource.CONFIG, null);
+    }
+
+    public ProviderSettings(String id, String type, String url, List<String> apiKeys, KeySource keySource) {
+        this(id, type, url, apiKeys, keySource, null);
     }
 
     public ProviderSettings {
@@ -19,6 +30,12 @@ public record ProviderSettings(String id, String type, String url, List<String> 
         apiKeys = apiKeys == null ? List.of() : List.copyOf(apiKeys);
         if (keySource == null) {
             keySource = KeySource.CONFIG;
+        }
+        if (structuredOutput != null) {
+            structuredOutput = structuredOutput.trim();
+            if (structuredOutput.isEmpty()) {
+                structuredOutput = null;
+            }
         }
     }
 

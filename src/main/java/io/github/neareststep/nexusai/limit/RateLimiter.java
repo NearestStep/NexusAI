@@ -45,14 +45,28 @@ public final class RateLimiter {
      * @return {@code true} if the request is allowed
      */
     public boolean tryAcquire(UUID playerId) {
+        return tryAcquire(playerId, false);
+    }
+
+    /**
+     * @param skipPlayerDay when true, the player day window is not taken. The player minute window
+     *                      and both server windows still apply. A quota group uses this so its own
+     *                      calendar-day request cap can replace {@code limits.player-requests-per-day}.
+     */
+    public boolean tryAcquire(UUID playerId, boolean skipPlayerDay) {
         UUID id = playerId == null ? SERVER_SENTINEL : playerId;
         long now = System.currentTimeMillis();
 
         if (!SERVER_SENTINEL.equals(id)) {
             WindowCounter minute = minuteWindows.computeIfAbsent(id, ignored -> new WindowCounter(60_000L));
-            WindowCounter day = dayWindows.computeIfAbsent(id, ignored -> new WindowCounter(86_400_000L));
-            if (!minute.tryAcquire(now, playerRequestsPerMinute) || !day.tryAcquire(now, playerRequestsPerDay)) {
+            if (!minute.tryAcquire(now, playerRequestsPerMinute)) {
                 return false;
+            }
+            if (!skipPlayerDay) {
+                WindowCounter day = dayWindows.computeIfAbsent(id, ignored -> new WindowCounter(86_400_000L));
+                if (!day.tryAcquire(now, playerRequestsPerDay)) {
+                    return false;
+                }
             }
         }
 

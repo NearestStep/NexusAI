@@ -1,7 +1,6 @@
 package io.github.neareststep.nexusai.context;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
-import org.bukkit.Bukkit;
 import org.bukkit.Keyed;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
@@ -91,14 +90,7 @@ public final class ContextVariables {
     }
 
     private static boolean owns(Player player) {
-        try {
-            if (Bukkit.getServer() == null) {
-                return false;
-            }
-            return Bukkit.isOwnedByCurrentRegion(player);
-        } catch (Throwable ignored) {
-            return false;
-        }
+        return RegionOwnership.owned(player);
     }
 
     private static String biomeName(Player player) {

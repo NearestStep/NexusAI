@@ -26,6 +26,22 @@ public interface ChatCaller {
             String apiKey,
             String model
     ) {
+        return exchangeAsync(prompt, overrides, baseUrl, apiKey, model, null);
+    }
+
+    /**
+     * Same call as {@link #exchangeAsync(String, GenerationOverrides, String, String, String)}.
+     * {@code trace} is the entrance that asked for this completion. The default ignores it and
+     * still runs {@link #exchange}.
+     */
+    default CompletableFuture<ChatExchange> exchangeAsync(
+            String prompt,
+            GenerationOverrides overrides,
+            String baseUrl,
+            String apiKey,
+            String model,
+            CallTrace trace
+    ) {
         try {
             return CompletableFuture.completedFuture(exchange(prompt, overrides, baseUrl, apiKey, model));
         } catch (RuntimeException error) {

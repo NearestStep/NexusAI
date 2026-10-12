@@ -5,6 +5,7 @@ import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.RateLimitHeaders;
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.ConfigVersions;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import io.github.neareststep.nexusai.config.QueueStrategy;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -12,6 +13,9 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.regex.Pattern;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -23,7 +27,6 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -33,9 +36,15 @@ import java.util.logging.Logger;
 public final class ModelQueue {
 
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final Pattern STALE_TEMP = Pattern.compile(
+            "^usage\\.yml\\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.tmp$");
 
     private final List<Slot> slots;
+    /** Spent plus reserved tokens for a row. {@link RowTokens#NONE} leaves token caps unenforced. */
+    private volatile RowTokens rowTokens = RowTokens.NONE;
     private final Map<String, Slot> fallbackSlots = new LinkedHashMap<>();
+    /** {@code provider + model} that returned HTTP 404 {@code model_not_found}. Does not cool other models. */
+    private final Map<String, UnknownModelHold> unknownModels = new LinkedHashMap<>();
     private final Map<String, AtomicInteger> providerCounts = new LinkedHashMap<>();
     private final int remainingThreshold;
     private final long errorCooldownMillis;
@@ -54,6 +63,12 @@ public final class ModelQueue {
      */
     private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
     private final Object ioLock = new Object();
+    /** When set, {@link #save()} writes on this executor instead of the caller. Tests leave it empty. */
+    private volatile Executor saveExecutor;
+    /** After reload or shutdown, queued writes from this instance must not replace the new file. */
+    private volatile boolean closed;
+    /** Resolved API keys. A data-directory path in a usage.yml warning is masked with these. */
+    private volatile Supplier<Iterable<String>> secretSource = List::of;
     private LocalDate day;
     private int moderationChecks;
     private int moderationFlags;
@@ -154,15 +169,59 @@ public final class ModelQueue {
         List<QueueEntryConfig> source = entries == null ? List.of() : entries;
         for (int i = 0; i < source.size(); i++) {
             QueueEntryConfig entry = source.get(i);
-            loaded.add(new Slot(i, entry.provider(), entry.model(), entry.dailyRequestLimit()));
+            loaded.add(new Slot(
+                    i, entry.provider(), entry.model(), entry.dailyRequestLimit(), entry.dailyTokenLimit()));
             providerCounts.putIfAbsent(entry.provider(), new AtomicInteger());
         }
         this.slots = List.copyOf(loaded);
+        sweepTemps();
         load();
+    }
+
+    /** Token cap for one queue row. {@code 0} means the row has no token cap. A fallback-only slot is {@code 0}. */
+    public int dailyTokenLimit(int index) {
+        Slot slot = slot(index);
+        return slot == null ? 0 : slot.dailyTokenLimit;
+    }
+
+    /**
+     * Where {@link #isSelectable} reads tokens already spent or reserved on a row.
+     * Passing {@link RowTokens#NONE}, or leaving this unset, does not enforce {@code daily-token-limit}.
+     */
+    public void rowTokens(RowTokens source) {
+        this.rowTokens = source == null ? RowTokens.NONE : source;
+    }
+
+    /** Storage id written to {@code usage.yml} for a queue row, or empty when {@code index} is not a row. */
+    public String rowStorageId(int index) {
+        if (index < 0 || index >= slots.size()) {
+            return "";
+        }
+        return slots.get(index).storageId();
+    }
+
+    /** Id of a dedicated fallback slot, {@code provider|model}. */
+    public static String fallbackStorageId(String provider, String model) {
+        String left = provider == null ? "" : provider;
+        String right = model == null ? "" : model;
+        return left + "|" + right;
+    }
+
+    /**
+     * Request-path saves run here so the caller does not touch the disk.
+     * A null executor keeps the historical synchronous save used by tests.
+     */
+    public void saveExecutor(Executor executor) {
+        this.saveExecutor = executor;
     }
 
     public int size() {
         return slots.size();
+    }
+
+    /** Keys used to mask a path in a usage.yml warning. Empty until the plugin wires config. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? List::of : secrets;
     }
 
     public synchronized List<Choice> selectable(long nowMillis) {
@@ -175,6 +234,58 @@ public final class ModelQueue {
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
         return selectFrom(nowMillis, ignoreCooldown, roundRobinCursor);
+    }
+
+    /**
+     * {@link #selectable(long, boolean)}, plus rows whose only hold is {@code model_not_found}
+     * on a different model. {@code overrideModel} is the {@code model(...)} value, or null when
+     * the call uses the row's own model. The failed model stays blocked.
+     */
+    public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown, String overrideModel) {
+        return addUnknownModelOverride(selectFrom(nowMillis, ignoreCooldown, roundRobinCursor), overrideModel, nowMillis);
+    }
+
+    /**
+     * Rows cooled only because their configured model was not found, when {@code overrideModel}
+     * is a different model that has not itself failed that way.
+     */
+    public synchronized List<Choice> addUnknownModelOverride(List<Choice> ready, String overrideModel, long nowMillis) {
+        if (overrideModel == null || overrideModel.isBlank() || ready == null) {
+            return ready == null ? List.of() : ready;
+        }
+        List<Choice> extra = new ArrayList<>();
+        for (Slot slot : slots) {
+            if (choiceListed(ready, slot.index) || !blockedOnlyByUnknownModel(slot, nowMillis)) {
+                continue;
+            }
+            if (unknownModelActive(slot.provider, overrideModel, nowMillis)) {
+                continue;
+            }
+            extra.add(slot.choice());
+        }
+        if (extra.isEmpty()) {
+            return ready;
+        }
+        List<Choice> merged = new ArrayList<>(ready.size() + extra.size());
+        merged.addAll(ready);
+        merged.addAll(extra);
+        return List.copyOf(merged);
+    }
+
+    /**
+     * Stored 404 for this provider and model, or null when that model is not in the hold.
+     */
+    public synchronized AiRequestException unknownModelError(String provider, String model, long nowMillis) {
+        String key = unknownModelKey(provider, model);
+        UnknownModelHold hold = unknownModels.get(key);
+        if (hold == null) {
+            return null;
+        }
+        if (nowMillis >= hold.untilMillis) {
+            unknownModels.remove(key);
+            return null;
+        }
+        return hold.error;
     }
 
     /**
@@ -414,6 +525,8 @@ public final class ModelQueue {
             blocked.add(slot);
             if (slot.unavailableUntil > nowMillis) {
                 soonest = Math.min(soonest, slot.unavailableUntil);
+            } else if (tokenBlocked(slot, false)) {
+                soonest = Math.min(soonest, nextMidnight(nowMillis));
             }
             boolean daily = isDaily(slot);
             if (!daily) {
@@ -443,8 +556,11 @@ public final class ModelQueue {
             return withRetry(cause, retry);
         }
         if (sawBlocked && dailyOnly) {
+            AiErrorKind kind = tokenOnlyExhaustion(blocked) && fallbackBudgets.isEmpty()
+                    ? AiErrorKind.LOCAL_QUOTA
+                    : AiErrorKind.LOCAL_LIMIT;
             return new AiRequestException(
-                    AiErrorKind.LOCAL_LIMIT, 0, "All model-queue entries are exhausted." + retry, null);
+                    kind, 0, "All model-queue entries are exhausted." + retry, null);
         }
         if (sawHeader) {
             return new AiRequestException(AiErrorKind.RATE_LIMIT, 0, "AI provider rate limit." + retry, null);
@@ -479,12 +595,33 @@ public final class ModelQueue {
     }
 
     public synchronized void markFailure(int index, AiRequestException error, long nowMillis) {
-        markSlotFailure(slot(index), error, nowMillis);
+        markFailure(index, null, error, nowMillis);
+    }
+
+    /**
+     * {@code requestedModel} is the model that was called. When it differs from the row's model,
+     * a {@code model_not_found} failure is stored for that model only and the row stays selectable.
+     */
+    public synchronized void markFailure(int index, String requestedModel, AiRequestException error, long nowMillis) {
+        Slot slot = slot(index);
+        String failed = requestedModel == null || requestedModel.isBlank()
+                ? (slot == null ? "" : slot.model)
+                : requestedModel;
+        if (slot != null && error != null && error.kind() == AiErrorKind.UNKNOWN_MODEL) {
+            rememberUnknownModel(slot.provider, failed, error, nowMillis);
+            if (!slot.model.equals(failed)) {
+                return;
+            }
+        }
+        markSlotFailure(slot, error, nowMillis);
     }
 
     public synchronized void markFallbackFailure(String provider, String model, AiRequestException error, long nowMillis) {
         if (provider == null || model == null) {
             return;
+        }
+        if (error != null && error.kind() == AiErrorKind.UNKNOWN_MODEL) {
+            rememberUnknownModel(provider, model, error, nowMillis);
         }
         markSlotFailure(fallbackSlot(provider, model), error, nowMillis);
     }
@@ -590,6 +727,8 @@ public final class ModelQueue {
             String state;
             if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
                 state = "LIMIT REACHED (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
+            } else if (tokenBlocked(slot, false)) {
+                state = "LIMIT REACHED (tokens " + rowTokens.used(slot.storageId()) + "/" + slot.dailyTokenLimit + ")";
             } else if (nowMillis < slot.unavailableUntil) {
                 String when = Instant.ofEpochMilli(slot.unavailableUntil).atZone(zone).format(CLOCK);
                 state = "COOLDOWN until " + when;
@@ -642,54 +781,121 @@ public final class ModelQueue {
         );
     }
 
-    public synchronized void save() {
+    public void save() {
+        if (closed || usageFile == null) {
+            return;
+        }
+        YamlConfiguration yaml = capture();
+        Executor executor = saveExecutor;
+        if (executor == null) {
+            write(yaml, false);
+            return;
+        }
+        executor.execute(() -> write(yaml, false));
+    }
+
+    /**
+     * Writes the current counters and ignores later saves from this instance.
+     * Reload and shutdown call this so a queued save cannot replace the next file.
+     */
+    public void flushAndClose() {
         if (usageFile == null) {
+            closed = true;
+            return;
+        }
+        write(capture(), true);
+    }
+
+    private synchronized YamlConfiguration capture() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.set("config-version", ConfigVersions.CURRENT);
+        yaml.set("day", day.toString());
+        for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
+            yaml.set("providers." + entry.getKey(), entry.getValue().get());
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Slot slot : slots) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", slot.storageId());
+            row.put("provider", slot.provider);
+            row.put("model", slot.model);
+            row.put("requests", slot.requests.get());
+            row.put("rejected", slot.rejected.get());
+            rows.add(row);
+        }
+        yaml.set("entries", rows);
+        yaml.set("moderation.checks", moderationChecks);
+        yaml.set("moderation.flags", moderationFlags);
+        if (!fallbackSlots.isEmpty()) {
+            List<Map<String, Object>> fallbackRows = new ArrayList<>();
+            for (Slot slot : fallbackSlots.values()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", slot.storageId());
+                row.put("provider", slot.provider);
+                row.put("model", slot.model);
+                row.put("requests", slot.requests.get());
+                row.put("rejected", slot.rejected.get());
+                fallbackRows.add(row);
+            }
+            yaml.set("fallback", fallbackRows);
+        }
+        return yaml;
+    }
+
+    private void write(YamlConfiguration yaml, boolean closeAfter) {
+        if (usageFile == null || yaml == null) {
+            if (closeAfter) {
+                closed = true;
+            }
             return;
         }
         synchronized (ioLock) {
+            if (closed) {
+                return;
+            }
+            File temporary = null;
             try {
-                YamlConfiguration yaml = new YamlConfiguration();
-                yaml.set("config-version", ConfigVersions.CURRENT);
-                yaml.set("day", day.toString());
-                for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
-                    yaml.set("providers." + entry.getKey(), entry.getValue().get());
-                }
-                List<Map<String, Object>> rows = new ArrayList<>();
-                for (Slot slot : slots) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("id", slot.storageId());
-                    row.put("provider", slot.provider);
-                    row.put("model", slot.model);
-                    row.put("requests", slot.requests.get());
-                    row.put("rejected", slot.rejected.get());
-                    rows.add(row);
-                }
-                yaml.set("entries", rows);
-                yaml.set("moderation.checks", moderationChecks);
-                yaml.set("moderation.flags", moderationFlags);
-                if (!fallbackSlots.isEmpty()) {
-                    List<Map<String, Object>> fallbackRows = new ArrayList<>();
-                    for (Slot slot : fallbackSlots.values()) {
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        row.put("id", slot.storageId());
-                        row.put("provider", slot.provider);
-                        row.put("model", slot.model);
-                        row.put("requests", slot.requests.get());
-                        row.put("rejected", slot.rejected.get());
-                        fallbackRows.add(row);
-                    }
-                    yaml.set("fallback", fallbackRows);
-                }
                 File parent = usageFile.getParentFile();
-                if (parent != null) {
-                    parent.mkdirs();
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                    throw new IOException("Could not create " + parent.getName());
                 }
-                if (!usageFile.isFile()) {
-                    AtomicFiles.createPrivate(usageFile.toPath());
-                }
-                AtomicFiles.preserving(usageFile.toPath(), () -> yaml.save(usageFile));
+                File directory = parent == null ? new File(".") : parent;
+                temporary = new File(directory, usageFile.getName() + "." + UUID.randomUUID() + ".tmp");
+                AtomicFiles.createPrivate(temporary.toPath());
+                yaml.save(temporary);
+                AtomicFiles.durableReplace(temporary.toPath(), usageFile.toPath());
             } catch (IOException e) {
-                logger.log(Level.WARNING, "Failed to save usage counters", e);
+                Iterable<String> known = secretSource.get();
+                LogRedaction.warning(logger, "Failed to save usage counters", e, known == null ? List.of() : known);
+            } finally {
+                if (temporary != null && temporary.isFile() && !temporary.equals(usageFile)) {
+                    temporary.delete();
+                }
+                if (closeAfter) {
+                    closed = true;
+                }
+            }
+        }
+    }
+
+    private void sweepTemps() {
+        if (usageFile == null) {
+            return;
+        }
+        File parent = usageFile.getParentFile();
+        if (parent == null || !parent.isDirectory()) {
+            return;
+        }
+        File[] children = parent.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            if (!child.isFile() || !STALE_TEMP.matcher(child.getName()).matches()) {
+                continue;
+            }
+            if (!child.delete()) {
+                logger.warning("Could not remove stale temp file " + child.getName());
             }
         }
     }
@@ -797,8 +1003,60 @@ public final class ModelQueue {
         save();
     }
 
+    private void rememberUnknownModel(String provider, String model, AiRequestException error, long nowMillis) {
+        if (provider == null || provider.isBlank() || model == null || model.isBlank() || error == null) {
+            return;
+        }
+        long until = nowMillis + errorCooldownMillis;
+        String key = unknownModelKey(provider, model);
+        UnknownModelHold previous = unknownModels.get(key);
+        if (previous != null && previous.untilMillis > until) {
+            return;
+        }
+        unknownModels.put(key, new UnknownModelHold(until, error));
+    }
+
+    private boolean unknownModelActive(String provider, String model, long nowMillis) {
+        return unknownModelError(provider, model, nowMillis) != null;
+    }
+
+    private static String unknownModelKey(String provider, String model) {
+        return (provider == null ? "" : provider) + "\u0000" + (model == null ? "" : model);
+    }
+
+    private static boolean choiceListed(List<Choice> ready, int index) {
+        for (Choice choice : ready) {
+            if (choice.index() == index) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The row is out only because its own model returned {@code model_not_found}. */
+    private boolean blockedOnlyByUnknownModel(Slot slot, long nowMillis) {
+        if (slot == null || isSelectable(slot, nowMillis, false)) {
+            return false;
+        }
+        if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
+            return false;
+        }
+        if (tokenBlocked(slot, true)) {
+            return false;
+        }
+        if (slot.hold == Hold.DAILY || slot.hold == Hold.HEADER) {
+            return false;
+        }
+        return slot.lastError != null
+                && slot.lastError.kind() == AiErrorKind.UNKNOWN_MODEL
+                && nowMillis < slot.unavailableUntil;
+    }
+
     private boolean isSelectable(Slot slot, long nowMillis, boolean ignoreCooldown) {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
+            return false;
+        }
+        if (tokenBlocked(slot, true)) {
             return false;
         }
         if (ignoreCooldown && slot.hold != Hold.DAILY) {
@@ -869,6 +1127,10 @@ public final class ModelQueue {
     }
 
     private String slotReason(Slot slot) {
+        if (tokenBlocked(slot, false) && !isRequestDaily(slot)) {
+            return "daily token limit reached (" + rowTokens.used(slot.storageId())
+                    + "/" + slot.dailyTokenLimit + ")";
+        }
         if (isDaily(slot)) {
             if (slot.dailyLimit > 0) {
                 return "daily request limit reached (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
@@ -902,9 +1164,65 @@ public final class ModelQueue {
         return "request or token budget exhausted";
     }
 
-    private static boolean isDaily(Slot slot) {
+    private static boolean isRequestDaily(Slot slot) {
         return slot.hold == Hold.DAILY
                 || (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit);
+    }
+
+    private boolean isDaily(Slot slot) {
+        return isRequestDaily(slot) || tokenBlocked(slot, false);
+    }
+
+    private boolean tokenOnlyExhaustion(List<Slot> blocked) {
+        if (blocked.isEmpty()) {
+            return false;
+        }
+        for (Slot slot : blocked) {
+            if (isRequestDaily(slot) || !tokenBlocked(slot, false)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean tokenBlocked(Slot slot, boolean note) {
+        if (slot.dailyTokenLimit <= 0) {
+            return false;
+        }
+        RowTokens source = rowTokens;
+        if (source == null) {
+            return false;
+        }
+        long used = source.used(slot.storageId());
+        if (used < slot.dailyTokenLimit) {
+            return false;
+        }
+        if (note && source instanceof QuotaPolicy policy) {
+            policy.noteIfExhausted("row " + slot.storageId(), used, slot.dailyTokenLimit);
+        }
+        return true;
+    }
+
+    private long nextMidnight(long nowMillis) {
+        long midnight = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli();
+        if (midnight <= nowMillis) {
+            return nowMillis + 1_000L;
+        }
+        return midnight;
+    }
+
+    /** True when every row is at its token cap. Request caps and cooldowns do not count. */
+    public synchronized boolean allRowsTokenBlocked(long nowMillis) {
+        roll(nowMillis);
+        if (slots.isEmpty()) {
+            return false;
+        }
+        for (Slot slot : slots) {
+            if (!tokenBlocked(slot, false)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean isBudgetBlock(Slot slot) {
@@ -976,6 +1294,9 @@ public final class ModelQueue {
         if (slot.dailyLimit > 0 && slot.requests.get() >= slot.dailyLimit) {
             return "LIMIT REACHED (" + slot.requests.get() + "/" + slot.dailyLimit + ")";
         }
+        if (tokenBlocked(slot, false)) {
+            return "LIMIT REACHED (tokens " + rowTokens.used(slot.storageId()) + "/" + slot.dailyTokenLimit + ")";
+        }
         if (nowMillis < slot.unavailableUntil) {
             String when = Instant.ofEpochMilli(slot.unavailableUntil).atZone(zone).format(CLOCK);
             return "COOLDOWN until " + when;
@@ -997,6 +1318,13 @@ public final class ModelQueue {
         return any;
     }
 
+    /** Queue index for this provider and model, or {@code -1} when the pair is not a queue row. */
+    public synchronized int indexOf(String provider, String model) {
+        String id = provider == null ? "" : provider.trim().toLowerCase(java.util.Locale.ROOT);
+        Slot slot = findQueueSlot(id, model == null ? "" : model);
+        return slot == null ? -1 : slot.index;
+    }
+
     private Slot findQueueSlot(String provider, String model) {
         if (provider == null || model == null) {
             return null;
@@ -1015,7 +1343,7 @@ public final class ModelQueue {
         if (existing != null) {
             return existing;
         }
-        Slot created = new Slot(-1, provider, model, 0);
+        Slot created = new Slot(-1, provider, model, 0, 0);
         fallbackSlots.put(id, created);
         providerCounts.putIfAbsent(provider, new AtomicInteger());
         return created;
@@ -1055,11 +1383,22 @@ public final class ModelQueue {
     ) {
     }
 
+    private static final class UnknownModelHold {
+        private final long untilMillis;
+        private final AiRequestException error;
+
+        private UnknownModelHold(long untilMillis, AiRequestException error) {
+            this.untilMillis = untilMillis;
+            this.error = error;
+        }
+    }
+
     private static final class Slot {
         private final int index;
         private final String provider;
         private final String model;
         private final int dailyLimit;
+        private final int dailyTokenLimit;
         private final AtomicInteger requests = new AtomicInteger();
         private final AtomicInteger rejected = new AtomicInteger();
         private volatile long unavailableUntil;
@@ -1070,11 +1409,12 @@ public final class ModelQueue {
         private volatile AiRequestException lastError;
         private volatile long lastFailedAt;
 
-        private Slot(int index, String provider, String model, int dailyLimit) {
+        private Slot(int index, String provider, String model, int dailyLimit, int dailyTokenLimit) {
             this.index = index;
             this.provider = provider;
             this.model = model;
             this.dailyLimit = dailyLimit;
+            this.dailyTokenLimit = Math.max(0, dailyTokenLimit);
         }
 
         private Choice choice() {

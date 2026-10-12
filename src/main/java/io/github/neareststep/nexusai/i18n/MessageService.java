@@ -1,6 +1,9 @@
 package io.github.neareststep.nexusai.i18n;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.config.LogRedaction;
+import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -44,11 +47,13 @@ public final class MessageService {
      * Left as written when substituted. {@code prefix} is the locale colour template.
      * {@code reply} and {@code answer} are inserted as plain text after the template is
      * deserialized, so they are not parsed as legacy codes.
-     * Every other placeholder is data (a character or prompt id, a player name, an error,
-     * a config value, an import name, moderation text) and is stripped before it is
-     * written into the legacy string.
+     * Every other placeholder is data: section signs and click/hover markup are stripped, but
+     * {@code &} is kept literally so a masked URL such as {@code ?key=***&org=***} is not eaten
+     * as a colour code by {@link PlayerInput#stripSectionSigns(String)}.
      */
     private static final Set<String> UNSANITIZED_PLACEHOLDERS = Set.of("prefix", "reply", "answer");
+    /** Temporary stand-in so {@link PlayerInput#stripSectionSigns(String)} cannot treat {@code &o} as italic. */
+    private static final char AMP_GUARD = '\uF8FF';
     private static final Pattern YAML_LOCATION = Pattern.compile("line \\d+, column \\d+");
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
@@ -65,7 +70,7 @@ public final class MessageService {
     /**
      * Test/helper constructor without a live plugin instance.
      */
-    MessageService(FileConfiguration primary, FileConfiguration fallback, String locale) {
+    public MessageService(FileConfiguration primary, FileConfiguration fallback, String locale) {
         this.plugin = null;
         this.primary = primary == null ? new YamlConfiguration() : primary;
         this.fallback = fallback == null ? new YamlConfiguration() : fallback;
@@ -160,17 +165,18 @@ public final class MessageService {
     }
 
     /**
-     * Anything except {@code prefix}, {@code reply}, and {@code answer} is written into the
-     * legacy template, so a section sign in it becomes a colour and a click tag can survive
-     * for a later parser. Strip those values first. {@code reply} and {@code answer} stay raw
-     * here; {@link #component(String, Map)} inserts them as plain text later.
+     * {@code prefix}, {@code reply}, and {@code answer} stay as written.
+     * Every other value is stripped of section signs and click/hover markup, but {@code &} is
+     * kept so a masked query string is not eaten as a colour code. {@link #component(String, Map)}
+     * inserts those values as plain text after the template is coloured.
      */
     private static String inserted(String key, String value) {
         String text = value == null ? "" : value;
         if (UNSANITIZED_PLACEHOLDERS.contains(key)) {
             return text;
         }
-        return PlayerInput.stripSectionSigns(text);
+        String guarded = text.replace('&', AMP_GUARD);
+        return PlayerInput.stripSectionSigns(guarded).replace(AMP_GUARD, '&');
     }
 
     private Map<String, String> placeholderValues(Map<String, String> placeholders) {
@@ -261,7 +267,7 @@ public final class MessageService {
                 String fallback = bundledPresent
                         ? "Using the bundled " + localeCode + " locale."
                         : "Using English.";
-                warnBrokenLocale(plugin.getLogger(), userFile, e, fallback);
+                warnBrokenLocale(plugin.getLogger(), userFile, e, fallback, configuredSecrets());
                 user = new YamlConfiguration();
                 userPresent = false;
                 brokenUserFile = true;
@@ -269,7 +275,7 @@ public final class MessageService {
         }
         if (!brokenUserFile && !bundledPresent && !userPresent && !DEFAULT_LOCALE.equals(localeCode) && plugin != null) {
             File expected = userFile != null ? userFile : new File("lang/" + localeCode + ".yml");
-            warnMissingLocale(plugin.getLogger(), localeCode, expected);
+            warnMissingLocale(plugin.getLogger(), localeCode, expected, configuredSecrets());
         }
         YamlConfiguration merged = merge(user, bundledPresent ? bundled : new YamlConfiguration(), english);
         int filled = userPresent ? filledFromDefaults(user, merged) : 0;
@@ -312,7 +318,7 @@ public final class MessageService {
                 yaml.load(new InputStreamReader(in, StandardCharsets.UTF_8));
             }
         } catch (Exception e) {
-            warnBrokenLocale(plugin.getLogger(), new File(resourcePath), e, "Using English.");
+            warnBrokenLocale(plugin.getLogger(), new File(resourcePath), e, "Using English.", configuredSecrets());
         }
         return yaml;
     }
@@ -369,11 +375,15 @@ public final class MessageService {
      * There is no stack trace. The file is not described as missing from the jar alone.
      */
     static void warnMissingLocale(Logger logger, String localeCode, File expectedFile) {
+        warnMissingLocale(logger, localeCode, expectedFile, List.of());
+    }
+
+    static void warnMissingLocale(Logger logger, String localeCode, File expectedFile, Iterable<String> secrets) {
         if (logger == null) {
             return;
         }
         String path = expectedFile == null ? "lang/" + localeCode + ".yml" : expectedFile.getPath();
-        logger.warning("Locale '" + localeCode + "' is not available: " + path
+        logger.warning("Locale '" + localeCode + "' is not available: " + SecretMask.redact(path, secrets)
                 + " does not exist and lang/" + localeCode + ".yml is not bundled. Using English.");
         logger.warning("Bundled locales: " + String.join(", ", LocaleFiles.BUNDLED) + ".");
     }
@@ -383,14 +393,46 @@ public final class MessageService {
      * the message has them), and the fallback. The stack trace is logged at {@link Level#FINE} only.
      */
     static void warnBrokenLocale(Logger logger, File file, Exception error, String fallback) {
+        warnBrokenLocale(logger, file, error, fallback, List.of());
+    }
+
+    static void warnBrokenLocale(Logger logger, File file, Exception error, String fallback, Iterable<String> secrets) {
         if (logger == null) {
             return;
         }
         String path = file == null ? "(unknown locale file)" : file.getPath();
-        String reason = yamlReason(error);
+        String shown = SecretMask.redact(path, secrets);
+        String reason = SecretMask.redact(yamlReason(error), secrets);
         String where = fallback == null || fallback.isBlank() ? "Using English." : fallback;
-        logger.warning("Could not read " + path + " (" + reason + "). " + where);
-        logger.log(Level.FINE, "Could not read " + path, error);
+        logger.warning("Could not read " + shown + " (" + reason + "). " + where);
+        logger.log(Level.FINE, "Could not read " + shown, fineCause(error, secrets, !shown.equals(path)));
+    }
+
+    private Iterable<String> configuredSecrets() {
+        if (plugin instanceof io.github.neareststep.nexusai.NexusAI nexus) {
+            PluginConfig config = nexus.getPluginConfig();
+            if (config != null) {
+                return config.configuredSecrets();
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * Keeps the original throwable when neither its message nor the logged path holds a secret,
+     * so a locale parser failure still shows the same stack at FINE. A path that changed under
+     * the mask is not attached raw.
+     */
+    private static Throwable fineCause(Throwable error, Iterable<String> secrets, boolean pathChanged) {
+        if (error == null) {
+            return null;
+        }
+        String message = error.getMessage();
+        boolean messageChanged = message != null && !message.equals(SecretMask.redact(message, secrets));
+        if (!pathChanged && !messageChanged) {
+            return error;
+        }
+        return LogRedaction.redactThrowable(error, secrets);
     }
 
     static String yamlReason(Throwable error) {

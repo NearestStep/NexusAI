@@ -30,7 +30,7 @@ class ExamplesConfigTest {
             "config-version", "locale", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "limits", "pool", "prewarm", "moderation", "fallback",
-            "dialogue", "actions", "context", "sanitize", "http");
+            "dialogue", "actions", "context", "plugin-api", "quotas", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
             "provider", "model", "base-url", "key", "system-prompt", "temperature", "max-tokens",
@@ -41,7 +41,10 @@ class ExamplesConfigTest {
 
     private static final Set<String> FALLBACK_MODEL = Set.of("provider", "model");
 
-    private static final Set<String> KNOWLEDGE = Set.of("max-chars", "max-file-chars");
+    private static final Set<String> KNOWLEDGE = Set.of("max-chars", "max-file-chars", "select", "keywords");
+
+    private static final Set<String> KNOWLEDGE_KEYWORDS = Set.of(
+            "max-paragraphs", "max-paragraph-chars", "max-file-chars", "min-matches", "on-no-match", "stop-words");
 
     private static final Set<String> FORMAT = Set.of(
             "instruction", "max-lines", "max-chars", "max-chars-per-line", "max-words",
@@ -80,6 +83,15 @@ class ExamplesConfigTest {
 
     private static final Set<String> HTTP = Set.of("max-in-flight", "queue-size");
 
+    private static final Set<String> PLUGIN_API = Set.of(
+            "enabled", "max-template-chars", "max-var-chars");
+
+    private static final Set<String> QUOTAS = Set.of(
+            "enabled", "missing-usage", "server-tokens-per-day", "player-tokens-per-day",
+            "groups", "consumers", "save-interval-seconds");
+
+    private static final Set<String> QUOTA_LIMIT = Set.of("tokens-per-day", "requests-per-day");
+
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
             "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds");
@@ -87,6 +99,7 @@ class ExamplesConfigTest {
     private static final Set<String> PROMPT_SETTINGS = Set.of(
             "prompt", "vars", "ttl", "fallback", "max-prompt-length", "model", "system-prompt",
             "temperature", "max-tokens", "format", "dialogue", "actions", "knowledge",
+            "knowledge-select", "knowledge-keywords",
             "fallback-model", "context");
 
     private static final Set<String> PROMPT_DIALOGUE = Set.of(
@@ -251,6 +264,9 @@ class ExamplesConfigTest {
         if ("knowledge".equals(parent)) {
             return KNOWLEDGE.contains(key);
         }
+        if ("knowledge.keywords".equals(parent)) {
+            return KNOWLEDGE_KEYWORDS.contains(key);
+        }
         if ("formats".equals(parent)) {
             return "default".equals(key) || FormatPresets.known(key);
         }
@@ -283,6 +299,18 @@ class ExamplesConfigTest {
         }
         if ("context".equals(parent)) {
             return CONTEXT.contains(key);
+        }
+        if ("plugin-api".equals(parent)) {
+            return PLUGIN_API.contains(key);
+        }
+        if ("quotas".equals(parent)) {
+            return QUOTAS.contains(key);
+        }
+        if ("quotas.groups".equals(parent) || "quotas.consumers".equals(parent)) {
+            return true;
+        }
+        if (parent.startsWith("quotas.groups.") || parent.startsWith("quotas.consumers.")) {
+            return QUOTA_LIMIT.contains(key);
         }
         if ("http".equals(parent)) {
             return HTTP.contains(key);

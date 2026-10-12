@@ -1,7 +1,9 @@
 package io.github.neareststep.nexusai.prewarm;
 
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.CompletionSupport;
+import io.github.neareststep.nexusai.api.RequestOrigin;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
@@ -9,6 +11,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.knowledge.KnowledgeBase;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
+import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.PromptCatalog;
 
@@ -180,7 +183,8 @@ public final class PrewarmService {
                 }
             }
             KnowledgeComposer.Prepared composed = KnowledgeComposer.prepare(
-                    overrides, config.getSystemPrompt(), knowledge, prompt.knowledge());
+                    overrides, config.getSystemPrompt(), knowledge, prompt.knowledge(),
+                    KnowledgeRequests.of(prompt, config.knowledgeSelect(), text));
             overrides = composed.overrides();
             knowledgeHash = composed.cacheToken();
             ttl = prompt.ttl();
@@ -201,9 +205,11 @@ public final class PrewarmService {
         if (httpClient.isAdmissionBlocked(prepared.text())) {
             return;
         }
+        String promptId = prepared.overrides().noticeId();
+        CallTrace trace = CallTrace.start(RequestOrigin.PREWARM, null, promptId == null ? "" : promptId, "");
         CompletionSupport.onComplete(
                 httpClient.requestAsync(
-                        prepared.text(), null, prepared.overrides(), prepared.ttl(), prepared.knowledgeHash()),
+                        prepared.text(), null, prepared.overrides(), prepared.ttl(), prepared.knowledgeHash(), trace),
                 logger,
                 "Prewarm request failed",
                 (ignored, error) -> {

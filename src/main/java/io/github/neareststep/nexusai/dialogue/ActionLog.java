@@ -1,5 +1,9 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.config.AtomicFiles;
+import io.github.neareststep.nexusai.config.LogRedaction;
+
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -10,6 +14,7 @@ public final class ActionLog {
     private final Logger logger;
     private final java.io.File file;
     private final java.util.function.BooleanSupplier enabled;
+    private volatile Supplier<Iterable<String>> secretSource = java.util.List::of;
 
     public ActionLog(Logger logger, java.io.File file, java.util.function.BooleanSupplier enabled) {
         this.logger = logger;
@@ -19,6 +24,11 @@ public final class ActionLog {
 
     public static ActionLog noop() {
         return new ActionLog(null, null, () -> false);
+    }
+
+    /** Keys used to mask a path when appending {@code actions.log} fails. */
+    public void secrets(Supplier<Iterable<String>> secrets) {
+        this.secretSource = secrets == null ? java.util.List::of : secrets;
     }
 
     public synchronized void record(String player, String character, String action, String result) {
@@ -33,20 +43,21 @@ public final class ActionLog {
             return;
         }
         try {
-            java.io.File parent = file.getParentFile();
-            if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
-                return;
-            }
+            java.nio.file.Path path = file.toPath();
+            AtomicFiles.createPrivate(path);
+            AtomicFiles.restrictOwnerReadWrite(path);
             java.nio.file.Files.writeString(
-                    file.toPath(),
+                    path,
                     java.time.Instant.now() + " " + line + System.lineSeparator(),
                     java.nio.charset.StandardCharsets.UTF_8,
                     java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.APPEND
             );
+            AtomicFiles.restrictOwnerReadWrite(path);
         } catch (java.io.IOException e) {
             if (logger != null) {
-                logger.warning("Failed to append actions.log: " + e.getMessage());
+                Iterable<String> known = secretSource.get();
+                LogRedaction.warning(logger, "Failed to append actions.log", e, known == null ? java.util.List.of() : known);
             }
         }
     }

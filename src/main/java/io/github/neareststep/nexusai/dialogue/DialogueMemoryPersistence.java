@@ -1,0 +1,343 @@
+package io.github.neareststep.nexusai.dialogue;
+
+import io.github.neareststep.nexusai.config.SecretMask;
+
+import java.io.File;
+import java.util.List;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
+import java.util.logging.Logger;
+
+/**
+ * Loads and saves {@code dialogue-memory.yml} across {@code /nai reload}.
+ * The first off-to-on transition reads the file on {@code nexusai-memory-load} and no save runs
+ * until that read has finished. A failed or hung read logs one warning and does not replace the file.
+ */
+final class DialogueMemoryPersistence {
+
+    /** A load still running after this long is treated as stuck, and the next skipped save warns once. */
+    static final long LOAD_HANG_WARNING_AFTER_MILLIS = 5_000L;
+
+    /**
+     * How long stop waits for a load that is about to finish. A longer read is not joined out:
+     * characters that exist only in memory are appended, and characters already in the file stay there.
+     */
+    static long shutdownLoadGraceMillis = 1_000L;
+
+    /**
+     * How long stop waits, after {@link #shutdownLoadGraceMillis}, to finish the key scan, the
+     * load, and the decision to write. When this budget ends, stop does not replace the file.
+     * Tests shorten this.
+     */
+    static volatile long shutdownAppendBudgetMillis = 5_000L;
+
+    static final ThreadFactory DEFAULT_LOADER_THREADS = task -> {
+        Thread worker = new Thread(task, "nexusai-memory-load");
+        worker.setDaemon(true);
+        return worker;
+    };
+
+    /**
+     * Builds the loader thread and does not start it. The service assigns the thread before
+     * {@link Thread#start()}, so a factory whose {@code start} throws must not leave that assignment stuck.
+     */
+    static volatile ThreadFactory loaderThreads = DEFAULT_LOADER_THREADS;
+
+    private static final String SAVE_PAUSED = "Saves of dialogue-memory.yml are paused because the first load "
+            + "did not finish. Restart the server to load the file and resume saves.";
+
+    private final MemoryStore memory;
+    private final Supplier<File> file;
+    private final Supplier<DialogueSettings> settings;
+    private final Supplier<List<String>> secrets;
+    private final Logger logger;
+    private final LongSupplier clock;
+
+    private volatile boolean memoryLoadedFromDisk;
+    private Thread diskLoader;
+    private MemoryStore.AbsentScan absentScan;
+    private volatile long loadStartedAtMillis = Long.MIN_VALUE;
+    private volatile boolean loadFinished;
+    private boolean savePauseLogged;
+
+    DialogueMemoryPersistence(
+            MemoryStore memory,
+            Supplier<File> file,
+            Supplier<DialogueSettings> settings,
+            Supplier<List<String>> secrets,
+            Logger logger,
+            LongSupplier clock
+    ) {
+        this.memory = memory;
+        this.file = file;
+        this.settings = settings;
+        this.secrets = secrets;
+        this.logger = logger;
+        this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    /** Startup already loaded the file on this thread. Later reloads must not read it again. */
+    void loadedAtStartup() {
+        memoryLoadedFromDisk = true;
+    }
+
+    boolean memoryLoadedFromDisk() {
+        return memoryLoadedFromDisk;
+    }
+
+    Thread diskLoader() {
+        synchronized (this) {
+            return diskLoader;
+        }
+    }
+
+    boolean loadFinished() {
+        return loadFinished;
+    }
+
+    /**
+     * When persistence flips from off to on, start one background read. A later reload does not
+     * start another read while that one is in progress or after it has succeeded.
+     */
+    void onReload() {
+        synchronized (this) {
+            if (memoryLoadedFromDisk || diskLoader != null) {
+                return;
+            }
+            DialogueSettings current = settings.get();
+            if (current == null || !current.persistMemory()) {
+                return;
+            }
+            long now = clock.getAsLong();
+            long expiry = current.memoryExpiryMillis();
+            List<String> secretValues = secretList();
+            File target = file.get();
+            Runnable task = () -> {
+                try {
+                    if (memory.loadForPersistence(target, now, expiry, logger, secretValues)) {
+                        memoryLoadedFromDisk = true;
+                    }
+                } catch (Throwable error) {
+                    DialogueService.logMemoryLoadFailure(logger, error, secretValues);
+                } finally {
+                    synchronized (DialogueMemoryPersistence.this) {
+                        loadFinished = true;
+                        diskLoader = null;
+                    }
+                    MemoryStore.abandonActiveLoad = false;
+                }
+            };
+            Thread worker = loaderThreads.newThread(task);
+            if (worker == null) {
+                return;
+            }
+            loadFinished = false;
+            loadStartedAtMillis = now;
+            savePauseLogged = false;
+            // Assigned before start so a second reload sees the in-flight read. start() failing
+            // does not run the task, so the task's finally cannot clear this. Drop it here.
+            diskLoader = worker;
+            absentScan = null;
+            try {
+                worker.start();
+            } catch (Throwable startFailed) {
+                diskLoader = null;
+                absentScan = null;
+                loadFinished = true;
+                DialogueService.logMemoryLoadFailure(logger, startFailed, secretValues);
+            }
+        }
+    }
+
+    /** Periodic save. Skipped, with one warning, when the first off-to-on load failed or hung. */
+    void save() {
+        try {
+            writeSave(Long.MAX_VALUE);
+        } catch (Throwable thrown) {
+            logSkipped(thrown);
+        }
+    }
+
+    /**
+     * Stop. A load that is still running after {@link #shutdownLoadGraceMillis} does not block disable
+     * for the rest of the read. The key scan starts here, so it overlaps that join, and is then
+     * awaited only until {@link #shutdownAppendBudgetMillis}. Disk characters are kept. Characters
+     * that were never in the file are appended when that scan has read the file. A file the scan
+     * cannot splice is not read again while the load is still running: stop waits for that load
+     * until the budget ends and, when the load finishes in time, writes the memory it already
+     * loaded. The budget includes that write. Stop does not start a write, and does not rename,
+     * after the budget has ended. When stop gives up on that budget, the load that is still
+     * running does not mask or rename the file afterward. If the scan is not finished, the scan
+     * failed, the file cannot be read, or the file cannot be written, stop does not replace the
+     * file and one warning names how many characters were not saved and why. That count is taken
+     * when stop begins. A scan that crashes is not described as the budget. A splice that cannot
+     * be written is not described as the budget and is not waited out. Stop does not also log
+     * that saves are paused.
+     */
+    void shutdown() {
+        boolean summaries = summaries();
+        Thread pending;
+        MemoryStore.AbsentScan scan;
+        try {
+            memory.beginStopCount(summaries);
+            synchronized (this) {
+                pending = diskLoader;
+                scan = absentScan;
+            }
+            if (pending != null && pending.isAlive() && scan == null) {
+                scan = MemoryStore.startAbsentScan(file.get());
+                synchronized (this) {
+                    absentScan = scan;
+                }
+            }
+            if (pending != null) {
+                try {
+                    pending.join(Math.max(1L, shutdownLoadGraceMillis));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (memoryLoadedFromDisk) {
+                writeSave(Long.MAX_VALUE);
+                return;
+            }
+            synchronized (this) {
+                pending = diskLoader;
+            }
+            if (pending != null && pending.isAlive()) {
+                long deadline = System.nanoTime()
+                        + Math.max(0L, shutdownAppendBudgetMillis) * 1_000_000L;
+                MemoryStore.LiveSplice splice = memory.spliceForStop(
+                        file.get(), logger, summaries, secretList(), scan, deadline);
+                if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
+                    awaitLoaderAndSave(pending, deadline, summaries);
+                } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
+                    memory.forbidLoaderPublish();
+                }
+                return;
+            }
+            writeSave(Long.MAX_VALUE);
+        } catch (Throwable thrown) {
+            logSkipped(thrown);
+        } finally {
+            memory.endStopCount();
+            MemoryStore.AbsentScan started;
+            synchronized (this) {
+                started = absentScan;
+            }
+            MemoryStore.abandonScan(started);
+        }
+    }
+
+    /**
+     * The scan could not splice, and the load is still the only reader. Wait for it until the
+     * deadline. A load that fails on its own is not reported as the budget and is not waited out.
+     */
+    private void awaitLoaderAndSave(Thread pending, long deadlineNanos, boolean summaries) {
+        if (!pending.isAlive()) {
+            if (memoryLoadedFromDisk) {
+                writeSave(deadlineNanos);
+            } else {
+                memory.warnStop(logger, summaries, MemoryStore.StopSkip.UNREADABLE);
+            }
+            return;
+        }
+        long left = deadlineNanos - System.nanoTime();
+        if (left <= 0) {
+            memory.warnStop(logger, summaries, MemoryStore.StopSkip.BUDGET);
+            abandonLoad(pending);
+            return;
+        }
+        try {
+            pending.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(left)));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (memoryLoadedFromDisk) {
+            writeSave(deadlineNanos);
+            return;
+        }
+        if (!pending.isAlive()) {
+            memory.warnStop(logger, summaries, MemoryStore.StopSkip.UNREADABLE);
+            return;
+        }
+        memory.warnStop(logger, summaries, MemoryStore.StopSkip.BUDGET);
+        abandonLoad(pending);
+    }
+
+    private void abandonLoad(Thread pending) {
+        memory.forbidLoaderPublish();
+        MemoryStore.abandonActiveLoad = true;
+        pending.interrupt();
+        try {
+            pending.join(250L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void writeSave(long deadlineNanos) {
+        DialogueSettings current = settings.get();
+        if (current == null || !current.persistMemory() || !memoryLoadedFromDisk) {
+            noteSkippedSave();
+            return;
+        }
+        switch (memory.saveForStop(file.get(), logger, current.summaryEnabled(), deadlineNanos)) {
+            case PAST_DEADLINE -> memory.warnStop(logger, current.summaryEnabled(), MemoryStore.StopSkip.BUDGET);
+            case NOT_WRITTEN -> memory.warnStop(logger, current.summaryEnabled(), MemoryStore.StopSkip.UNWRITTEN);
+            case SAVED, SKIPPED -> {
+            }
+        }
+    }
+
+    private boolean summaries() {
+        DialogueSettings current = settings.get();
+        return current != null && current.summaryEnabled();
+    }
+
+    /**
+     * One warning when saves are skipped because the first load failed, or because it is still
+     * running after {@link #LOAD_HANG_WARNING_AFTER_MILLIS}. The opening of a live load stays quiet.
+     */
+    private void noteSkippedSave() {
+        if (memoryLoadedFromDisk || loadStartedAtMillis == Long.MIN_VALUE) {
+            return;
+        }
+        DialogueSettings current = settings.get();
+        if (current == null || !current.persistMemory()) {
+            return;
+        }
+        boolean attemptOver = loadFinished;
+        boolean hung = !attemptOver && clock.getAsLong() - loadStartedAtMillis >= LOAD_HANG_WARNING_AFTER_MILLIS;
+        if (!attemptOver && !hung) {
+            return;
+        }
+        synchronized (this) {
+            if (memoryLoadedFromDisk || savePauseLogged) {
+                return;
+            }
+            if (!loadFinished && clock.getAsLong() - loadStartedAtMillis < LOAD_HANG_WARNING_AFTER_MILLIS) {
+                return;
+            }
+            savePauseLogged = true;
+        }
+        if (logger != null) {
+            logger.warning(SAVE_PAUSED);
+        }
+    }
+
+    private List<String> secretList() {
+        List<String> values = secrets.get();
+        return values == null ? List.of() : List.copyOf(values);
+    }
+
+    private void logSkipped(Throwable thrown) {
+        if (logger == null) {
+            return;
+        }
+        logger.fine("Skipped dialogue memory save: "
+                + SecretMask.redactUrl(String.valueOf(thrown.getMessage()), secretList()));
+    }
+}

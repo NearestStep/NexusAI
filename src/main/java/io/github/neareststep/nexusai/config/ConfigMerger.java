@@ -58,6 +58,10 @@ public final class ConfigMerger {
         List<String> missing = new ArrayList<>();
         for (String key : defaults.getKeys(true)) {
             if (defaults.isConfigurationSection(key)) {
+                org.bukkit.configuration.ConfigurationSection section = defaults.getConfigurationSection(key);
+                if (section != null && section.getKeys(false).isEmpty() && !existingConfig.contains(key)) {
+                    missing.add(key);
+                }
                 continue;
             }
             if (!existingConfig.contains(key)) {
@@ -73,7 +77,8 @@ public final class ConfigMerger {
             lines.clear();
         }
         for (String key : missing) {
-            insertLeaf(lines, key, defaults.get(key));
+            Object value = defaults.isConfigurationSection(key) ? java.util.Map.of() : defaults.get(key);
+            insertLeaf(lines, key, value);
         }
         String merged = String.join(newline, lines);
         if ((existing.endsWith("\n") || existing.endsWith("\r\n") || existing.isEmpty()) && !merged.endsWith(newline)) {
@@ -193,6 +198,9 @@ public final class ConfigMerger {
     }
 
     private static List<String> formatLeaf(String leaf, Object value, int indent) {
+        if (value instanceof Map<?, ?> map && map.isEmpty()) {
+            return List.of(" ".repeat(Math.max(0, indent)) + leaf + ": {}");
+        }
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("v", value);
         String dumped = yaml.saveToString().replace("\r\n", "\n");

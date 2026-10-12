@@ -143,4 +143,37 @@ class PromptImporterTest {
         assertEquals(mode, Files.getPosixFilePermissions(prompts));
         assertEquals("stay", PromptCatalog.parse(Files.readString(prompts)).catalog().find("old").orElseThrow().template());
     }
+
+    @Test
+    void importsNamespaceIdsAndKeepsOldIds(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("prompts.yml"), """
+                config-version: 1
+                survival_tips: "stay"
+                """, StandardCharsets.UTF_8);
+        Path imports = Files.createDirectories(dir.resolve("import"));
+        Files.writeString(imports.resolve("pack.yml"), """
+                quests:intro: "unquoted"
+                "shop:price":
+                  prompt: "quoted"
+                  context:
+                    - economy
+                survival_tips: "replaced"
+                Bad Id: "nope"
+                """);
+
+        PromptImporter.Report report = PromptImporter.importFile(dir, "pack.yml", false);
+        assertTrue(report.success(), report.error());
+        assertTrue(report.added().contains("quests:intro"), report.added().toString());
+        assertTrue(report.added().contains("shop:price"), report.added().toString());
+        assertTrue(report.conflicting().contains("survival_tips"));
+        PromptCatalog catalog = PromptCatalog.parse(Files.readString(dir.resolve("prompts.yml"))).catalog();
+        assertEquals("unquoted", catalog.find("quests:intro").orElseThrow().template());
+        assertEquals(java.util.List.of("economy"), catalog.find("shop:price").orElseThrow().context().ids());
+        assertEquals("stay", catalog.find("survival_tips").orElseThrow().template());
+
+        PromptImporter.Report overwrite = PromptImporter.importFile(dir, "pack.yml", true);
+        assertTrue(overwrite.success(), overwrite.error());
+        assertEquals("replaced", PromptCatalog.parse(Files.readString(dir.resolve("prompts.yml")))
+                .catalog().find("survival_tips").orElseThrow().template());
+    }
 }
