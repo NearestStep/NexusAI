@@ -4,7 +4,7 @@ About five minutes from an empty `plugins/` folder to the first cached answer. T
 
 ## 1. Install
 
-1. Put `NexusAI-1.2.0-SNAPSHOT.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0-SNAPSHOT.jar`. The `version` in `build.gradle.kts` is `1.2.0-SNAPSHOT`. This snapshot is not a published release.
+1. Put `NexusAI-1.2.0-rc1.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0-rc1.jar`. The `version` in `build.gradle.kts` is `1.2.0-rc1`. This release candidate is for testing and is not the final 1.2.0 release.
 2. Install [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. On Folia, install 2.11.7 or newer. An older PlaceholderAPI does not load on Folia by itself. NexusAI does not check the version.
 3. Start the server once. NexusAI creates `plugins/NexusAI/` (`config.yml`, `prompts.yml`, `lang/`, `knowledge/example.md`). Stop the server before editing those files.
 
