@@ -33,7 +33,7 @@ Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not 
 
 ## Installation
 
-1. Put `NexusAI-1.2.0-rc1.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0-rc1.jar`. `version` in `build.gradle.kts` is `1.2.0-rc1`. This release candidate is for testing and is not the final 1.2.0 release.
+1. Put `NexusAI-1.2.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.2.0.jar`. `version` in `build.gradle.kts` is `1.2.0`.
 2. Install PlaceholderAPI
 3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 

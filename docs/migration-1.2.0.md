@@ -1,8 +1,6 @@
 # Migration to 1.2.0
 
-Replace the previous jar with `NexusAI-1.2.0-rc1.jar` (Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+). Stop the server, swap the jar, start it. The first start appends the new keys. You do not edit `config-version`.
-
-The release candidate jar is for testing and is not the final 1.2.0 release.
+Replace the previous jar with `NexusAI-1.2.0.jar` (Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+). Stop the server, swap the jar, start it. The first start appends the new keys. You do not edit `config-version`.
 
 ## What is written for you
 
