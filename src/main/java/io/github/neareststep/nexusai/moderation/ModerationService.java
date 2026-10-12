@@ -165,12 +165,12 @@ public final class ModerationService {
             reply = call(playerId, wrapped, choice.get().choice);
         } catch (AiRequestException e) {
             logger.log(Level.FINE, "Chat moderation request failed: "
-                    + SecretMask.redact(e.getMessage(), config.configuredSecrets()));
+                    + SecretMask.redactUrl(e.getMessage(), config.configuredSecrets()));
             return new Decision(Skip.CHECKED, false, "none", "");
         } catch (RuntimeException e) {
             String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             logger.log(Level.FINE, "Chat moderation request failed: "
-                    + SecretMask.redact(detail, config.configuredSecrets()));
+                    + SecretMask.redactUrl(detail, config.configuredSecrets()));
             return new Decision(Skip.CHECKED, false, "none", "");
         } finally {
             if (serverQuota != null) {

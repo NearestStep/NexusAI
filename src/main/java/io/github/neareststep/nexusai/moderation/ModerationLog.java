@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.moderation;
 
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.LogRedaction;
 
 import java.io.IOException;
@@ -15,6 +16,8 @@ import java.util.logging.Logger;
 
 /**
  * Append-only flag log at {@code plugins/NexusAI/moderation.log}.
+ * On a POSIX file system the file is owner-read/write ({@code 0600}), including after a looser mode
+ * or when a rotated file is created again.
  */
 public final class ModerationLog {
 
@@ -45,19 +48,18 @@ public final class ModerationLog {
                 + System.lineSeparator();
         synchronized (lock) {
             try {
-                java.io.File parent = file.getParentFile();
-                if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
-                    logger.warning("Could not create the folder for moderation.log");
-                    return;
-                }
+                java.nio.file.Path path = file.toPath();
+                AtomicFiles.createPrivate(path);
+                AtomicFiles.restrictOwnerReadWrite(path);
                 Files.writeString(
-                        file.toPath(),
+                        path,
                         line,
                         StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE,
                         StandardOpenOption.WRITE,
                         StandardOpenOption.APPEND
                 );
+                AtomicFiles.restrictOwnerReadWrite(path);
             } catch (IOException e) {
                 Iterable<String> known = secretSource.get();
                 LogRedaction.warning(logger, "Failed to write moderation.log", e, known == null ? java.util.List.of() : known);

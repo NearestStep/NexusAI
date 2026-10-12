@@ -1,8 +1,15 @@
 package io.github.neareststep.nexusai.config;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,11 +30,77 @@ import java.util.regex.Pattern;
  * that follows a vendor key in a path is left in place. An underscore inside the key is part of
  * the key. Callers include NPC replies, placeholder answers, {@code /nai test}, {@code actions.log},
  * server logs, and stored dialogue lines. Configured secrets are applied first and are never put back.
+ * <p>
+ * {@link #redactUrl(String, Iterable)} masks a provider base URL or request URI for display and logs:
+ * every query-parameter value (and a bare query token with no {@code =}) becomes {@code ***},
+ * userinfo becomes {@code ***@}, then {@link #redact(String, Iterable)} runs. Scheme, host, port,
+ * and path stay so the line is still useful.
+ * <p>
+ * {@link #addUrlSecrets(String, Collection)} adds only secret-looking parts to
+ * {@link PluginConfig#configuredSecrets()}, so ordinary query values such as Azure
+ * {@code api-version} or Hugging Face {@code model} ids are not stripped from NPC replies.
+ * A named query value is added only when the parameter name looks secret (for example
+ * {@code key}, {@code api_key}, {@code token}, {@code sig}, or a name ending in
+ * {@code key}/{@code token}/{@code secret}). Values of non-secret names are never added
+ * (they are still shown as {@code ***} in a masked URL). A bare query token with no {@code =},
+ * and the userinfo user, are added only when they look random: no {@code /} or {@code .}, and
+ * either mixed case plus digits or length at least 24. The userinfo password is always added.
+ * Values under {@link #URL_SECRET_MIN_LENGTH} characters are skipped for name-based matches, and
+ * common words such as {@code true} / {@code json} are skipped.
  */
 public final class SecretMask {
 
     /** A key at or under this length is masked as {@code ****} and matched on a token boundary. */
     public static final int SUFFIX_LENGTH = 4;
+
+    /**
+     * Minimum length for a query value matched by a secret-looking parameter name before it is
+     * added to configured secrets. Shorter secret-named values are masked only in the displayed URL.
+     */
+    public static final int URL_SECRET_MIN_LENGTH = 6;
+
+    /** Minimum length for an all-one-case bare token treated as random. */
+    private static final int RANDOM_URL_SECRET_LONG_LENGTH = 24;
+
+    /**
+     * Parameter names (after lowercasing and stripping {@code -} / {@code _}) that mark the value
+     * as a configured secret.
+     */
+    private static final Set<String> SECRET_QUERY_NAMES = Set.of(
+            "key",
+            "apikey",
+            "xapikey",
+            "token",
+            "accesstoken",
+            "auth",
+            "authorization",
+            "secret",
+            "clientsecret",
+            "password",
+            "pass",
+            "pwd",
+            "sig",
+            "signature",
+            "code",
+            "session",
+            "credential");
+
+    /**
+     * Common query words that are not treated as configured secrets even when long enough.
+     * Matching is case-insensitive.
+     */
+    private static final Set<String> TRIVIAL_URL_SECRETS = Set.of(
+            "true", "false", "null", "json", "http", "https");
+
+    /** Trailing punctuation that must not be swallowed when a URL sits inside text. */
+    private static final String TRAILING_URL_PUNCT = ".,;:)]}\"\'";
+
+    /** An {@code http(s)://} URL that may sit inside an exception message. */
+    private static final Pattern HTTP_URL = Pattern.compile("https?://\\S+", Pattern.CASE_INSENSITIVE);
+
+    /** Userinfo ahead of a host when the URI cannot be parsed. */
+    private static final Pattern USERINFO_TEXT = Pattern.compile(
+            "(?<=://)([^/@:\\s]+(?::[^/@\\s]*)?)@");
 
     /**
      * OpenAI-style {@code sk-} (20 or more), Groq {@code gsk_} (20 or more), and Google {@code AIza}
@@ -109,6 +182,360 @@ public final class SecretMask {
             }
         }
         return maskVendorKeys(result);
+    }
+
+    /**
+     * Masks query-parameter values and userinfo in a provider URL or request URI, then applies
+     * {@link #redact(String, Iterable)}. Scheme, host, port, and path are kept. A key-like segment
+     * in the path is not removed by this step. When {@code value} is not a single parseable URI,
+     * each embedded {@code http(s)://} URL is masked the same way, and an unparseable URL falls
+     * back to text masking of userinfo and query values.
+     */
+    public static String redactUrl(String value, Iterable<String> secrets) {
+        return redact(maskUrl(value), secrets);
+    }
+
+    /**
+     * Adds secret-looking query values (raw and percent-decoded) and userinfo parts from
+     * {@code url} into {@code secrets}. Display masking of every query value stays in
+     * {@link #redactUrl(String, Iterable)}; this method only decides what {@link #redact} may
+     * strip from ordinary text. See the class javadoc for the name-based and random-value rules.
+     */
+    public static void addUrlSecrets(String url, Collection<String> secrets) {
+        if (url == null || url.isBlank() || secrets == null) {
+            return;
+        }
+        String trimmed = url.trim();
+        try {
+            URI uri = new URI(trimmed);
+            collectUserInfoSecrets(uri.getRawUserInfo(), secrets);
+            collectQuerySecrets(uri.getRawQuery(), secrets);
+            return;
+        } catch (URISyntaxException | IllegalArgumentException ignored) {
+            // Fall through to text extraction.
+        }
+        Matcher userinfo = USERINFO_TEXT.matcher(trimmed);
+        if (userinfo.find()) {
+            collectUserInfoSecrets(userinfo.group(1), secrets);
+        }
+        int queryAt = trimmed.indexOf('?');
+        if (queryAt >= 0) {
+            int frag = trimmed.indexOf('#', queryAt + 1);
+            String query = frag < 0 ? trimmed.substring(queryAt + 1) : trimmed.substring(queryAt + 1, frag);
+            collectQuerySecrets(query, secrets);
+        }
+    }
+
+    static String maskUrl(String value) {
+        if (value == null || value.isEmpty()) {
+            return value == null ? "" : value;
+        }
+        String trimmed = value.trim();
+        String whole = maskParsedUri(trimmed);
+        if (whole != null) {
+            if (trimmed.equals(value)) {
+                return whole;
+            }
+            int at = value.indexOf(trimmed);
+            if (at >= 0) {
+                return value.substring(0, at) + whole + value.substring(at + trimmed.length());
+            }
+            return whole;
+        }
+        Matcher matcher = HTTP_URL.matcher(value);
+        StringBuilder rebuilt = null;
+        int pos = 0;
+        while (matcher.find()) {
+            if (rebuilt == null) {
+                rebuilt = new StringBuilder();
+            }
+            rebuilt.append(value, pos, matcher.start());
+            String matched = matcher.group();
+            int keep = urlEndWithoutTrailingPunct(matched);
+            rebuilt.append(maskUriOrText(matched.substring(0, keep)));
+            rebuilt.append(matched, keep, matched.length());
+            pos = matcher.end();
+        }
+        if (rebuilt == null) {
+            return value;
+        }
+        rebuilt.append(value, pos, value.length());
+        return rebuilt.toString();
+    }
+
+    private static int urlEndWithoutTrailingPunct(String matched) {
+        int end = matched.length();
+        while (end > 0 && TRAILING_URL_PUNCT.indexOf(matched.charAt(end - 1)) >= 0) {
+            end--;
+        }
+        return end;
+    }
+
+    private static String maskUriOrText(String candidate) {
+        String parsed = maskParsedUri(candidate);
+        return parsed != null ? parsed : maskUrlByText(candidate);
+    }
+
+    private static String maskParsedUri(String candidate) {
+        if (candidate == null || candidate.isEmpty() || candidate.indexOf(':') < 0) {
+            return null;
+        }
+        try {
+            URI uri = new URI(candidate);
+            if (uri.getScheme() == null) {
+                return null;
+            }
+            if (uri.getHost() == null && uri.getRawAuthority() == null && uri.getRawUserInfo() == null
+                    && uri.getRawQuery() == null) {
+                return null;
+            }
+            return rebuildMaskedUri(uri);
+        } catch (URISyntaxException | IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Builds {@code scheme://[***@]host[:port]rawPath[?maskedQuery][#rawFragment]} without
+     * re-encoding the path or fragment.
+     */
+    private static String rebuildMaskedUri(URI uri) {
+        StringBuilder out = new StringBuilder();
+        out.append(uri.getScheme()).append("://");
+        if (uri.getRawUserInfo() != null) {
+            out.append("***@");
+        }
+        String host = uri.getHost();
+        if (host != null) {
+            String literal = host;
+            if (literal.startsWith("[") && literal.endsWith("]") && literal.length() > 2) {
+                literal = literal.substring(1, literal.length() - 1);
+            }
+            if (literal.indexOf(':') >= 0) {
+                out.append('[').append(literal).append(']');
+            } else {
+                out.append(literal);
+            }
+        } else if (uri.getRawAuthority() != null) {
+            String authority = uri.getRawAuthority();
+            int at = authority.lastIndexOf('@');
+            if (at >= 0) {
+                out.append("***@").append(authority, at + 1, authority.length());
+            } else {
+                out.append(authority);
+            }
+        }
+        if (uri.getPort() >= 0) {
+            out.append(':').append(uri.getPort());
+        }
+        if (uri.getRawPath() != null) {
+            out.append(uri.getRawPath());
+        }
+        String query = maskQuery(uri.getRawQuery());
+        if (query != null) {
+            out.append('?').append(query);
+        }
+        if (uri.getRawFragment() != null) {
+            out.append('#').append(uri.getRawFragment());
+        }
+        return out.toString();
+    }
+
+    private static String maskQuery(String query) {
+        if (query == null) {
+            return null;
+        }
+        if (query.isEmpty()) {
+            return "";
+        }
+        StringBuilder masked = new StringBuilder(query.length());
+        int from = 0;
+        while (from <= query.length()) {
+            int amp = query.indexOf('&', from);
+            int end = amp < 0 ? query.length() : amp;
+            String part = query.substring(from, end);
+            int eq = part.indexOf('=');
+            if (eq < 0) {
+                masked.append(part.isEmpty() ? "" : "***");
+            } else {
+                masked.append(part, 0, eq + 1).append("***");
+            }
+            if (amp < 0) {
+                break;
+            }
+            masked.append('&');
+            from = amp + 1;
+        }
+        return masked.toString();
+    }
+
+    private static String maskUrlByText(String value) {
+        String masked = USERINFO_TEXT.matcher(value).replaceAll("***@");
+        int queryAt = masked.indexOf('?');
+        if (queryAt < 0) {
+            return masked;
+        }
+        int frag = masked.indexOf('#', queryAt + 1);
+        String before = masked.substring(0, queryAt + 1);
+        String query = frag < 0 ? masked.substring(queryAt + 1) : masked.substring(queryAt + 1, frag);
+        String after = frag < 0 ? "" : masked.substring(frag);
+        return before + maskQuery(query) + after;
+    }
+
+    private static void collectUserInfoSecrets(String userInfo, Collection<String> secrets) {
+        if (userInfo == null || userInfo.isEmpty()) {
+            return;
+        }
+        int colon = userInfo.indexOf(':');
+        if (colon < 0) {
+            offerIfRandom(userInfo, secrets);
+            return;
+        }
+        offerIfRandom(userInfo.substring(0, colon), secrets);
+        offerAlways(userInfo.substring(colon + 1), secrets);
+    }
+
+    private static void collectQuerySecrets(String query, Collection<String> secrets) {
+        if (query == null || query.isEmpty()) {
+            return;
+        }
+        int from = 0;
+        while (from <= query.length()) {
+            int amp = query.indexOf('&', from);
+            int end = amp < 0 ? query.length() : amp;
+            String part = query.substring(from, end);
+            int eq = part.indexOf('=');
+            if (eq < 0) {
+                offerIfRandom(part, secrets);
+            } else {
+                String name = part.substring(0, eq);
+                String raw = part.substring(eq + 1);
+                if (secretQueryName(name)) {
+                    offerNamedSecret(raw, secrets);
+                }
+                // Non-secret names (model, api-version, …): display still masks as ***; do not add.
+            }
+            if (amp < 0) {
+                break;
+            }
+            from = amp + 1;
+        }
+    }
+
+    private static boolean secretQueryName(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        String normalized = name.toLowerCase(Locale.ROOT).replace("-", "").replace("_", "");
+        if (normalized.isEmpty()) {
+            return false;
+        }
+        if (SECRET_QUERY_NAMES.contains(normalized)) {
+            return true;
+        }
+        return normalized.endsWith("key") || normalized.endsWith("token") || normalized.endsWith("secret");
+    }
+
+    private static void offerNamedSecret(String raw, Collection<String> secrets) {
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        addIfAcceptable(raw, URL_SECRET_MIN_LENGTH, secrets);
+        String decoded = percentDecode(raw);
+        if (decoded != null && !decoded.equals(raw)) {
+            addIfAcceptable(decoded, URL_SECRET_MIN_LENGTH, secrets);
+        }
+    }
+
+    private static void offerIfRandom(String raw, Collection<String> secrets) {
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        if (looksRandomSecret(raw)) {
+            addValue(raw, secrets);
+        }
+        String decoded = percentDecode(raw);
+        if (decoded != null && !decoded.equals(raw) && looksRandomSecret(decoded)) {
+            addValue(decoded, secrets);
+        }
+    }
+
+    private static void offerAlways(String raw, Collection<String> secrets) {
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        addValue(raw, secrets);
+        String decoded = percentDecode(raw);
+        if (decoded != null && !decoded.equals(raw)) {
+            addValue(decoded, secrets);
+        }
+    }
+
+    private static void addIfAcceptable(String value, int minLength, Collection<String> secrets) {
+        if (value == null || value.length() < minLength) {
+            return;
+        }
+        if (TRIVIAL_URL_SECRETS.contains(value.toLowerCase(Locale.ROOT))) {
+            return;
+        }
+        addValue(value, secrets);
+    }
+
+    private static void addValue(String value, Collection<String> secrets) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        if (!secrets.contains(value)) {
+            secrets.add(value);
+        }
+    }
+
+    /**
+     * True for opaque bare tokens and userinfo users: no spaces, {@code /}, or {@code .}; letters
+     * and digits; and either mixed case plus digits, or length at least
+     * {@link #RANDOM_URL_SECRET_LONG_LENGTH}. Model ids such as {@code meta-llama/Llama-3.1-8B} or
+     * {@code Qwen2.5-72B-Instruct} fail.
+     */
+    static boolean looksRandomSecret(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        if (value.indexOf(' ') >= 0 || value.indexOf('/') >= 0 || value.indexOf('.') >= 0) {
+            return false;
+        }
+        if (TRIVIAL_URL_SECRETS.contains(value.toLowerCase(Locale.ROOT))) {
+            return false;
+        }
+        boolean upper = false;
+        boolean lower = false;
+        boolean digit = false;
+        boolean letter = false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isUpperCase(c)) {
+                upper = true;
+                letter = true;
+            } else if (Character.isLowerCase(c)) {
+                lower = true;
+                letter = true;
+            } else if (Character.isDigit(c)) {
+                digit = true;
+            } else if (Character.isLetter(c)) {
+                letter = true;
+            }
+        }
+        if (!letter || !digit) {
+            return false;
+        }
+        return (upper && lower) || value.length() >= RANDOM_URL_SECRET_LONG_LENGTH;
+    }
+
+    private static String percentDecode(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static String maskVendorKeys(String text) {

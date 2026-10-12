@@ -9,7 +9,9 @@ import io.github.neareststep.nexusai.event.EventDispatcher;
 import io.github.neareststep.nexusai.event.GenerationEvents;
 import io.github.neareststep.nexusai.event.PreCancelled;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.limit.RateLimiter;
 import org.jetbrains.annotations.ApiStatus;
 
@@ -522,9 +524,11 @@ public final class AiHttpClient {
                     diagnostics.report(kind, failureDetail(admissionKey, kind, failure), gate.isPaused());
                 }
                 if (kind == AiErrorKind.REJECTED) {
-                    logger.log(Level.FINE, "Rejected model answer: {0}", AiErrors.detail(failure));
+                    logger.log(Level.FINE, "Rejected model answer: {0}",
+                            SecretMask.redactUrl(AiErrors.detail(failure), config.configuredSecrets()));
                 } else {
-                    logger.log(Level.FINE, "AI request failed", failure);
+                    logger.log(Level.FINE, "AI request failed",
+                            LogRedaction.redactThrowable(failure, config.configuredSecrets()));
                 }
                 GenerationEvents.failIfNeeded(trace, failure);
                 created.complete(SharedCompletion.fail(AiErrors.unwrap(failure), null));

@@ -21,6 +21,7 @@ import io.github.neareststep.nexusai.config.ConfigStartup;
 import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
@@ -158,7 +159,8 @@ public final class NexusAI extends JavaPlugin {
         logKnowledgeWarnings();
 
         getLogger().info("Using provider: " + pluginConfig.getProvider()
-                + ", base-url: " + pluginConfig.getBaseUrl()
+                + ", base-url: " + SecretMask.redactUrl(
+                        pluginConfig.getBaseUrl(), pluginConfig.configuredSecrets())
                 + ", model: " + pluginConfig.getModel());
         String maskedKeys = pluginConfig.maskedApiKeys();
         if (!maskedKeys.isBlank()) {

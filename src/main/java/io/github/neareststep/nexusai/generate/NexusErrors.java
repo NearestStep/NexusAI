@@ -90,7 +90,7 @@ final class NexusErrors {
 
     static String mask(PluginConfig config, String message) {
         Iterable<String> secrets = config == null ? java.util.List.of() : config.configuredSecrets();
-        String masked = SecretMask.redact(message == null ? "" : message, secrets);
+        String masked = SecretMask.redactUrl(message == null ? "" : message, secrets);
         return masked == null ? "" : masked;
     }
 }

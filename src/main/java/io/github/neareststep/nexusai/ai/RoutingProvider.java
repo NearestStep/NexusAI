@@ -475,7 +475,7 @@ public final class RoutingProvider implements AiProvider {
                     ? " Not trying another fallback model."
                     : " Trying the next model-queue entry. No cooldown.";
             logger.info("Rejected answer from " + providerId + " / " + model
-                    + ". " + SecretMask.redact(typed.getMessage(), config.configuredSecrets()) + next);
+                    + ". " + SecretMask.redactUrl(typed.getMessage(), config.configuredSecrets()) + next);
             return CompletableFuture.completedFuture(null);
         }
         if (!probe && !key.isEmpty() && (typed.kind() == AiErrorKind.BAD_KEY || typed.kind() == AiErrorKind.RATE_LIMIT)) {

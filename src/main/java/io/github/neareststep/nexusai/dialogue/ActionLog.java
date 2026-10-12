@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.LogRedaction;
 
 import java.util.function.Supplier;
@@ -42,17 +43,17 @@ public final class ActionLog {
             return;
         }
         try {
-            java.io.File parent = file.getParentFile();
-            if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
-                return;
-            }
+            java.nio.file.Path path = file.toPath();
+            AtomicFiles.createPrivate(path);
+            AtomicFiles.restrictOwnerReadWrite(path);
             java.nio.file.Files.writeString(
-                    file.toPath(),
+                    path,
                     java.time.Instant.now() + " " + line + System.lineSeparator(),
                     java.nio.charset.StandardCharsets.UTF_8,
                     java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.APPEND
             );
+            AtomicFiles.restrictOwnerReadWrite(path);
         } catch (java.io.IOException e) {
             if (logger != null) {
                 Iterable<String> known = secretSource.get();

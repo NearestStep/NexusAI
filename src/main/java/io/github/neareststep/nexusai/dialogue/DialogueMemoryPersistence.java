@@ -338,6 +338,6 @@ final class DialogueMemoryPersistence {
             return;
         }
         logger.fine("Skipped dialogue memory save: "
-                + SecretMask.redact(String.valueOf(thrown.getMessage()), secretList()));
+                + SecretMask.redactUrl(String.valueOf(thrown.getMessage()), secretList()));
     }
 }

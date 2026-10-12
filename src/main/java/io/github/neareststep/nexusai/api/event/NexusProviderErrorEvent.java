@@ -13,8 +13,9 @@ import java.util.UUID;
  * <p>
  * Fired for every origin, including moderation. A walk of the model queue, a key rotation,
  * or {@code fallback-model} sets {@link #willRetry()} and does not start a new pre-generate event.
- * {@link #message()} is masked and at most 300 Unicode code points. It is not the raw provider body,
- * and it has no URL query string. A slow handler blocks a {@code nexusai-http-*} worker.
+ * {@link #message()} is masked and at most 300 Unicode code points. It is not the raw provider body;
+ * query values and userinfo from a provider URL are masked. A slow handler blocks a
+ * {@code nexusai-http-*} worker.
  * {@link NexusErrorKind} may gain values later; keep a {@code default} branch.
  */
 public final class NexusProviderErrorEvent extends NexusRequestEvent {

@@ -201,12 +201,12 @@ public final class DialogueRouter {
                         throw HttpPool.queueFull(error);
                     }
                     if (error.kind() == AiErrorKind.MARKUP_ONLY) {
-                        log(call, Level.FINE, SecretMask.redact(error.getMessage(), current.configuredSecrets()));
+                        log(call, Level.FINE, SecretMask.redactUrl(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
                     if (error.kind() == AiErrorKind.EMPTY_REPLY) {
-                        log(call, Level.WARNING, SecretMask.redact(error.getMessage(), current.configuredSecrets()));
+                        log(call, Level.WARNING, SecretMask.redactUrl(error.getMessage(), current.configuredSecrets()));
                         last = error;
                         break;
                     }
@@ -215,7 +215,7 @@ public final class DialogueRouter {
                             currentQueue.recordRejection(choice.index());
                         }
                         log(call, Level.INFO, "Rejected dialogue answer from " + choice.provider() + " / " + model
-                                + ". " + SecretMask.redact(error.getMessage(), current.configuredSecrets()));
+                                + ". " + SecretMask.redactUrl(error.getMessage(), current.configuredSecrets()));
                         break;
                     }
                     if (!key.isEmpty() && (error.kind() == AiErrorKind.BAD_KEY || error.kind() == AiErrorKind.RATE_LIMIT)) {
@@ -443,11 +443,11 @@ public final class DialogueRouter {
                             + " on " + plan.provider() + " after HTTP " + tagged.status());
                 }
                 if (tagged.kind() == AiErrorKind.MARKUP_ONLY) {
-                    log(call, Level.FINE, SecretMask.redact(tagged.getMessage(), current.configuredSecrets()));
+                    log(call, Level.FINE, SecretMask.redactUrl(tagged.getMessage(), current.configuredSecrets()));
                     throw tagged;
                 }
                 if (tagged.kind() == AiErrorKind.EMPTY_REPLY) {
-                    log(call, Level.WARNING, SecretMask.redact(tagged.getMessage(), current.configuredSecrets()));
+                    log(call, Level.WARNING, SecretMask.redactUrl(tagged.getMessage(), current.configuredSecrets()));
                     throw tagged;
                 }
                 if (tagged.kind() == AiErrorKind.REJECTED) {
@@ -457,7 +457,7 @@ public final class DialogueRouter {
                         currentQueue.recordRejection(plan.queueIndex());
                     }
                     log(call, Level.INFO, "Rejected dialogue answer from " + plan.provider() + " / " + model
-                            + ". " + SecretMask.redact(tagged.getMessage(), current.configuredSecrets()));
+                            + ". " + SecretMask.redactUrl(tagged.getMessage(), current.configuredSecrets()));
                     throw tagged;
                 }
                 if (HttpPool.isQueueFull(tagged)) {

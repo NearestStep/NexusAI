@@ -47,11 +47,13 @@ public final class MessageService {
      * Left as written when substituted. {@code prefix} is the locale colour template.
      * {@code reply} and {@code answer} are inserted as plain text after the template is
      * deserialized, so they are not parsed as legacy codes.
-     * Every other placeholder is data (a character or prompt id, a player name, an error,
-     * a config value, an import name, moderation text) and is stripped before it is
-     * written into the legacy string.
+     * Every other placeholder is data: section signs and click/hover markup are stripped, but
+     * {@code &} is kept literally so a masked URL such as {@code ?key=***&org=***} is not eaten
+     * as a colour code by {@link PlayerInput#stripSectionSigns(String)}.
      */
     private static final Set<String> UNSANITIZED_PLACEHOLDERS = Set.of("prefix", "reply", "answer");
+    /** Temporary stand-in so {@link PlayerInput#stripSectionSigns(String)} cannot treat {@code &o} as italic. */
+    private static final char AMP_GUARD = '\uF8FF';
     private static final Pattern YAML_LOCATION = Pattern.compile("line \\d+, column \\d+");
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
@@ -163,17 +165,18 @@ public final class MessageService {
     }
 
     /**
-     * Anything except {@code prefix}, {@code reply}, and {@code answer} is written into the
-     * legacy template, so a section sign in it becomes a colour and a click tag can survive
-     * for a later parser. Strip those values first. {@code reply} and {@code answer} stay raw
-     * here; {@link #component(String, Map)} inserts them as plain text later.
+     * {@code prefix}, {@code reply}, and {@code answer} stay as written.
+     * Every other value is stripped of section signs and click/hover markup, but {@code &} is
+     * kept so a masked query string is not eaten as a colour code. {@link #component(String, Map)}
+     * inserts those values as plain text after the template is coloured.
      */
     private static String inserted(String key, String value) {
         String text = value == null ? "" : value;
         if (UNSANITIZED_PLACEHOLDERS.contains(key)) {
             return text;
         }
-        return PlayerInput.stripSectionSigns(text);
+        String guarded = text.replace('&', AMP_GUARD);
+        return PlayerInput.stripSectionSigns(guarded).replace(AMP_GUARD, '&');
     }
 
     private Map<String, String> placeholderValues(Map<String, String> placeholders) {

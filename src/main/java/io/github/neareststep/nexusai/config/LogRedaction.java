@@ -37,7 +37,7 @@ public final class LogRedaction {
             return "";
         }
         String message = error.getMessage();
-        String redacted = SecretMask.redact(message == null ? "" : flatten(message), secrets);
+        String redacted = SecretMask.redactUrl(message == null ? "" : flatten(message), secrets);
         String name = error.getClass().getSimpleName();
         if (name == null || name.isBlank()) {
             name = error.getClass().getName();

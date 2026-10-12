@@ -22,6 +22,7 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.context.ContextVariables;
 import io.github.neareststep.nexusai.context.RegionOwnership;
 import io.github.neareststep.nexusai.config.PluginConfig;
+import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.knowledge.KnowledgeComposer;
 import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
@@ -242,7 +243,8 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
         messages.send(sender, "command.status-header");
         messages.send(sender, "command.status-locale", Map.of("locale", messages.getLocale()));
         messages.send(sender, "command.status-provider", Map.of("provider", config.getProvider()));
-        messages.send(sender, "command.status-base-url", Map.of("base_url", config.getBaseUrl()));
+        messages.send(sender, "command.status-base-url", Map.of(
+                "base_url", SecretMask.redactUrl(config.getBaseUrl(), config.configuredSecrets())));
         messages.send(sender, "command.status-model", Map.of("model", config.getModel()));
         messages.send(sender, "command.status-api-key", Map.of(
                 "api_key", statusApiKeyText(config, yes, no)
@@ -756,7 +758,7 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
     }
 
     public static String redact(String text, Iterable<String> secrets) {
-        return io.github.neareststep.nexusai.config.SecretMask.redact(text, secrets);
+        return SecretMask.redactUrl(text, secrets);
     }
 
     /**

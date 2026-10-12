@@ -172,12 +172,12 @@ public final class DialogueTransport {
             throw new AiRequestException(
                     AiErrors.classify(cause),
                     0,
-                    SecretMask.redact(message, secrets(request.apiKey())),
+                    SecretMask.redactUrl(message, secrets(request.apiKey())),
                     cause);
         } catch (Exception e) {
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             throw new AiRequestException(
-                    AiErrors.classify(e), 0, SecretMask.redact(message, secrets(request.apiKey())), null);
+                    AiErrors.classify(e), 0, SecretMask.redactUrl(message, secrets(request.apiKey())), null);
         }
     }
 
@@ -260,7 +260,9 @@ public final class DialogueTransport {
     }
 
     private static String host(URI uri) {
-        return uri.getHost() == null ? uri.toString() : uri.getHost();
+        return uri.getHost() == null
+                ? SecretMask.redactUrl(uri.toString(), java.util.List.of())
+                : uri.getHost();
     }
 
     public record Request(

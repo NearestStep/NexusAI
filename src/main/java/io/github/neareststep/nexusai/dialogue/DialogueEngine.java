@@ -330,7 +330,7 @@ public final class DialogueEngine {
             return;
         }
         List<String> known = secrets == null || secrets.get() == null ? List.of() : secrets.get();
-        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redact(detail, known));
+        failureLog.warning("Dialogue reply was not sent: " + SecretMask.redactUrl(detail, known));
     }
 
     /**

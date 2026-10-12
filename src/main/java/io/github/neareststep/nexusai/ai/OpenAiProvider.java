@@ -248,7 +248,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         final boolean keepFilters = filterAnswer && !StructuredOutputSupport.isJson(effective);
         String root = baseUrl == null || baseUrl.isBlank() ? config.getBaseUrl() : baseUrl;
         URI parsedUri = ChatEndpoints.chatCompletions(root);
-        logger.log(Level.FINE, "POST {0}", parsedUri);
+        logger.log(Level.FINE, "POST {0}", SecretMask.redactUrl(parsedUri.toString(), secrets(apiKey)));
         final GenerationOverrides callOverrides = effective;
         final String callModel = effective.model(config.getModel());
         final HttpRequest request;
@@ -457,7 +457,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         }
         AiErrorKind kind = AiErrors.classify(cause);
         String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
-        return new AiRequestException(kind, 0, SecretMask.redact(message, secrets(apiKey)), cause);
+        return new AiRequestException(kind, 0, SecretMask.redactUrl(message, secrets(apiKey)), cause);
     }
 
     /**
@@ -506,7 +506,9 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
     ) {
         String truncated = truncate(body);
         AiErrorKind kind = AiErrors.classifyHttp(status, body, html);
-        String host = uri.getHost() == null ? uri.toString() : uri.getHost();
+        String host = uri.getHost() == null
+                ? SecretMask.redactUrl(uri.toString(), List.of())
+                : uri.getHost();
         String message = switch (kind) {
             case RATE_LIMIT -> "HTTP 429 rate limit from " + host + ": " + truncated;
             case QUOTA -> "HTTP " + status + " quota or insufficient balance from " + host + ": " + truncated;

@@ -56,7 +56,7 @@ public final class AiDiagnostics {
             return;
         }
         Iterable<String> known = secrets.get();
-        String message = SecretMask.redact(format(kind, detail, paused), known == null ? List.of() : known);
+        String message = SecretMask.redactUrl(format(kind, detail, paused), known == null ? List.of() : known);
         // One pool refill finishes on several threads at once. The cooldown and the
         // logged text have to be decided together, or each thread writes the same line.
         synchronized (logGate) {

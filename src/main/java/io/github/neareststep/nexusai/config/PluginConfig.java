@@ -1337,8 +1337,10 @@ public final class PluginConfig {
     }
 
     /**
-     * Resolved secrets, including keys too short to show a suffix. Used only to strip them from
-     * command text and error bodies. The key text is not logged from here.
+     * Resolved secrets, including keys too short to show a suffix, and secret-looking parts of
+     * each configured provider URL (see {@link SecretMask#addUrlSecrets}). Ordinary query values
+     * such as {@code api-version} or {@code model} are not included. Used only to strip secrets
+     * from command text, error bodies, events, and logs. The key text is not logged from here.
      */
     public List<String> configuredSecrets() {
         List<String> secrets = new ArrayList<>();
@@ -1353,11 +1355,13 @@ public final class PluginConfig {
                         secrets.add(trimmed);
                     }
                 }
+                SecretMask.addUrlSecrets(settings.url(), secrets);
             }
         }
         if (apiKey != null && !apiKey.isBlank() && !secrets.contains(apiKey.trim())) {
             secrets.add(apiKey.trim());
         }
+        SecretMask.addUrlSecrets(baseUrl, secrets);
         return secrets;
     }
 
