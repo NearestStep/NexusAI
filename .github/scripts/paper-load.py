@@ -141,7 +141,7 @@ def run(args, scenarios: list[str]) -> int:
     try:
         wait_for_done(process, log_chunks, args.timeout)
         text = "".join(log_chunks)
-        if "NexusAI enabled." not in text or "NexusAI-LoadDriver enabled." not in text:
+        if not nexusai_enabled(text) or "NexusAI-LoadDriver enabled." not in text:
             raise RuntimeError("NexusAI or the load driver did not enable")
         if CANARY in text:
             raise RuntimeError("canary key appeared in the boot log")
@@ -879,6 +879,24 @@ def read_log(pipe, chunks: list[str]) -> None:
         chunks.append(line)
         sys.stdout.write(line)
         sys.stdout.flush()
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+LEGACY_COLOR = re.compile(r"[\u00a7&](?:x(?:[\u00a7&][0-9a-fA-F]){6}|[0-9a-fk-orA-FK-ORxX])")
+BANNER_READY = re.compile(r"(?:^|\s)Ready in \d+ ms")
+
+
+def plain_log(text: str) -> str:
+    """Drop ANSI escapes and legacy section/ampersand colour codes."""
+    return LEGACY_COLOR.sub("", ANSI_ESCAPE.sub("", text))
+
+
+def nexusai_enabled(text: str) -> bool:
+    """True when NexusAI finished enabling: banner 'Ready in' line or the plain 'NexusAI enabled.' line."""
+    plain = plain_log(text)
+    if "NexusAI enabled." in plain:
+        return True
+    return any(BANNER_READY.search(line) for line in plain.splitlines())
 
 
 def wait_for_done(process, chunks: list[str], timeout: int) -> None:

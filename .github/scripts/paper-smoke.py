@@ -82,6 +82,12 @@ def main() -> int:
         choices=("auto", "startup", "full"),
         help="Folia only. auto runs full checks when plugin.yml sets folia-supported: true",
     )
+    parser.add_argument(
+        "--startup-banner",
+        default=os.environ.get("STARTUP_BANNER", ""),
+        choices=("", "full", "compact", "off"),
+        help="startup-banner value written into the smoke config; empty keeps the plugin default",
+    )
     parser.add_argument("--self-check", action="store_true", help="check smoke helpers and exit")
     args = parser.parse_args()
     if args.self_check:
@@ -125,7 +131,7 @@ def main() -> int:
             check_api = True
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         server_port = free_port()
         rcon_port = free_port()
@@ -485,7 +491,7 @@ def start_mock(
     return handle
 
 
-def write_config(path: Path, mock_port: int) -> None:
+def write_config(path: Path, mock_port: int, startup_banner: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"http://127.0.0.1:{mock_port}/v1"
     path.write_text(
@@ -512,6 +518,7 @@ def write_config(path: Path, mock_port: int) -> None:
             "  enabled: false",
             "  prompts: []",
             'fallback: "..."',
+        ] + ([f"startup-banner: {startup_banner}"] if startup_banner else []) + [
             "",
         ]),
         encoding="utf-8",
@@ -642,7 +649,7 @@ def boot(
             raise RuntimeError("timed out waiting for Done")
 
         text = "".join(log_chunks)
-        if "NexusAI enabled." not in text:
+        if not nexusai_enabled(text):
             raise RuntimeError("NexusAI did not log that it enabled")
         if f"127.0.0.1:{mock_port}/v1" not in text:
             raise RuntimeError("startup log does not show the mock base URL")
@@ -936,6 +943,24 @@ def verify_token_usage(work: Path) -> None:
         raise RuntimeError("token-usage.yml temp file was left behind: " + leftover[0].name)
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+LEGACY_COLOR = re.compile(r"[\u00a7&](?:x(?:[\u00a7&][0-9a-fA-F]){6}|[0-9a-fk-orA-FK-ORxX])")
+BANNER_READY = re.compile(r"(?:^|\s)Ready in \d+ ms")
+
+
+def plain_log(text: str) -> str:
+    """Drop ANSI escapes and legacy section/ampersand colour codes."""
+    return LEGACY_COLOR.sub("", ANSI_ESCAPE.sub("", text))
+
+
+def nexusai_enabled(text: str) -> bool:
+    """True when NexusAI finished enabling: banner 'Ready in' line or the plain 'NexusAI enabled.' line."""
+    plain = plain_log(text)
+    if "NexusAI enabled." in plain:
+        return True
+    return any(BANNER_READY.search(line) for line in plain.splitlines())
+
+
 def strip_colors(text: str) -> str:
     out = []
     skip = False
@@ -1049,7 +1074,7 @@ def run_folia(args) -> int:
             print("folia startup checks leave the load driver and events probe uninstalled")
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         if mode == "full":
             append_context_prompt(work / "plugins" / "NexusAI")
@@ -1255,7 +1280,7 @@ def assess_folia_startup(text: str) -> tuple[list[str], list[str], int]:
     problems: list[str] = []
     if not refusals:
         problems.append("expected Folia to report that NexusAI is not marked as supporting Folia")
-    if "NexusAI enabled." in text:
+    if nexusai_enabled(text):
         problems.append("NexusAI enabled even though it is not marked as supporting Folia")
     if "Error occurred while enabling NexusAI" in text:
         problems.append("NexusAI threw while enabling")
@@ -1395,7 +1420,7 @@ def assess_folia_full(text: str) -> tuple[list[str], int]:
     refusals = expected_refusal_lines(text)
     if refusals:
         problems.append("Folia refused a plugin: " + refusals[0].strip())
-    if "NexusAI enabled." not in text:
+    if not nexusai_enabled(text):
         problems.append("NexusAI did not log that it enabled")
     if "NexusAI-LoadDriver enabled." in text:
         problems.append("load driver must not run on Folia")
@@ -1556,6 +1581,12 @@ def _smoke_self_check() -> None:
         _need(token in source, f"paper smoke line {token} is missing")
     _need("download_paper" in source, "download_paper was removed")
     _need(callable(download_paper), "download_paper is not callable")
+    _need(nexusai_enabled("[01:00:01] [Server thread/INFO]: [NexusAI] NexusAI enabled."), "plain enabled line missed")
+    _need(nexusai_enabled("[01:00:01] [Server thread/INFO]: \x1b[0;37mReady in\x1b[m \x1b[1;37m412 ms\x1b[m  |  github.com/NearestStep/NexusAI"), "ANSI banner line missed")
+    _need(nexusai_enabled("[01:00:01] [Server thread/INFO]: \u00a77Ready in \u00a7f412 ms \u00a78|"), "section banner line missed")
+    _need(nexusai_enabled("[01:00:01] [Server thread/INFO]: &x&0&0&C&5&C&2Ready in &f97 ms"), "hex banner line missed")
+    _need(not nexusai_enabled("[01:00:01] [Server thread/INFO]: Done (1.0s)!"), "enabled detected without a marker")
+    _need(not nexusai_enabled("[01:00:01] [Server thread/INFO]: Already in 5 ms"), "enabled detected from an unrelated line")
 
     stable = [
         {"id": 3, "channel": "BETA"},
