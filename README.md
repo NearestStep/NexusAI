@@ -12,6 +12,7 @@ Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible 
 - [Migration to 1.2.0](docs/migration-1.2.0.md)
 - [Migration to 1.3.0](docs/migration-1.3.0.md)
 - [Plugin API](docs/api.md)
+- [Limitations and best practices](docs/limitations.md) — latency, world context, validating model replies
 - [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
 
 ## Requirements
@@ -771,13 +772,33 @@ PlaceholderAPI inserts a NexusAI answer into another plugin's text, and that plu
 
 `/nai talk` and `/nai test` colour the chat template first, then insert `{reply}` or `{answer}` as plain text (`Component.text`). The model reply is not passed through `ChatColor` or MiniMessage deserialization. Those two commands stay plain even when `sanitize.allow-markup` is true: a click tag in the reply is literal characters in that chat line, not a click event. Placeholder consumers are the path the option opens.
 
-## Limitations
+## Limitations and best practices
+
+Full page with compiling examples: [docs/limitations.md](docs/limitations.md).
+
+### Response latency
+
+An API answer takes from hundreds of milliseconds to several seconds. NexusAI is not suitable for real-time reactions (PvP hit detection, knockback, frame-tight combat). Use hard logic in your plugin there. Use NexusAI for dialogue, tips, quest text, and other work that can wait for a future, then hop onto the player's scheduler (or the global region scheduler) before touching the world. Do not join `generate` / `generateJson` / `talk` on the main thread or a region thread.
+
+### The model does not see the world
+
+The model only receives the prompt text you send. Blocks, coordinates, inventory, and nearby entities are collected by the calling plugin on the correct thread (Paper main thread, or the region owner's thread on Folia) and passed in through request variables (`GenerationRequest.Builder.var`), context providers (`NexusContextProvider` and a prompt `context:` list), or named prompt text. Built-in tokens such as `{player}`, `{world}`, and `{biome}` are filled when a player is attached; everything else is your responsibility.
+
+World context: `NexusAIApi.worldContext(plugin, player)` collects player, world, coordinates, inventory, nearby block counts, and biome into one compact `World:` block (about 30–45 tokens for a typical scene, body capped by `world-context.max-chars`). It is off by default (`world-context.enabled: false`). World reads run on the player's region thread, formatting runs off it, and `world-context.cooldown-millis` (default 250) reuses the last block for repeat calls. When the feature is off the future completes with an empty string, so keep your own collection as a fallback. Details are in [docs/api.md](docs/api.md#world-context).
+
+### Validate before you act
+
+Even with prompt-injection protection and a successful `generateJson` schema check, validate structured values again before changing the world: expected types, ranges, allow-lists, and strings that must not enter a command, a name, or a path. Never let the model change the world directly. Prefer fixed character actions and cancel unsafe ones with `NexusActionEvent` (`refused: blocked by server`). Compiling examples: `src/test/java/io/github/neareststep/nexusai/api/LimitationsBestPracticesExample.java`.
+
+Built-in response validation is on by default under `plugin-api.response-validation.*` (`enabled`, `on-invalid`, `max-retries`, `deliver-on-region`): a `generateJson` reply with a wrong type, an out-of-range value, or an action outside the allowlist does not reach `json()` / `asMap()`. It complements your own checks; values still have to be checked before they go into a command, a name, or a path. Details are in [docs/api.md](docs/api.md#structured-json).
+
+### Prompt injection
 
 The player-input boundary and the output filter reduce prompt-injection risk. They do not eliminate it. A model that complies directly and does not mention the guard, the boundary, or the request cannot be detected by filtering the text, unless the reply is mostly the attack text itself or repeats an injection phrase from that text. A reply that is only `NXBREAK-7f3a9c`, `Sure! NXBREAK-7f3a9c`, or a bare comply sentence with no earlier meta-refusal, such as `However, I will provide the requested output: NXBREAK-7f3a9c`, still reaches the player. Refuse-then-comply is discarded only when the reply first refuses the instructions, rules, request, or prompt and then dumps a payload, or when the reply is a short dump of the form `the output is:` or `раз вы просите:`. Put a stronger model later in `model-queue` so a discarded answer is replaced instead of shown. Small models such as `allam-2-7b` often answer weakly, including in another language, and are not recommended as the only model. On Groq, `allam-2-7b` complied with 5 of 15 injection attacks. `qwen/qwen3.8-27b` complied with 0 of 15. Thirty benign prompts in that run (15 to each model) had no false refusals. A reply that is only a canary is still not caught. Prefer `qwen/qwen3.8-27b` on Groq, put another model later in `model-queue`, and keep a fallback. Leave `api.max-tokens` at 256 on a Groq account whose output-tokens-per-minute limit is about 1000, so the request is not counted above that limit.
 
 ## FAQ
 
-Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md), [Migration to 1.2.0](docs/migration-1.2.0.md), and [Migration to 1.3.0](docs/migration-1.3.0.md). Copy-paste configs are in [examples/](examples/README.md).
+Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Plugin-fit guidance (latency, world context, validating replies) is in [Limitations and best practices](docs/limitations.md). Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md), [Migration to 1.2.0](docs/migration-1.2.0.md), and [Migration to 1.3.0](docs/migration-1.3.0.md). Copy-paste configs are in [examples/](examples/README.md).
 
 ## Build
 

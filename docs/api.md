@@ -100,7 +100,7 @@ When the request and the prompt omit `max_tokens`, the JSON call uses 1024. That
 
 When `on-invalid` is `retry`, a reply that is not valid JSON, or that does not match the schema, is sent back up to `max-retries` times (default 1). Each retry uses the same queue row, model, and mode. `attempts` counts every HTTP call. `NexusPreGenerateEvent` is not fired again. All calls are counted in the token ledger. The quota reservation is taken again for each repair. `limits.*` is not spent a second time. If `finish_reason` is `length`, the retry uses `max_tokens` doubled, at most 4096, and does not send the cut reply back. When `on-invalid` is `fallback`, or retries are exhausted, `success()` is false, `meta().error().kind()` is `INVALID_JSON`, `validationErrors()` lists the paths, and `meta().text()` is the fallback. Prompt backoff is not started. HTTP 429 or 5xx on the first attempt uses the normal queue walk and does not spend a correction retry.
 
-String values are stripped of section signs and markup, and configured secrets are masked. Check the values again before placing one in a command, a name, or a path. Do not join the future on the main thread or a region thread.
+String values are stripped of section signs and markup, and configured secrets are masked. Check the values again before placing one in a command, a name, or a path. Do not join the future on the main thread or a region thread. Latency, world context, and validation patterns (including a compiling `generateJson` check and cancelling `NexusActionEvent`) are in [Limitations and best practices](limitations.md).
 
 ```java
 JsonSchema schema = JsonSchema.parse("""
@@ -202,4 +202,4 @@ public final class AiAudit implements Listener {
 }
 ```
 
-Register it with the plugin manager in `onEnable`. Keep each handler short. Read world state from a region scheduler, not from an asynchronous handler.
+Register it with the plugin manager in `onEnable`. Keep each handler short. Read world state from a region scheduler, not from an asynchronous handler. Cancelling an action so the command never runs is also covered in [Limitations and best practices](limitations.md#validate-before-you-act).
