@@ -61,6 +61,54 @@ class DialogueMemoryReliabilityTest {
     }
 
     @Test
+    void fullyExpiredMemoryStopsWithAValidEmptyDocument() throws Exception {
+        for (boolean summaries : new boolean[] {false, true}) {
+            Fixture fixture = fixture("expired-" + summaries, summaries);
+            long expiry = DialogueSettings.defaults().memoryExpiryHours() * 3_600_000L;
+            fixture.clock.set(50L + expiry + 1_000L);
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk());
+            fixture.files.shutdown();
+
+            String saved = Files.readString(fixture.file);
+            assertFalse(saved.isBlank(), "stop left an empty dialogue-memory.yml");
+            assertFalse(saved.contains("kept-from-disk"), saved);
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.loadFromString(saved);
+            assertTrue(yaml.contains("format"), saved);
+            assertEquals(summaries ? 2 : 1, yaml.getInt("format"), saved);
+            try (var siblings = Files.list(fixture.file.getParent())) {
+                assertTrue(siblings.noneMatch(path -> path.getFileName().toString().endsWith(".tmp")));
+            }
+
+            List<LogRecord> reload = new ArrayList<>();
+            Logger logger = Logger.getLogger("memory-expired-reload-" + UUID.randomUUID());
+            logger.setUseParentHandlers(false);
+            logger.setLevel(Level.ALL);
+            logger.addHandler(new Handler() {
+                @Override
+                public void publish(LogRecord record) {
+                    reload.add(record);
+                }
+
+                @Override
+                public void flush() {
+                }
+
+                @Override
+                public void close() {
+                }
+            });
+            MemoryStore again = new MemoryStore();
+            assertTrue(again.loadForPersistence(fixture.file.toFile(), fixture.clock.get(), expiry, logger, List.of()));
+            assertTrue(reload.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
+                    "reload of the empty document warned");
+            assertEquals(saved, Files.readString(fixture.file), "reload rewrote the empty document");
+        }
+    }
+
+    @Test
     void runtimeExceptionInTheLoaderIsLoggedAndTheNextReloadLoads() throws Exception {
         Fixture fixture = fixture("runtime-load");
         byte[] before = Files.readAllBytes(fixture.file);

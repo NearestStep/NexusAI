@@ -2310,6 +2310,13 @@ public final class MemoryStore {
                 yaml.set(base + ".summary-updated", memory.summaryUpdatedAt());
             }
         }
+        if (!yaml.isConfigurationSection("entries")) {
+            // Every entry expired or was dropped: still write a valid document, never 0 bytes.
+            if (!summaries) {
+                yaml.set("format", 1);
+            }
+            yaml.createSection("entries");
+        }
         return yaml;
     }
 
