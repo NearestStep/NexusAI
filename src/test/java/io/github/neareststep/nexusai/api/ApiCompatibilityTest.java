@@ -43,10 +43,14 @@ class ApiCompatibilityTest {
         assertMethod(NexusAIApi.class, "registeredPromptIds", List.class, Plugin.class);
         assertMethod(NexusAIApi.class, "bindGeneration", void.class, io.github.neareststep.nexusai.generate.GenerationService.class);
         assertMethod(NexusAIApi.class, "quota", QuotaStatus.class, Plugin.class);
+        assertMethod(NexusAIApi.class, "worldContext", CompletableFuture.class, Plugin.class, Player.class);
+        assertMethod(NexusAIApi.class, "worldContext", CompletableFuture.class, Plugin.class, Player.class, WorldContextLimits.class);
+        assertMethod(NexusAIApi.class, "worldContextEstimatedTokens", int.class, String.class);
 
         assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bind"));
         assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bindContextRegistry"));
         assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bindGeneration"));
+        assertTrue(hasClassRetentionInternal(NexusAIApi.class, "bindWorldContext"));
     }
 
     @Test

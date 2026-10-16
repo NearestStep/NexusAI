@@ -598,6 +598,47 @@ class ConfigMigrationTest {
     }
 
     @Test
+    void worldContextKeysAreAppendedOnce() throws Exception {
+        Path dir = Files.createTempDirectory("nexusai-world-context-merge");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                api:
+                  provider: openai
+                  model: gpt-4o-mini
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Logger logger = Logger.getLogger("world-context-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("world-context.enabled"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("world-context.radius"));
+        assertTrue(outcome.addedKeys().contains("world-context.max-blocks"));
+        assertTrue(outcome.addedKeys().contains("world-context.max-block-types"));
+        assertTrue(outcome.addedKeys().contains("world-context.max-inventory-items"));
+        assertTrue(outcome.addedKeys().contains("world-context.max-chars"));
+        assertTrue(outcome.addedKeys().contains("world-context.cooldown-millis"));
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("world-context:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertEquals(2, yaml.getInt("config-version"));
+        assertFalse(yaml.getBoolean("world-context.enabled"));
+        assertEquals(2, yaml.getInt("world-context.radius"));
+        assertEquals(125, yaml.getInt("world-context.max-blocks"));
+        assertEquals(16, yaml.getInt("world-context.max-block-types"));
+        assertEquals(36, yaml.getInt("world-context.max-inventory-items"));
+        assertEquals(400, yaml.getInt("world-context.max-chars"));
+        assertEquals(250, yaml.getInt("world-context.cooldown-millis"));
+
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    @Test
     void pluginApiKeysAreAppendedOnce() throws Exception {
         Path dir = Files.createTempDirectory("nexusai-plugin-api-merge");
         Path file = dir.resolve("config.yml");
@@ -748,6 +789,7 @@ class ConfigMigrationTest {
         assertTrue(outcome.addedKeys().contains("quotas.enabled"));
         assertTrue(outcome.addedKeys().contains("knowledge.select"));
         assertTrue(outcome.addedKeys().contains("knowledge.keywords.stop-words"));
+        assertTrue(outcome.addedKeys().contains("world-context.enabled"), outcome.addedKeys().toString());
         assertTrue(outcome.addedKeys().stream().noneMatch(key -> key.contains("daily-token-limit")),
                 outcome.addedKeys().toString());
         assertTrue(outcome.addedKeys().stream().noneMatch(key -> key.contains("structured-output")),
@@ -767,6 +809,7 @@ class ConfigMigrationTest {
         assertEquals("de", yaml.getString("locale"));
         assertFalse(yaml.getBoolean("quotas.enabled"));
         assertEquals("full", yaml.getString("knowledge.select"));
+        assertFalse(yaml.getBoolean("world-context.enabled"));
         assertFalse(written.contains("structured-output"), written);
         assertFalse(written.contains("daily-token-limit"), written);
         assertFalse(written.contains("knowledge-select"), written);

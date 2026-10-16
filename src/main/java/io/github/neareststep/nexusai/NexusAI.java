@@ -49,6 +49,8 @@ import io.github.neareststep.nexusai.context.CachedContextCoordinator;
 import io.github.neareststep.nexusai.context.ContextRegistry;
 import io.github.neareststep.nexusai.context.ContextService;
 import io.github.neareststep.nexusai.context.ContextSnapshots;
+import io.github.neareststep.nexusai.context.WorldContextService;
+import io.github.neareststep.nexusai.generate.BukkitRegions;
 import io.github.neareststep.nexusai.dialogue.DialogueListener;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
@@ -114,6 +116,7 @@ public final class NexusAI extends JavaPlugin {
     private ContextRegistry contextRegistry;
     private ContextSnapshots contextSnapshots;
     private ContextService contextService;
+    private WorldContextService worldContextService;
     private CachedContextCoordinator contextCoordinator;
     private GenerationService generationService;
     private TokenLedgerStore tokenStore;
@@ -184,6 +187,12 @@ public final class NexusAI extends JavaPlugin {
                 getLogger(),
                 System::currentTimeMillis,
                 pluginConfig.getErrorLogCooldownSeconds());
+        this.worldContextService = new WorldContextService(
+                this,
+                new BukkitRegions(),
+                contextExecutor,
+                pluginConfig.worldContextSettings());
+        NexusAIApi.bindWorldContext(worldContextService);
         this.contextCoordinator = new CachedContextCoordinator(
                 contextSnapshots,
                 System::currentTimeMillis,
@@ -221,6 +230,8 @@ public final class NexusAI extends JavaPlugin {
         if (tokenStore != null) {
             tokenStore.flush();
         }
+        NexusAIApi.bindWorldContext(null);
+        worldContextService = null;
         shutdownExecutor(contextExecutor);
         shutdownExecutor(scheduler);
         NexusAIApi.bindContextRegistry(null);
@@ -379,6 +390,9 @@ public final class NexusAI extends JavaPlugin {
         }
         if (contextService != null && pluginConfig != null) {
             contextService.apply(pluginConfig.contextSettings(), pluginConfig.getErrorLogCooldownSeconds());
+        }
+        if (worldContextService != null && pluginConfig != null) {
+            worldContextService.apply(pluginConfig.worldContextSettings());
         }
         this.moderationService = null;
         if (prewarmService != null) {
@@ -822,6 +836,10 @@ public final class NexusAI extends JavaPlugin {
 
     public ContextService getContextService() {
         return contextService;
+    }
+
+    public WorldContextService getWorldContextService() {
+        return worldContextService;
     }
 
     public CachedContextCoordinator getContextCoordinator() {

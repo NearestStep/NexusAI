@@ -117,6 +117,8 @@ public final class PluginConfig {
     private ModerationSettings moderation = ModerationSettings.defaults();
     private io.github.neareststep.nexusai.context.ContextSettings contextSettings =
             io.github.neareststep.nexusai.context.ContextSettings.defaults();
+    private io.github.neareststep.nexusai.context.WorldContextSettings worldContextSettings =
+            io.github.neareststep.nexusai.context.WorldContextSettings.defaults();
     private int httpMaxInFlight = io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT;
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
     private final List<String> httpLimitWarnings = new ArrayList<>();
@@ -252,6 +254,7 @@ public final class PluginConfig {
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
+        this.worldContextSettings = io.github.neareststep.nexusai.context.WorldContextSettings.read(config);
         readHttpLimits(config);
         readPluginApi(config);
         readQuotas(config);
@@ -1381,6 +1384,12 @@ public final class PluginConfig {
         return contextSettings == null
                 ? io.github.neareststep.nexusai.context.ContextSettings.defaults()
                 : contextSettings;
+    }
+
+    public io.github.neareststep.nexusai.context.WorldContextSettings worldContextSettings() {
+        return worldContextSettings == null
+                ? io.github.neareststep.nexusai.context.WorldContextSettings.defaults()
+                : worldContextSettings;
     }
 
     /**

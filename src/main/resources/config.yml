@@ -432,6 +432,20 @@ context:
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
 
+# World snapshot for NexusAIApi.worldContext (player, inventory, nearby blocks, biome).
+# Off by default. When enabled, world reads run on the player's region thread with the
+# caps below; sorting and formatting stay off that thread. Body max-chars 400 ≈ 100 tokens
+# (ceil(codePoints/4)). A typical short block is about 30–45 tokens.
+# cooldown-millis skips a fresh region read and returns the last block for that player.
+world-context:
+  enabled: false
+  radius: 2                          # 0..8, inclusive cube around the player feet block
+  max-blocks: 125                    # 1..1331, hard cap on blocks examined
+  max-block-types: 16                # 1..64, distinct materials kept in the near= line
+  max-inventory-items: 36            # 0..54, distinct materials kept in the inv= line
+  max-chars: 400                     # 40..2000, body code points under the World: header
+  cooldown-millis: 250               # 0..5000; 0 = always read fresh
+
 # Java API for other plugins (NexusAIApi.generate and generateJson).
 # API calls spend limits.* like placeholders, and the quotas below when quotas.enabled is true.
 plugin-api:

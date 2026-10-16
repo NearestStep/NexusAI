@@ -30,7 +30,7 @@ class ExamplesConfigTest {
             "config-version", "locale", "startup-banner", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "latency", "limits", "pool", "prewarm", "moderation", "fallback",
-            "dialogue", "actions", "context", "plugin-api", "quotas", "sanitize", "http");
+            "dialogue", "actions", "context", "world-context", "plugin-api", "quotas", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
             "provider", "model", "base-url", "key", "system-prompt", "temperature", "max-tokens",
@@ -106,6 +106,10 @@ class ExamplesConfigTest {
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
             "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds");
+
+    private static final Set<String> WORLD_CONTEXT = Set.of(
+            "enabled", "radius", "max-blocks", "max-block-types", "max-inventory-items", "max-chars",
+            "cooldown-millis");
 
     private static final Set<String> PROMPT_SETTINGS = Set.of(
             "prompt", "vars", "ttl", "fallback", "max-prompt-length", "model", "system-prompt",
@@ -322,6 +326,9 @@ class ExamplesConfigTest {
         }
         if ("context".equals(parent)) {
             return CONTEXT.contains(key);
+        }
+        if ("world-context".equals(parent)) {
+            return WORLD_CONTEXT.contains(key);
         }
         if ("plugin-api".equals(parent)) {
             return PLUGIN_API.contains(key);

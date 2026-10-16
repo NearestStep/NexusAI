@@ -28,6 +28,39 @@ NexusAIApi.generate(plugin, GenerationRequest.prompt("quests:intro")
 
 `result.text()` is the fallback when `success()` is false. Check a value again before placing it in a command, a name, or a path.
 
+## World context
+
+`NexusAIApi.worldContext(plugin, player)` collects player name, world, block coordinates, inventory materials, nearby block counts, and biome into one compact prompt block in a single call. Call from any thread. World reads run on the player's region thread (Paper main thread, Folia region owner) with the caps in `world-context.*`. Sorting and formatting run off that thread on `nexusai-context-*`. Within `world-context.cooldown-millis` (default 250) a second call for the same player returns the last block without a fresh region read. The future completes with `""` when `world-context.enabled` is false, NexusAI is not enabled, or the player is gone. It does not complete exceptionally for those cases. Do not join the future on the main thread or a region thread.
+
+Optional overrides: `NexusAIApi.worldContext(plugin, player, WorldContextLimits.builder().radius(1).maxBlocks(27).build())`. Empty fields keep the config values. Cooldown is config-only.
+
+Token size: the body under the `World:` header is capped by `world-context.max-chars` (default 400 code points). NexusAI estimates tokens as `ceil(codePoints / 4)`, the same formula as missing usage. At the default cap the body is at most 100 tokens. A typical plains scene with a short inventory is about 30–45 tokens for the whole block including the header. `NexusAIApi.worldContextEstimatedTokens(block)` returns that estimate for a finished block.
+
+`world-context.enabled` defaults to `false`. Missing keys are appended on startup; `config-version` stays 2. `API_VERSION` stays 3.
+
+```java
+NexusAIApi.worldContext(plugin, player)
+        .thenAccept(block -> {
+            if (block.isEmpty()) {
+                return;
+            }
+            NexusAIApi.generate(plugin, GenerationRequest.template(
+                            "Suggest one craft from what the player can reach.\n\n" + block)
+                    .player(player)
+                    .label("craft-hint")
+                    .build());
+        });
+```
+
+Example block shape (materials are Minecraft path names, amounts use `×`):
+
+```text
+World:
+p=Steve w=world @10,64,-3 bio=plains
+inv=dirt×64,oak_log×12,iron_pickaxe
+near=r2 grass_block×40,dirt×30,stone×20
+```
+
 ## Prompt registration
 
 `NexusAIApi.registerPrompt(plugin, localId, definition)` stores a prompt under `namespace:localId`. The namespace is the plugin name in lower case, and any character outside `[a-z0-9_-]` becomes `_`. `localId` matches `[a-z0-9_-]{1,64}`. The same plugin may register that id again to replace it. A second plugin with the same namespace gets `IllegalStateException`. The prompt is not written to a file. `/nai reload` keeps it. Disabling the owner plugin removes it.

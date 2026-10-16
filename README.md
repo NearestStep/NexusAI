@@ -607,6 +607,20 @@ The cache stays on. `cached_` reads a snapshot for `(player, prompt)` that is at
 | `context.suspend-after-timeouts` | 5 | 1..100 |
 | `context.suspend-seconds` | 60 | 1..3600 |
 
+## World context helper
+
+`NexusAIApi.worldContext(plugin, player)` returns one compact block with the player, inventory materials, nearby block counts, and biome. Call from any thread. Reads run on the player's region thread with the caps below; formatting stays on `nexusai-context-*`. When `world-context.enabled` is false (the default), the future completes with `""` and no world state is read. Append the block to a template or a `GenerationRequest` yourself; the helper does not change placeholders or `/nai talk` by itself. Token estimate: `ceil(codePoints / 4)` on the finished block (default body cap 400 ≈ 100 tokens; typical short blocks about 30–45). Details: [docs/api.md](docs/api.md#world-context).
+
+| Key | Default | Range |
+|-----|---------|-------|
+| `world-context.enabled` | false | |
+| `world-context.radius` | 2 | 0..8 |
+| `world-context.max-blocks` | 125 | 1..1331 |
+| `world-context.max-block-types` | 16 | 1..64 |
+| `world-context.max-inventory-items` | 36 | 0..54 |
+| `world-context.max-chars` | 400 | 40..2000 |
+| `world-context.cooldown-millis` | 250 | 0..5000 |
+
 ```java
 package io.github.neareststep.nexusai.context;
 

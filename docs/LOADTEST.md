@@ -35,7 +35,7 @@ python3 .github/scripts/paper-load.py \
   --out load-out-bots
 ```
 
-`--bots` installs `mineflayer@4.33.0` with npm and connects offline-mode players `NaiBot01` … . The harness ops them over RCON. S4 and S5 are `not-run` (exit 0) when no bot is connected, so a mode A CI job stays green. Paper 26.2 needs Java 25.
+`--bots` installs `mineflayer@4.39.0` with npm and connects offline-mode players `NaiBot01` … . The harness ops them over RCON. On Paper 26.2 the harness shims minecraft-data / prismarine-chunk when packet tables are still one release behind. S4, S5, and S-world are `not-run` (exit 0) when no bot is connected, so a mode A CI job stays green. Paper 26.2 needs Java 25.
 
 Useful flags: `--mock-latency-ms` (default 300), `--baseline-seconds` (60), `--load-seconds` (120), `--pool-seconds` (3), `--skip-jfr`. A FAIL is retried once. Two FAILs fail the process. `not-run` does not.
 
