@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.i18n;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -37,6 +38,26 @@ class MessageServiceTest {
         assertTrue(formatted.contains("0.3.0"));
         assertTrue(formatted.contains("Version:"));
         assertTrue(formatted.indexOf('&') < 0);
+    }
+
+    @Test
+    void brandHexAmpersandSequenceRendersAs00C5C2() {
+        assertEquals("§x§0§0§c§5§c§2", MessageService.colorize("&x&0&0&c&5&c&2"));
+
+        YamlConfiguration en = new YamlConfiguration();
+        en.set("prefix", "&8[&x&0&0&c&5&c&2NexusAI&8]&r ");
+        en.set("command.help-header", "&x&0&0&c&5&c&2NexusAI commands:");
+        MessageService messages = MessageService.forTest(en, en, "en");
+
+        TextComponent header = find(messages.component("command.help-header", Map.of()), "NexusAI commands:");
+        assertEquals(TextColor.color(0x00C5C2), header.color());
+        assertEquals("#00C5C2", header.color().asHexString().toUpperCase());
+
+        en.set("command.version", "{prefix}ready");
+        messages = MessageService.forTest(en, en, "en");
+        TextComponent fromPrefix = find(messages.component("command.version", Map.of()), "NexusAI");
+        assertEquals(TextColor.color(0x00C5C2), fromPrefix.color());
+        assertEquals("#00C5C2", fromPrefix.color().asHexString().toUpperCase());
     }
 
     @Test
