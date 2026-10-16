@@ -51,6 +51,7 @@ public final class GenerationRequest {
     private final String knowledgeQuery;
     private final Duration ttl;
     private final String label;
+    private final ResponseValidation responseValidation;
 
     private GenerationRequest(
             String promptId,
@@ -71,7 +72,8 @@ public final class GenerationRequest {
             List<String> knowledge,
             String knowledgeQuery,
             Duration ttl,
-            String label
+            String label,
+            ResponseValidation responseValidation
     ) {
         this.promptId = promptId;
         this.template = template;
@@ -92,6 +94,9 @@ public final class GenerationRequest {
         this.knowledgeQuery = knowledgeQuery;
         this.ttl = ttl;
         this.label = label;
+        this.responseValidation = responseValidation == null
+                ? ResponseValidation.defaults()
+                : responseValidation;
     }
 
     /** A named prompt from {@code prompts.yml}. */
@@ -187,6 +192,14 @@ public final class GenerationRequest {
         return label;
     }
 
+    /**
+     * Per-request overrides for {@code plugin-api.response-validation} on {@code generateJson}.
+     * Ignored by {@link NexusAIApi#generate}. Defaults mean config values apply.
+     */
+    public ResponseValidation responseValidation() {
+        return responseValidation;
+    }
+
     boolean maxTokensSpecified() {
         return maxTokensSet;
     }
@@ -241,7 +254,8 @@ public final class GenerationRequest {
                 && knowledge.equals(that.knowledge)
                 && Objects.equals(knowledgeQuery, that.knowledgeQuery)
                 && Objects.equals(ttl, that.ttl)
-                && label.equals(that.label);
+                && label.equals(that.label)
+                && responseValidation.equals(that.responseValidation);
     }
 
     @Override
@@ -249,7 +263,8 @@ public final class GenerationRequest {
         return Objects.hash(
                 promptId, template, vars, playerId, player != null, cacheMode,
                 maxTokensSet, maxTokens, temperatureSet, temperature, model, format,
-                systemPromptSet, systemPrompt, fallback, knowledge, knowledgeQuery, ttl, label);
+                systemPromptSet, systemPrompt, fallback, knowledge, knowledgeQuery, ttl, label,
+                responseValidation);
     }
 
     @Override
@@ -288,6 +303,7 @@ public final class GenerationRequest {
         private String knowledgeQuery;
         private Duration ttl;
         private String label = "";
+        private ResponseValidation responseValidation = ResponseValidation.defaults();
 
         private Builder(boolean templateMode, String source) {
             this.templateMode = templateMode;
@@ -469,6 +485,18 @@ public final class GenerationRequest {
             return this;
         }
 
+        /**
+         * Overrides {@code plugin-api.response-validation} for {@code generateJson} only.
+         * {@link NexusAIApi#generate} ignores this field.
+         */
+        public Builder responseValidation(ResponseValidation validation) {
+            if (validation == null) {
+                throw new IllegalArgumentException("responseValidation is required");
+            }
+            this.responseValidation = validation;
+            return this;
+        }
+
         /** Checks the shape of this request. A violation throws {@link IllegalArgumentException} now. */
         public GenerationRequest build() {
             if (templateMode) {
@@ -520,7 +548,8 @@ public final class GenerationRequest {
                     knowledge,
                     knowledgeQuery,
                     ttl,
-                    label
+                    label,
+                    responseValidation
             );
         }
     }

@@ -615,6 +615,10 @@ class ConfigMigrationTest {
         assertTrue(outcome.addedKeys().contains("plugin-api.enabled"), outcome.addedKeys().toString());
         assertTrue(outcome.addedKeys().contains("plugin-api.max-template-chars"));
         assertTrue(outcome.addedKeys().contains("plugin-api.max-var-chars"));
+        assertTrue(outcome.addedKeys().contains("plugin-api.response-validation.enabled"), outcome.addedKeys().toString());
+        assertTrue(outcome.addedKeys().contains("plugin-api.response-validation.on-invalid"));
+        assertTrue(outcome.addedKeys().contains("plugin-api.response-validation.max-retries"));
+        assertTrue(outcome.addedKeys().contains("plugin-api.response-validation.deliver-on-region"));
         String written = Files.readString(file, StandardCharsets.UTF_8);
         assertTrue(written.contains("# keep this comment"), written);
         assertEquals(1, written.split("max-template-chars:", -1).length - 1, written);
@@ -625,6 +629,10 @@ class ConfigMigrationTest {
         assertTrue(yaml.getBoolean("plugin-api.enabled"));
         assertEquals(8000, yaml.getInt("plugin-api.max-template-chars"));
         assertEquals(1000, yaml.getInt("plugin-api.max-var-chars"));
+        assertTrue(yaml.getBoolean("plugin-api.response-validation.enabled"));
+        assertEquals("retry", yaml.getString("plugin-api.response-validation.on-invalid"));
+        assertEquals(1, yaml.getInt("plugin-api.response-validation.max-retries"));
+        assertFalse(yaml.getBoolean("plugin-api.response-validation.deliver-on-region"));
 
         ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(again.addedKeys().isEmpty());

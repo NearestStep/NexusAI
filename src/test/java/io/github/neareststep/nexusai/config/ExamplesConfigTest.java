@@ -84,7 +84,10 @@ class ExamplesConfigTest {
     private static final Set<String> HTTP = Set.of("max-in-flight", "queue-size");
 
     private static final Set<String> PLUGIN_API = Set.of(
-            "enabled", "max-template-chars", "max-var-chars");
+            "enabled", "max-template-chars", "max-var-chars", "response-validation");
+
+    private static final Set<String> RESPONSE_VALIDATION = Set.of(
+            "enabled", "on-invalid", "max-retries", "deliver-on-region");
 
     private static final Set<String> QUOTAS = Set.of(
             "enabled", "missing-usage", "server-tokens-per-day", "player-tokens-per-day",
@@ -302,6 +305,9 @@ class ExamplesConfigTest {
         }
         if ("plugin-api".equals(parent)) {
             return PLUGIN_API.contains(key);
+        }
+        if ("plugin-api.response-validation".equals(parent)) {
+            return RESPONSE_VALIDATION.contains(key);
         }
         if ("quotas".equals(parent)) {
             return QUOTAS.contains(key);

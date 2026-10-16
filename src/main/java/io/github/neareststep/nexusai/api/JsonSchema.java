@@ -12,8 +12,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -101,6 +103,65 @@ public final class JsonSchema {
     @ApiStatus.Internal
     public boolean strict() {
         return strict;
+    }
+
+    /**
+     * Returns a copy of {@code schema} whose {@code property} is a string {@code enum} of
+     * {@code actions}. Use this for an allowlist the provider can see in {@code json_schema}.
+     * Action names match {@code [A-Za-z0-9_.:-]{1,64}}. At most
+     * {@link ResponseValidation#MAX_ALLOWED_ACTIONS} names.
+     *
+     * @throws IllegalArgumentException when {@code schema}, {@code property}, or {@code actions} is invalid
+     */
+    public static JsonSchema withActionAllowlist(JsonSchema schema, String property, Collection<String> actions) {
+        if (schema == null) {
+            throw new IllegalArgumentException("schema is required");
+        }
+        if (property == null || !ResponseValidation.ACTION_PROPERTY.matcher(property).matches()) {
+            throw new IllegalArgumentException("property must match [A-Za-z_][A-Za-z0-9_]{0,63}");
+        }
+        if (actions == null || actions.isEmpty()) {
+            throw new IllegalArgumentException("actions are required");
+        }
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        for (String action : actions) {
+            if (action == null || !ResponseValidation.ACTION_NAME.matcher(action).matches()) {
+                throw new IllegalArgumentException("action name must match [A-Za-z0-9_.:-]{1,64}");
+            }
+            if (names.size() >= ResponseValidation.MAX_ALLOWED_ACTIONS && !names.contains(action)) {
+                throw new IllegalArgumentException(
+                        "at most " + ResponseValidation.MAX_ALLOWED_ACTIONS + " allowed actions");
+            }
+            names.add(action);
+        }
+        JsonNode rootNode = read(schema.json());
+        if (rootNode == null || !rootNode.isObject()) {
+            throw new IllegalArgumentException("$: schema must be an object");
+        }
+        ObjectNode root = (ObjectNode) rootNode.deepCopy();
+        ObjectNode properties;
+        JsonNode existingProperties = root.get("properties");
+        if (existingProperties != null && existingProperties.isObject()) {
+            properties = (ObjectNode) existingProperties;
+        } else {
+            properties = MAPPER.createObjectNode();
+            root.set("properties", properties);
+        }
+        ObjectNode prop;
+        JsonNode existing = properties.get(property);
+        if (existing != null && existing.isObject()) {
+            prop = (ObjectNode) existing.deepCopy();
+        } else {
+            prop = MAPPER.createObjectNode();
+        }
+        prop.put("type", "string");
+        ArrayNode enums = MAPPER.createArrayNode();
+        for (String name : names) {
+            enums.add(name);
+        }
+        prop.set("enum", enums);
+        properties.set(property, prop);
+        return parse(write(sort(root)));
     }
 
     @Override

@@ -86,7 +86,11 @@ public final class JsonGenerationResult {
         return mode;
     }
 
-    /** True when the one correction retry was sent and this result came from the model. */
+    /**
+     * True when at least one correction retry was sent and this result came from the model.
+     * How many retries are allowed is {@code plugin-api.response-validation.max-retries}
+     * (or a per-request override).
+     */
     public boolean repaired() {
         return repaired;
     }

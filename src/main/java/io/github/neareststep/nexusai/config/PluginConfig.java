@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.api.InvalidJsonAction;
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.api.ResponseValidation;
 import io.github.neareststep.nexusai.budget.MissingUsage;
 import io.github.neareststep.nexusai.budget.QuotaSettings;
 import io.github.neareststep.nexusai.knowledge.KeywordSettings;
@@ -120,6 +122,7 @@ public final class PluginConfig {
     private boolean pluginApiEnabled = true;
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
+    private ResponseValidationSettings responseValidation = ResponseValidationSettings.defaults();
     private final List<String> pluginApiWarnings = new ArrayList<>();
     private static final Pattern QUOTA_GROUP_NAME = Pattern.compile("[a-z0-9_-]{1,32}");
     private static final Set<String> QUOTA_FIELDS = Set.of("tokens-per-day", "requests-per-day");
@@ -416,6 +419,27 @@ public final class PluginConfig {
         this.pluginApiEnabled = config.getBoolean("plugin-api.enabled", true);
         this.pluginApiMaxTemplateChars = clampPluginApi(config, "plugin-api.max-template-chars", 8000, 100, 100_000);
         this.pluginApiMaxVarChars = clampPluginApi(config, "plugin-api.max-var-chars", 1000, 10, 20_000);
+        boolean validationEnabled = config.getBoolean("plugin-api.response-validation.enabled", true);
+        String onInvalidRaw = config.getString("plugin-api.response-validation.on-invalid", "retry");
+        InvalidJsonAction onInvalid = ResponseValidation.parseAction(onInvalidRaw).orElse(null);
+        if (onInvalid == null) {
+            String shown = onInvalidRaw == null ? "" : onInvalidRaw.trim();
+            pluginApiWarnings.add(
+                    "plugin-api.response-validation.on-invalid '" + shown
+                            + "' is unknown. Using retry.");
+            onInvalid = InvalidJsonAction.RETRY;
+        }
+        int maxRetries = config.getInt("plugin-api.response-validation.max-retries", 1);
+        int clampedRetries = clamp(maxRetries, 0, ResponseValidation.MAX_RETRIES);
+        if (clampedRetries != maxRetries) {
+            pluginApiWarnings.add(
+                    "plugin-api.response-validation.max-retries is " + maxRetries
+                            + ". It must be from 0 to " + ResponseValidation.MAX_RETRIES
+                            + ". Using " + clampedRetries + ".");
+        }
+        boolean deliverOnRegion = config.getBoolean("plugin-api.response-validation.deliver-on-region", false);
+        this.responseValidation = ResponseValidationSettings.of(
+                validationEnabled, onInvalid, clampedRetries, deliverOnRegion);
     }
 
     private int clampPluginApi(FileConfiguration config, String key, int fallback, int min, int max) {
@@ -1394,6 +1418,11 @@ public final class PluginConfig {
     /** {@code plugin-api.max-var-chars}, clamped to 10..20000. */
     public int pluginApiMaxVarChars() {
         return pluginApiMaxVarChars;
+    }
+
+    /** {@code plugin-api.response-validation}. Missing keys use the jar defaults. */
+    public ResponseValidationSettings responseValidation() {
+        return responseValidation == null ? ResponseValidationSettings.defaults() : responseValidation;
     }
 
     public List<String> pluginApiWarnings() {

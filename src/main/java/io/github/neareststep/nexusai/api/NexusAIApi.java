@@ -160,12 +160,19 @@ public final class NexusAIApi {
 
     /**
      * Like {@link #generate}, but the model must answer with one JSON object that matches {@code schema}.
-     * Call from any thread. The future completes on a NexusAI thread, the same way {@link #generate} does.
-     * It completes exceptionally only when NexusAI is not enabled.
+     * Call from any thread. Local schema checks and correction retries run off the main thread.
+     * The future completes on a NexusAI thread by default, the same way {@link #generate} does.
+     * When {@code plugin-api.response-validation.deliver-on-region} is true (opt-in) or the request
+     * sets {@link ResponseValidation.Builder#deliverOnRegion(boolean)}, and the request has a player
+     * entity, the future completes on that player's region thread instead. It completes exceptionally
+     * only when NexusAI is not enabled.
      * <p>
-     * Do not join the future on the main thread or a region thread. On Folia, hop to the global region
-     * scheduler before creating a world object. Values in {@link JsonGenerationResult#asMap()} came from
-     * a model. Check them again before using one in a command, a name, or a path.
+     * With response validation enabled (default), {@link JsonGenerationResult#success()} is true only
+     * after types, ranges, and any action allowlist pass. An invalid reply retries or falls back per
+     * {@code plugin-api.response-validation} (overridable with
+     * {@link GenerationRequest.Builder#responseValidation}). Values in
+     * {@link JsonGenerationResult#asMap()} still came from a model: check them again before using one
+     * in a command, a name, or a path.
      * <p>
      * {@code request.format()} is ignored. A cached call and an in-flight join do not call the model again.
      * <pre>{@code

@@ -415,6 +415,18 @@ plugin-api:
   max-template-chars: 8000
   # Longest value of one variable. 10..20000.
   max-var-chars: 1000
+  # Local checks for generateJson. Validation and correction retries run off the main thread.
+  # deliver-on-region is opt-in (default false): the future still completes on a NexusAI thread,
+  # matching 1.2.0. Set true, or ResponseValidation.deliverOnRegion(true), to hop to the player's
+  # region thread when a player entity is set (Paper: main thread). generate ignores this block.
+  response-validation:
+    enabled: true
+    # retry = correction retries then fallback; fallback = no correction retry.
+    on-invalid: retry
+    # Correction retries when on-invalid is retry. 0..3.
+    max-retries: 1
+    # Opt-in: complete generateJson on the player's region thread when a player entity is set.
+    deliver-on-region: false
 
 # Token accounting and daily quotas. Usage is always counted in token-usage.yml.
 # Limits below apply only when enabled is true. 0 = no limit. Days reset at local midnight.
