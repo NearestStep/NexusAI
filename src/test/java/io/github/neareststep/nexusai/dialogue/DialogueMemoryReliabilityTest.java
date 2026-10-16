@@ -56,6 +56,8 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
         MemoryStore.fullDocumentAppends.set(0);
         MemoryStore.eventScans.set(0);
+        MemoryStore.lineScans.set(0);
+        MemoryStore.lineScanHits.set(0);
     }
 
     @Test
@@ -560,10 +562,12 @@ class DialogueMemoryReliabilityTest {
             long heap = Runtime.getRuntime().maxMemory();
             System.out.println("qa-shaped stop " + elapsed + " ms, bytes=" + bytes
                     + ", cpus=" + cpus + ", heapMax=" + heap
+                    + ", lineScanHits=" + MemoryStore.lineScanHits.get()
                     + ", eventScans=" + MemoryStore.eventScans.get()
                     + ", fullDocumentAppends=" + MemoryStore.fullDocumentAppends.get());
             assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
-            assertTrue(MemoryStore.eventScans.get() > 0, "stop did not scan keys");
+            assertTrue(MemoryStore.lineScanHits.get() + MemoryStore.eventScans.get() > 0,
+                    "stop did not scan keys");
             assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
             String merged = Files.readString(fixture.file);
             assertTrue(merged.startsWith("format: 2"), merged.substring(0, Math.min(40, merged.length())));
@@ -802,7 +806,9 @@ class DialogueMemoryReliabilityTest {
                     notes.get(0));
             assertNoExtraReader();
             assertNoTempFile(fixture.file.getParent());
-            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis + 200L + 1_500L;
+            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis
+                    + DialogueMemoryPersistence.appendBudgetMillis(Files.size(fixture.file))
+                    + 1_500L;
             assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
         } finally {
             DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
@@ -862,7 +868,7 @@ class DialogueMemoryReliabilityTest {
         fixture.files.shutdown();
         long elapsed = millisSince(started);
         long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis
-                + DialogueMemoryPersistence.shutdownAppendBudgetMillis
+                + DialogueMemoryPersistence.appendBudgetMillis(Files.size(fixture.file))
                 + 1_500L;
         assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
         assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop parsed the file again");

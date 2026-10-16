@@ -29,9 +29,21 @@ final class DialogueMemoryPersistence {
     /**
      * How long stop waits, after {@link #shutdownLoadGraceMillis}, to finish the key scan, the
      * load, and the decision to write. When this budget ends, stop does not replace the file.
-     * Tests shorten this.
+     * Tests shorten this. The live budget also grows with the file size; see
+     * {@link #appendBudgetMillis(long)}.
      */
     static volatile long shutdownAppendBudgetMillis = 5_000L;
+
+    /**
+     * Stop append wait after the load-grace join. {@code fileBytes} adds one millisecond per 8 KiB,
+     * capped at the configured base, so a multi-megabyte {@code dialogue-memory.yml} gets more
+     * room for the key scan and splice without stretching a short test budget on a tiny file.
+     */
+    static long appendBudgetMillis(long fileBytes) {
+        long base = Math.max(0L, shutdownAppendBudgetMillis);
+        long bySize = Math.max(0L, fileBytes) / 8192L;
+        return base + Math.min(base, bySize);
+    }
 
     static final ThreadFactory DEFAULT_LOADER_THREADS = task -> {
         Thread worker = new Thread(task, "nexusai-memory-load");
@@ -163,18 +175,18 @@ final class DialogueMemoryPersistence {
     /**
      * Stop. A load that is still running after {@link #shutdownLoadGraceMillis} does not block disable
      * for the rest of the read. The key scan starts here, so it overlaps that join, and is then
-     * awaited only until {@link #shutdownAppendBudgetMillis}. Disk characters are kept. Characters
-     * that were never in the file are appended when that scan has read the file. A file the scan
-     * cannot splice is not read again while the load is still running: stop waits for that load
-     * until the budget ends and, when the load finishes in time, writes the memory it already
-     * loaded. The budget includes that write. Stop does not start a write, and does not rename,
-     * after the budget has ended. When stop gives up on that budget, the load that is still
-     * running does not mask or rename the file afterward. If the scan is not finished, the scan
-     * failed, the file cannot be read, or the file cannot be written, stop does not replace the
-     * file and one warning names how many characters were not saved and why. That count is taken
-     * when stop begins. A scan that crashes is not described as the budget. A splice that cannot
-     * be written is not described as the budget and is not waited out. Stop does not also log
-     * that saves are paused.
+     * awaited only until {@link #appendBudgetMillis(long)} for the live file size. Disk characters
+     * are kept. Characters that were never in the file are appended when that scan has read the
+     * file. A file the scan cannot splice is not read again while the load is still running: stop
+     * waits for that load until the budget ends and, when the load finishes in time, writes the
+     * memory it already loaded. The budget includes that write. Stop does not start a write, and
+     * does not rename, after the budget has ended. When stop gives up on that budget, the load that
+     * is still running does not mask or rename the file afterward. If the scan is not finished, the
+     * scan failed, the file cannot be read, or the file cannot be written, stop does not replace
+     * the file and one warning names how many characters were not saved and why. That count is
+     * taken when stop begins. A scan that crashes is not described as the budget. A splice that
+     * cannot be written is not described as the budget and is not waited out. Stop does not also
+     * log that saves are paused.
      */
     void shutdown() {
         boolean summaries = summaries();
@@ -207,10 +219,12 @@ final class DialogueMemoryPersistence {
                 pending = diskLoader;
             }
             if (pending != null && pending.isAlive()) {
+                File target = file.get();
+                long bytes = target != null && target.isFile() ? target.length() : 0L;
                 long deadline = System.nanoTime()
-                        + Math.max(0L, shutdownAppendBudgetMillis) * 1_000_000L;
+                        + appendBudgetMillis(bytes) * 1_000_000L;
                 MemoryStore.LiveSplice splice = memory.spliceForStop(
-                        file.get(), logger, summaries, secretList(), scan, deadline);
+                        target, logger, summaries, secretList(), scan, deadline);
                 if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
                     awaitLoaderAndSave(pending, deadline, summaries);
                 } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {

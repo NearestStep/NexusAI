@@ -118,6 +118,18 @@ public final class MemoryStore {
     static final AtomicInteger eventScans = new AtomicInteger();
 
     /**
+     * Times the line-oriented key scan ran and produced an outline. A refuse that falls back to
+     * the event scan still increments this. Tests reset it.
+     */
+    static final AtomicInteger lineScans = new AtomicInteger();
+
+    /**
+     * Times the line-oriented key scan produced a usable outline (no event-scan fallback).
+     * Tests reset it.
+     */
+    static final AtomicInteger lineScanHits = new AtomicInteger();
+
+    /**
      * Replaces the atomic rename of a quarantine copy. Tests use this to stop after the temp file
      * is complete and before {@code .corrupt} exists.
      */
@@ -1107,16 +1119,59 @@ public final class MemoryStore {
     }
 
     /**
-     * Character ids already in the file, from SnakeYAML events. Folded and block scalars stay one
-     * event, so a continuation line does not hide a character. Null when the shape is not one this
-     * append can splice without rewriting existing text.
+     * Character ids already in the file. Prefers a line-oriented scan of the block shape this
+     * store writes; falls back to SnakeYAML events when that scan refuses. Folded and block
+     * scalars stay one event on the fallback path, so a continuation line does not hide a
+     * character. Null when the shape is not one this append can splice without rewriting existing
+     * text.
      */
     private static EventRead parseEvents(String text, AbsentScan scan) throws IOException {
-        eventScans.incrementAndGet();
         // These breaks are line breaks to the parser and are not stable offsets in the original text.
         if (text.indexOf('\u0085') >= 0 || text.indexOf('\u2028') >= 0 || text.indexOf('\u2029') >= 0) {
             return EventRead.refused();
         }
+        if (scan != null && scan.abandoned) {
+            throw new LoadAbandoned();
+        }
+        lineScans.incrementAndGet();
+        DialogueMemoryLineScan.Result line;
+        try {
+            line = DialogueMemoryLineScan.scan(text, () -> scan != null && scan.abandoned);
+        } catch (DialogueMemoryLineScan.InterruptedScan e) {
+            throw new LoadAbandoned();
+        }
+        if (line.unreadable) {
+            return EventRead.unreadable();
+        }
+        if (!line.refused && line.outline != null) {
+            if (scan != null && scan.abandoned) {
+                throw new LoadAbandoned();
+            }
+            lineScanHits.incrementAndGet();
+            return EventRead.ok(copyOutline(line.outline));
+        }
+        return parseEventsWithSnake(text, scan);
+    }
+
+    private static StreamOutline copyOutline(DialogueMemoryLineScan.Outline source) {
+        StreamOutline outline = new StreamOutline();
+        outline.format2 = source.format2;
+        outline.sawFormat = source.sawFormat;
+        outline.formatValueStart = source.formatValueStart;
+        outline.formatValueEnd = source.formatValueEnd;
+        outline.sawEntries = source.sawEntries;
+        outline.otherRoot = source.otherRoot;
+        outline.entriesEnd = source.entriesEnd;
+        outline.playerIndent = source.playerIndent;
+        outline.playerEnd.putAll(source.playerEnd);
+        outline.characterIndent.putAll(source.characterIndent);
+        outline.characterKeys.addAll(source.characterKeys);
+        outline.nullSpans.putAll(source.nullSpans);
+        return outline;
+    }
+
+    private static EventRead parseEventsWithSnake(String text, AbsentScan scan) throws IOException {
+        eventScans.incrementAndGet();
         LoaderOptions options = new LoaderOptions();
         options.setCodePointLimit(Integer.MAX_VALUE);
         options.setMaxAliasesForCollections(Integer.MAX_VALUE);
