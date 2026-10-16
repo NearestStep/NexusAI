@@ -6,6 +6,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
@@ -17,24 +18,37 @@ import java.util.concurrent.TimeUnit;
  * A put may carry its own TTL; otherwise the cache default is used.
  * Each entry stores the reply text and, when known, the provider and model that produced it.
  * A put that only passes the text leaves those two fields empty.
+ * When {@code enabled} is false, reads miss and writes are ignored.
+ * When {@code maxMemoryBytes} is greater than zero, eviction uses estimated UTF-8 weight
+ * instead of entry count ({@code maxSize}).
  */
 public final class AiCache {
+
+    private static final int ENTRY_OVERHEAD_BYTES = 64;
 
     private final Cache<String, CachedAnswer> cache;
     private final ConcurrentHashMap<String, Long> writtenAtMillis = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ttlNanosByKey = new ConcurrentHashMap<>();
     private final long defaultTtlNanos;
     private final boolean allowMarkup;
+    private final boolean enabled;
+    private final long maxMemoryBytes;
 
     public AiCache(Duration ttl, long maxSize) {
         this(ttl, maxSize, false);
     }
 
     public AiCache(Duration ttl, long maxSize, boolean allowMarkup) {
+        this(ttl, maxSize, allowMarkup, true, 0L);
+    }
+
+    public AiCache(Duration ttl, long maxSize, boolean allowMarkup, boolean enabled, long maxMemoryBytes) {
         Objects.requireNonNull(ttl, "ttl");
         this.allowMarkup = allowMarkup;
+        this.enabled = enabled;
+        this.maxMemoryBytes = Math.max(0L, maxMemoryBytes);
         this.defaultTtlNanos = Math.max(1L, ttl.toNanos());
-        this.cache = Caffeine.newBuilder()
+        Caffeine<String, CachedAnswer> builder = Caffeine.newBuilder()
                 .expireAfter(new Expiry<String, CachedAnswer>() {
                     @Override
                     public long expireAfterCreate(String key, CachedAnswer value, long currentTime) {
@@ -51,14 +65,27 @@ public final class AiCache {
                         return currentDuration;
                     }
                 })
-                .maximumSize(Math.max(1L, maxSize))
                 .removalListener((key, value, cause) -> {
                     if (key != null && cause != RemovalCause.REPLACED) {
                         writtenAtMillis.remove(key);
                         ttlNanosByKey.remove(key);
                     }
-                })
-                .build();
+                });
+        if (this.maxMemoryBytes > 0L) {
+            builder.maximumWeight(this.maxMemoryBytes)
+                    .weigher(AiCache::weightOf);
+        } else {
+            builder.maximumSize(Math.max(1L, maxSize));
+        }
+        this.cache = builder.build();
+    }
+
+    public boolean enabled() {
+        return enabled;
+    }
+
+    public long maxMemoryBytes() {
+        return maxMemoryBytes;
     }
 
     public Optional<String> get(String key) {
@@ -71,6 +98,9 @@ public final class AiCache {
      * The text is cleaned the same way as {@link #get(String)}.
      */
     public Optional<CachedAnswer> lookup(String key) {
+        if (!enabled) {
+            return Optional.empty();
+        }
         CachedAnswer value = cache.getIfPresent(key);
         if (value == null) {
             return Optional.empty();
@@ -93,6 +123,9 @@ public final class AiCache {
     public void put(String key, String value, String providerId, String model, String note) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
+        if (!enabled) {
+            return;
+        }
         ttlNanosByKey.remove(key);
         write(key, new CachedAnswer(value, providerId, model, note));
     }
@@ -109,6 +142,9 @@ public final class AiCache {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         Objects.requireNonNull(ttl, "ttl");
+        if (!enabled) {
+            return;
+        }
         ttlNanosByKey.put(key, Math.max(1L, ttl.toNanos()));
         write(key, new CachedAnswer(value, providerId, model, note));
     }
@@ -123,7 +159,7 @@ public final class AiCache {
      */
     public boolean isFresh(String key) {
         Objects.requireNonNull(key, "key");
-        if (cache.getIfPresent(key) == null) {
+        if (!enabled || cache.getIfPresent(key) == null) {
             return false;
         }
         Long writtenAt = writtenAtMillis.get(key);
@@ -151,10 +187,30 @@ public final class AiCache {
      * A put may store a shorter TTL than the cache default.
      */
     public Duration entryTtl(String key) {
-        if (key == null || cache.getIfPresent(key) == null) {
+        if (!enabled || key == null || cache.getIfPresent(key) == null) {
             return null;
         }
         return Duration.ofNanos(ttlNanosFor(key));
+    }
+
+    /**
+     * Estimated UTF-8 weight of one entry, including a fixed object overhead.
+     */
+    public static int weightOf(String key, CachedAnswer value) {
+        long bytes = utf8(key)
+                + utf8(value == null ? null : value.text())
+                + utf8(value == null ? null : value.providerId())
+                + utf8(value == null ? null : value.model())
+                + utf8(value == null ? null : value.note())
+                + ENTRY_OVERHEAD_BYTES;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, bytes));
+    }
+
+    private static int utf8(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        return text.getBytes(StandardCharsets.UTF_8).length;
     }
 
     private long ttlNanosFor(String key) {

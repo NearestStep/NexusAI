@@ -238,10 +238,31 @@ cache:
   # Seconds
   ttl: 300
   max-size: 1000
+  # false skips reads and writes of this shared response cache. In-flight joins stay.
+  enabled: true
+  # Soft UTF-8 weight cap for cached replies (key + text + metadata). 0 = use max-size only.
+  # When set above 0, eviction uses this weight instead of max-size.
+  max-memory-bytes: 0
   # Length-trim notices are not this cache. Each prompt id is logged twice, then suppressed.
   # The notice key is that id (named prompt, pool entry, or talk character), not the template.
   # The line names a prompts.yml id or "nai talk", plus its length. A literal is not printed.
   # The notice map is an access-order LRU of 256 ids. /nai reload clears it.
+
+# Perceived latency for /nai talk. Each part is independent. Placeholders and the plugin API
+# are unchanged. Chat sends hop to the player's entity scheduler (Folia-safe).
+latency:
+  streaming:
+    # Progressive chat delivery of a finished talk reply. false = one message when ready.
+    enabled: false
+    chars-per-chunk: 48
+    chunk-delay-millis: 40
+  thinking-indicator:
+    # Sends talk.thinking while the model works.
+    enabled: false
+  timeout:
+    # After this wait, the player gets talk.timeout-fallback. The model call may still finish.
+    enabled: false
+    millis: 15000
 
 limits:
   # Server-wide caps. Console commands, the pool, and prewarm spend only these.

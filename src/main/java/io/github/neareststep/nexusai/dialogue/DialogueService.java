@@ -15,6 +15,7 @@ import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.command.SenderTasks;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
+import io.github.neareststep.nexusai.config.LatencySettings;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.event.EventDispatcher;
@@ -392,21 +393,58 @@ public final class DialogueService {
 
     private String present(Player player, TalkResult result, boolean notifyReply, boolean notifyStart) {
         String line = shown(result);
-        SenderTasks.run(plugin, player, () -> deliver(player, result, notifyReply, notifyStart), plugin.getLogger());
+        LatencySettings latency = plugin.getPluginConfig().latencySettings();
+        boolean stream = notifyReply && latency.streamingEnabled() && npcReplyText(result);
+        if (stream) {
+            SenderTasks.run(plugin, player, () -> deliverStatus(player, result, notifyReply, notifyStart, true),
+                    plugin.getLogger());
+            streamReply(player, result.characterId(), result.text(), latency, result.code() == TalkCode.REPLIES);
+        } else {
+            SenderTasks.run(plugin, player, () -> deliver(player, result, notifyReply, notifyStart), plugin.getLogger());
+        }
         return line;
     }
 
-    private void deliver(Player player, TalkResult result, boolean notifyReply, boolean notifyStart) {
-        MessageService messages = plugin.getMessageService();
-        if ((notifyReply || notifyStart) && result.code() == TalkCode.STARTED) {
-            messages.send(player, "talk.started", Map.of("id", result.characterId()));
+    private static boolean npcReplyText(TalkResult result) {
+        if (result == null || result.text() == null || result.text().isBlank()) {
+            return false;
         }
+        return result.code() == TalkCode.REPLY
+                || result.code() == TalkCode.REPLIES
+                || result.code() == TalkCode.STARTED;
+    }
+
+    private void deliver(Player player, TalkResult result, boolean notifyReply, boolean notifyStart) {
+        boolean deferReplies = notifyReply && result.code() == TalkCode.REPLIES
+                && result.text() != null && !result.text().isBlank();
+        deliverStatus(player, result, notifyReply, notifyStart, deferReplies);
+        MessageService messages = plugin.getMessageService();
         boolean npcLine = result.code() == TalkCode.REPLY || result.code() == TalkCode.REPLIES || result.code() == TalkCode.STARTED;
         if (notifyReply && npcLine && result.text() != null && !result.text().isBlank() && result.code() != TalkCode.STARTED) {
             messages.send(player, "talk.reply", Map.of("character", result.characterId(), "reply", result.text()));
         }
         if (notifyReply && result.code() == TalkCode.STARTED && result.text() != null && !result.text().isBlank()) {
             messages.send(player, "talk.reply", Map.of("character", result.characterId(), "reply", result.text()));
+        }
+        if (deferReplies) {
+            messages.send(player, "talk.replies");
+        }
+    }
+
+    /**
+     * Session and error lines only. NPC reply text is sent separately so streaming can own those lines.
+     * When {@code deferRepliesNotice} is true, {@code talk.replies} waits until the last streamed chunk.
+     */
+    private void deliverStatus(
+            Player player,
+            TalkResult result,
+            boolean notifyReply,
+            boolean notifyStart,
+            boolean deferRepliesNotice
+    ) {
+        MessageService messages = plugin.getMessageService();
+        if ((notifyReply || notifyStart) && result.code() == TalkCode.STARTED) {
+            messages.send(player, "talk.started", Map.of("id", result.characterId()));
         }
         if (!notifyReply && result.code() != TalkCode.STARTED) {
             return;
@@ -418,7 +456,11 @@ public final class DialogueService {
             case ENDED -> messages.send(player, "talk.ended");
             case COOLDOWN -> messages.send(player, "talk.cooldown");
             case TOO_LONG -> messages.send(player, "talk.too-long", Map.of("max", Integer.toString(result.limit())));
-            case REPLIES -> messages.send(player, "talk.replies");
+            case REPLIES -> {
+                if (!deferRepliesNotice) {
+                    messages.send(player, "talk.replies");
+                }
+            }
             case DAILY -> messages.send(player, "talk.daily");
             case QUOTA -> messages.send(player, "talk.quota");
             case BUSY -> messages.send(player, "talk.busy");
@@ -426,6 +468,57 @@ public final class DialogueService {
             case EMPTY -> messages.send(player, "talk.empty");
             default -> {
             }
+        }
+    }
+
+    /**
+     * Schedules chunk sends on {@link #scheduler}, then hops each send onto the player's entity
+     * region. Chunking itself stays off the region thread.
+     */
+    private void streamReply(
+            Player player,
+            String character,
+            String text,
+            LatencySettings latency,
+            boolean endWithRepliesNotice
+    ) {
+        List<String> chunks = ReplyChunks.split(text, latency.charsPerChunk());
+        if (chunks.isEmpty()) {
+            if (endWithRepliesNotice) {
+                SenderTasks.run(plugin, player, () -> plugin.getMessageService().send(player, "talk.replies"),
+                        plugin.getLogger());
+            }
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        String name = character == null ? "" : character;
+        long gap = Math.max(0L, latency.chunkDelayMillis());
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i);
+            boolean first = i == 0;
+            boolean last = i == chunks.size() - 1;
+            long delay = gap * i;
+            scheduler.schedule(() -> {
+                Player online = Bukkit.getPlayer(playerId);
+                if (online == null || !online.isOnline()) {
+                    return;
+                }
+                SenderTasks.run(plugin, online, () -> {
+                    Player still = Bukkit.getPlayer(playerId);
+                    if (still == null || !still.isOnline()) {
+                        return;
+                    }
+                    MessageService messages = plugin.getMessageService();
+                    if (first) {
+                        messages.send(still, "talk.reply", Map.of("character", name, "reply", chunk));
+                    } else {
+                        messages.send(still, "talk.reply-stream", Map.of("reply", chunk));
+                    }
+                    if (last && endWithRepliesNotice) {
+                        messages.send(still, "talk.replies");
+                    }
+                }, plugin.getLogger());
+            }, delay, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -493,6 +586,32 @@ public final class DialogueService {
             boolean notifyReply,
             boolean notifyStart
     ) {
+        LatencySettings latency = plugin.getPluginConfig().latencySettings();
+        if (notifyReply && latency.thinkingEnabled()) {
+            SenderTasks.run(plugin, player, () -> plugin.getMessageService().send(
+                    player, "talk.thinking", Map.of("character", display)), plugin.getLogger());
+        }
+        AtomicBoolean claimed = new AtomicBoolean(false);
+        ScheduledFuture<?> timeoutHandle = null;
+        if (notifyReply && latency.timeoutEnabled()) {
+            UUID playerId = player.getUniqueId();
+            timeoutHandle = scheduler.schedule(() -> {
+                if (!claimed.compareAndSet(false, true)) {
+                    return;
+                }
+                Player online = Bukkit.getPlayer(playerId);
+                if (online == null) {
+                    future.completeExceptionally(new IllegalStateException("player unavailable"));
+                    return;
+                }
+                String fallback = plugin.getMessageService().raw("talk.timeout-fallback");
+                if (fallback == null || fallback.isBlank() || "talk.timeout-fallback".equals(fallback)) {
+                    fallback = plugin.getPluginConfig().getFallback();
+                }
+                TalkResult timedOut = TalkResult.text(TalkCode.REPLY, display, fallback);
+                future.complete(present(online, timedOut, notifyReply, notifyStart));
+            }, latency.timeoutMillis(), TimeUnit.MILLISECONDS);
+        }
         try {
             TalkResult result = withDisplayId(engine.talk(request), display);
             if (result.code() == TalkCode.STARTED) {
@@ -500,8 +619,20 @@ public final class DialogueService {
             } else if (result.code() == TalkCode.ENDED || result.code() == TalkCode.NO_SESSION) {
                 talkLabels.remove(player.getUniqueId());
             }
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            if (timeoutHandle != null) {
+                timeoutHandle.cancel(false);
+            }
             future.complete(present(player, result, notifyReply, notifyStart));
         } catch (Throwable thrown) {
+            if (timeoutHandle != null) {
+                timeoutHandle.cancel(false);
+            }
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
             plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
             future.completeExceptionally(thrown);
         }

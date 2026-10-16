@@ -109,6 +109,9 @@ talk:
   failed: "{prefix}&c没有回复：&f{error}"
   empty: "{prefix}&7请再多说一点。"
   reply: "&f{character}&7：&f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character}&7正在思考..."
+  timeout-fallback: "稍等片刻。"
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2已标记聊天 &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

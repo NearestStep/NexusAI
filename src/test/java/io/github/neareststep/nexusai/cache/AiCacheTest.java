@@ -84,4 +84,31 @@ class AiCacheTest {
         assertTrue(cache.get("short").isEmpty());
         assertEquals("v", cache.get("long").orElseThrow());
     }
+
+    @Test
+    void disabledCacheIgnoresReadsAndWrites() {
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 100, false, false, 0L);
+        cache.put("k", "v");
+        assertTrue(cache.get("k").isEmpty());
+        assertEquals(0, cache.size());
+        assertFalse(cache.enabled());
+    }
+
+    @Test
+    void memoryLimitEvictsHeavyEntries() {
+        long budget = 200L;
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 10_000, false, true, budget);
+        cache.put("a", "x".repeat(80));
+        cache.put("b", "y".repeat(80));
+        cache.put("c", "z".repeat(80));
+        assertTrue(cache.size() < 3, "expected eviction under memory budget, size=" + cache.size());
+        int present = 0;
+        for (String key : new String[]{"a", "b", "c"}) {
+            if (cache.get(key).isPresent()) {
+                present++;
+            }
+        }
+        assertTrue(present < 3, "present=" + present);
+        assertTrue(AiCache.weightOf("a", new AiCache.CachedAnswer("x".repeat(80), "", "", "")) > budget / 2);
+    }
 }

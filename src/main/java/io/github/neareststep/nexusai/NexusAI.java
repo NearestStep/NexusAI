@@ -275,7 +275,12 @@ public final class NexusAI extends JavaPlugin {
 
     private void startRuntimeServices() {
         ensureTokenStore();
-        this.aiCache = new AiCache(pluginConfig.getCacheTtl(), pluginConfig.getCacheMaxSize(), pluginConfig.allowMarkup());
+        this.aiCache = new AiCache(
+                pluginConfig.getCacheTtl(),
+                pluginConfig.getCacheMaxSize(),
+                pluginConfig.allowMarkup(),
+                pluginConfig.isCacheEnabled(),
+                pluginConfig.getCacheMaxMemoryBytes());
         this.rateLimiter = new RateLimiter(
                 pluginConfig.getRequestsPerMinute(),
                 pluginConfig.getRequestsPerDay(),

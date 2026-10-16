@@ -109,6 +109,9 @@ talk:
   failed: "{prefix}&c返信なし: &f{error}"
   empty: "{prefix}&7もう少し書いてください。"
   reply: "&f{character}&7: &f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character}&7は考えています..."
+  timeout-fallback: "少し待ってください。"
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2フラグされたチャット &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

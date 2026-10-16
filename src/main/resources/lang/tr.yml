@@ -109,6 +109,9 @@ talk:
   failed: "{prefix}&cYanıt yok: &f{error}"
   empty: "{prefix}&7Biraz daha yazın."
   reply: "&f{character}&7: &f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character} &7düşünüyor..."
+  timeout-fallback: "Bir saniye."
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2İşaretlenen sohbet &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

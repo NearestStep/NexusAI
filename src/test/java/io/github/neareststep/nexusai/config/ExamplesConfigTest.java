@@ -29,7 +29,7 @@ class ExamplesConfigTest {
     private static final Set<String> ROOT = Set.of(
             "config-version", "locale", "startup-banner", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
-            "formats", "cache", "limits", "pool", "prewarm", "moderation", "fallback",
+            "formats", "cache", "latency", "limits", "pool", "prewarm", "moderation", "fallback",
             "dialogue", "actions", "context", "plugin-api", "quotas", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
@@ -50,7 +50,15 @@ class ExamplesConfigTest {
             "instruction", "max-lines", "max-chars", "max-chars-per-line", "max-words",
             "max-sentences", "strip-markdown", "strip-trailing-punctuation");
 
-    private static final Set<String> CACHE = Set.of("ttl", "max-size");
+    private static final Set<String> CACHE = Set.of("ttl", "max-size", "enabled", "max-memory-bytes");
+
+    private static final Set<String> LATENCY = Set.of("streaming", "thinking-indicator", "timeout");
+
+    private static final Set<String> LATENCY_STREAMING = Set.of("enabled", "chars-per-chunk", "chunk-delay-millis");
+
+    private static final Set<String> LATENCY_TOGGLE = Set.of("enabled");
+
+    private static final Set<String> LATENCY_TIMEOUT = Set.of("enabled", "millis");
 
     private static final Set<String> LIMITS = Set.of(
             "requests-per-minute", "requests-per-day", "player-requests-per-minute",
@@ -278,6 +286,18 @@ class ExamplesConfigTest {
         }
         if ("cache".equals(parent)) {
             return CACHE.contains(key);
+        }
+        if ("latency".equals(parent)) {
+            return LATENCY.contains(key);
+        }
+        if ("latency.streaming".equals(parent)) {
+            return LATENCY_STREAMING.contains(key);
+        }
+        if ("latency.thinking-indicator".equals(parent)) {
+            return LATENCY_TOGGLE.contains(key);
+        }
+        if ("latency.timeout".equals(parent)) {
+            return LATENCY_TIMEOUT.contains(key);
         }
         if ("limits".equals(parent)) {
             return LIMITS.contains(key);

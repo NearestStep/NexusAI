@@ -108,6 +108,9 @@ talk:
   failed: "{prefix}&cНет ответа: &f{error}"
   empty: "{prefix}&7Напишите чуть больше."
   reply: "&f{character}&7: &f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character} &7думает..."
+  timeout-fallback: "Дай мне секунду."
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2Отмечено сообщение &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

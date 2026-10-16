@@ -75,6 +75,9 @@ public final class PluginConfig {
     private Duration readTimeout;
     private Duration cacheTtl;
     private long cacheMaxSize;
+    private boolean cacheEnabled = true;
+    private long cacheMaxMemoryBytes;
+    private LatencySettings latencySettings = LatencySettings.defaults();
     private int requestsPerMinute;
     private int requestsPerDay;
     private int playerRequestsPerMinute;
@@ -171,6 +174,9 @@ public final class PluginConfig {
         this.readTimeout = Duration.ofSeconds(Math.max(1, config.getInt("api.read-timeout", 30)));
         this.cacheTtl = Duration.ofSeconds(Math.max(1, config.getInt("cache.ttl", 300)));
         this.cacheMaxSize = Math.max(1L, config.getLong("cache.max-size", 1000L));
+        this.cacheEnabled = config.getBoolean("cache.enabled", true);
+        this.cacheMaxMemoryBytes = Math.max(0L, config.getLong("cache.max-memory-bytes", 0L));
+        this.latencySettings = LatencySettings.read(config);
         this.requestsHeld = false;
         this.requestsPerMinute = Math.max(1, config.getInt("limits.requests-per-minute", 30));
         this.requestsPerDay = Math.max(1, config.getInt("limits.requests-per-day", 1000));
@@ -1184,6 +1190,22 @@ public final class PluginConfig {
 
     public long getCacheMaxSize() {
         return cacheMaxSize;
+    }
+
+    public boolean isCacheEnabled() {
+        return cacheEnabled;
+    }
+
+    /**
+     * Soft memory cap for the shared response cache in bytes. {@code 0} keeps entry-count eviction
+     * via {@link #getCacheMaxSize()}.
+     */
+    public long getCacheMaxMemoryBytes() {
+        return cacheMaxMemoryBytes;
+    }
+
+    public LatencySettings latencySettings() {
+        return latencySettings;
     }
 
     public int getRequestsPerMinute() {

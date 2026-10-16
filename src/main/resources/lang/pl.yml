@@ -109,6 +109,9 @@ talk:
   failed: "{prefix}&cBrak odpowiedzi: &f{error}"
   empty: "{prefix}&7Napisz trochę więcej."
   reply: "&f{character}&7: &f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character} &7myśli..."
+  timeout-fallback: "Daj mi chwilę."
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2Oznaczona wiadomość &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"

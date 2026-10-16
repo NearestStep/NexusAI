@@ -94,7 +94,10 @@ class LocaleFilesTest {
             "talk.quota",
             "talk.failed",
             "talk.empty",
-            "talk.reply"
+            "talk.reply",
+            "talk.reply-stream",
+            "talk.thinking",
+            "talk.timeout-fallback"
     );
 
     @Test

@@ -109,6 +109,9 @@ talk:
   failed: "{prefix}&c응답 없음: &f{error}"
   empty: "{prefix}&7조금 더 적어 주세요."
   reply: "&f{character}&7: &f{reply}"
+  reply-stream: "&f{reply}"
+  thinking: "{prefix}&7{character}&7이(가) 생각 중..."
+  timeout-fallback: "잠시만요."
 
 moderation:
   notify: "{prefix}&x&0&0&c&5&c&2표시된 채팅 &8| &f{player}&7: &f{message} &8| &7{category}&8: &f{reason}"
