@@ -10,6 +10,7 @@ Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible 
 - [FAQ](docs/faq.md) — no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
 - [Migration from 1.0.x](docs/migration-1.1.0.md)
 - [Migration to 1.2.0](docs/migration-1.2.0.md)
+- [Migration to 1.3.0](docs/migration-1.3.0.md)
 - [Plugin API](docs/api.md)
 - [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
 
@@ -56,6 +57,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | Section | Parameters |
 |---------|------------|
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
+| `startup-banner` | Console banner on enable: `full` (default brand art), `compact` (two short lines), or `off`. An unknown value logs a warning and uses `full`. Missing keys are appended on startup |
 | `config-version` | Schema version. Missing means 0.6.0. config.yml is version 2. The plugin migrates forward and writes `<file>.bak` first. Missing default keys are appended only after the same backup |
 | `api` | `provider`, `model`, `base-url` (empty = provider default), `key` (legacy), `system-prompt`, `temperature` (negative = omit), `max-tokens` (default **256**; `0` or a negative value omits the field), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
 | `providers` | Named endpoints. Each has `type` (`openai-compatible` or `gemini`), `url`, and `api-key` (string or list). `${ENV_VAR}` and `${ENV:VAR}` are replaced in `url` and `api-key`. Optional `api-key-file` is not written into an existing config |
@@ -761,7 +763,7 @@ The player-input boundary and the output filter reduce prompt-injection risk. Th
 
 ## FAQ
 
-Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md) and [Migration to 1.2.0](docs/migration-1.2.0.md). Copy-paste configs are in [examples/](examples/README.md).
+Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HTTP 401 and 429, a placeholder that stays on the fallback, an empty reply, a `knowledge/` file that is not UTF-8, PlaceholderAPI and `{tokens}`, limits, `model-queue-strategy: round-robin`, a context provider, dialogue summaries, quotas, and a JSON reply that failed the schema. Upgrades are in [Migration from 1.0.x](docs/migration-1.1.0.md), [Migration to 1.2.0](docs/migration-1.2.0.md), and [Migration to 1.3.0](docs/migration-1.3.0.md). Copy-paste configs are in [examples/](examples/README.md).
 
 ## Build
 

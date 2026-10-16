@@ -463,6 +463,35 @@ class PluginConfigTest {
     }
 
     @Test
+    void startupBannerDefaultsToFullAndRejectsUnknownValues() {
+        PluginConfig defaults = new PluginConfig(baseYaml());
+        assertEquals(StartupBannerMode.FULL, defaults.startupBannerMode());
+        assertNull(defaults.startupBannerWarning());
+
+        YamlConfiguration compact = baseYaml();
+        compact.set("startup-banner", "compact");
+        PluginConfig compactCfg = new PluginConfig(compact);
+        assertEquals(StartupBannerMode.COMPACT, compactCfg.startupBannerMode());
+        assertNull(compactCfg.startupBannerWarning());
+
+        YamlConfiguration off = baseYaml();
+        off.set("startup-banner", "off");
+        PluginConfig offCfg = new PluginConfig(off);
+        assertEquals(StartupBannerMode.OFF, offCfg.startupBannerMode());
+        assertNull(offCfg.startupBannerWarning());
+
+        YamlConfiguration unknown = baseYaml();
+        unknown.set("startup-banner", "loud");
+        PluginConfig bad = new PluginConfig(unknown);
+        assertEquals(StartupBannerMode.FULL, bad.startupBannerMode());
+        assertEquals("Unknown startup-banner 'loud'. Using full.", bad.startupBannerWarning());
+
+        bad.reload(baseYaml());
+        assertEquals(StartupBannerMode.FULL, bad.startupBannerMode());
+        assertNull(bad.startupBannerWarning());
+    }
+
+    @Test
     void missingUsageDefaultsToEstimateAndRejectsUnknownValues() {
         PluginConfig defaults = new PluginConfig(baseYaml());
         assertEquals(MissingUsage.ESTIMATE, defaults.missingUsage());

@@ -22,6 +22,10 @@ config-version: 2
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
 
+# Startup console banner: full (default brand art), compact (two short lines), or off.
+# An unknown value logs a warning and uses full.
+startup-banner: full
+
 api:
   # openai | groq | cerebras | gemini | deepseek | ollama | openrouter
   provider: openai

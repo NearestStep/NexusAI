@@ -184,4 +184,25 @@ class ConfigMergerTest {
         ConfigMerger.Result second = ConfigMerger.mergeMissing(result.yaml(), defaults);
         assertTrue(second.addedKeys().isEmpty());
     }
+
+    @Test
+    void appendsStartupBannerWithoutTouchingUserLocale() {
+        String existing = """
+                # keep
+                locale: ru
+                fallback: "wait"
+                """;
+        String defaults = """
+                locale: en
+                startup-banner: full
+                fallback: "..."
+                """;
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+        assertTrue(result.addedKeys().contains("startup-banner"));
+        assertTrue(result.yaml().contains("# keep"));
+        YamlConfiguration parsed = YamlConfiguration.loadConfiguration(new StringReader(result.yaml()));
+        assertEquals("ru", parsed.getString("locale"));
+        assertEquals("full", parsed.getString("startup-banner"));
+        assertEquals("wait", parsed.getString("fallback"));
+    }
 }

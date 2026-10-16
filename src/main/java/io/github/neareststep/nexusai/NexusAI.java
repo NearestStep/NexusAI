@@ -22,6 +22,7 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.command.NaiCommand;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.config.StartupBannerMode;
 import io.github.neareststep.nexusai.i18n.MessageService;
 import io.github.neareststep.nexusai.json.StructuredOutputSupport;
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
@@ -121,6 +122,7 @@ public final class NexusAI extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        long startedNanos = System.nanoTime();
         if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
@@ -152,6 +154,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -190,7 +193,12 @@ public final class NexusAI extends JavaPlugin {
         registerCommands();
         registerModerationListener();
 
-        getLogger().info("NexusAI enabled.");
+        long readyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+        StartupBannerMode bannerMode = pluginConfig.startupBannerMode();
+        StartupBanner.print(bannerMode, StartupBanner.Snapshot.from(this, pluginConfig, readyMs));
+        if (bannerMode == StartupBannerMode.OFF) {
+            getLogger().info("NexusAI enabled.");
+        }
     }
 
     @Override
@@ -254,6 +262,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -642,6 +651,13 @@ public final class NexusAI extends JavaPlugin {
         } catch (Exception e) {
             LogRedaction.warning(getLogger(), "Failed to flush usage files", e, loggingSecrets());
             flush.run();
+        }
+    }
+
+    private void logStartupBannerWarning() {
+        String warning = pluginConfig.startupBannerWarning();
+        if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
         }
     }
 
