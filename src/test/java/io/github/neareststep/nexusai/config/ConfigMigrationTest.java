@@ -676,6 +676,43 @@ class ConfigMigrationTest {
     }
 
     @Test
+    void dialogueLogStopBudgetIsAppendedOnceAndAnExistingFalseIsKept() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Path dir = Files.createTempDirectory("nexusai-log-stop-budget");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                dialogue:
+                  persist-memory: true
+                  memory-expiry-hours: 24
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("log-stop-budget-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("dialogue.log-stop-budget"), outcome.addedKeys().toString());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("log-stop-budget:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertTrue(yaml.getBoolean("dialogue.log-stop-budget"));
+        assertEquals(24, yaml.getInt("dialogue.memory-expiry-hours"));
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+
+        Path quietDir = Files.createTempDirectory("nexusai-log-stop-budget-false");
+        Path quiet = quietDir.resolve("config.yml");
+        Files.writeString(quiet, defaults.replace("  log-stop-budget: true\n", "  log-stop-budget: false\n"), StandardCharsets.UTF_8);
+        ConfigStartup.Outcome kept = ConfigStartup.prepareConfig(quiet, defaults, logger);
+        assertFalse(kept.addedKeys().contains("dialogue.log-stop-budget"), kept.addedKeys().toString());
+        YamlConfiguration quietYaml = new YamlConfiguration();
+        quietYaml.loadFromString(Files.readString(quiet, StandardCharsets.UTF_8));
+        assertFalse(quietYaml.getBoolean("dialogue.log-stop-budget"));
+    }
+
+    @Test
     void pluginApiKeysAreAppendedOnce() throws Exception {
         Path dir = Files.createTempDirectory("nexusai-plugin-api-merge");
         Path file = dir.resolve("config.yml");

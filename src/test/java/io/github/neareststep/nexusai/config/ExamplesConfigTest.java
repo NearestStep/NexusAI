@@ -82,7 +82,7 @@ class ExamplesConfigTest {
             "enabled", "memory-turns", "persist-memory", "memory-max-chars", "memory-expiry-hours",
             "session-timeout-seconds", "leave-radius", "max-replies-per-session",
             "message-cooldown-millis", "conversations-per-player-per-day", "max-message-length",
-            "cache-greeting", "summary");
+            "cache-greeting", "summary", "log-stop-budget");
 
     private static final Set<String> SUMMARY = Set.of(
             "enabled", "threshold-turns", "max-chars", "max-tokens", "provider", "model");

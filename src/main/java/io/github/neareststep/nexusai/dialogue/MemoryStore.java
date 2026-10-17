@@ -171,6 +171,8 @@ public final class MemoryStore {
 
     /** Characters in memory when this stop began. {@code -1} when stop is not running. */
     private volatile int stopUnsavedCount = -1;
+    /** Characters stop wrote to the file since {@link #beginStopCount}, or -1 outside stop. */
+    private final AtomicInteger stopWritten = new AtomicInteger(-1);
 
     @FunctionalInterface
     interface CorruptMove {
@@ -701,6 +703,9 @@ public final class MemoryStore {
             if (wrote == WriteResult.PUBLISHED) {
                 noteSaved(file, snapshot, summaries);
             }
+            if (wrote == WriteResult.PUBLISHED) {
+                noteStopWritten(countForWarning(summaries));
+            }
             return switch (wrote) {
                 case PUBLISHED -> StopSave.SAVED;
                 case PAST_DEADLINE -> StopSave.PAST_DEADLINE;
@@ -1011,6 +1016,7 @@ public final class MemoryStore {
     /** Characters that were only in memory when stop began. Later loads do not change the warning. */
     void beginStopCount(boolean summaries) {
         stopUnsavedCount = unsavedCharacterCount(summaries);
+        stopWritten.set(0);
         Runnable hook = afterStopCount;
         if (hook != null) {
             hook.run();
@@ -1019,6 +1025,21 @@ public final class MemoryStore {
 
     void endStopCount() {
         stopUnsavedCount = -1;
+        stopWritten.set(-1);
+    }
+
+    /** Characters held in memory when stop began. */
+    int stopHeldCount(boolean summaries) {
+        return countForWarning(summaries);
+    }
+
+    /** Characters stop has written to the file so far. Zero outside stop. */
+    int stopWrittenCount() {
+        return Math.max(0, stopWritten.get());
+    }
+
+    private void noteStopWritten(int count) {
+        stopWritten.getAndUpdate(seen -> seen < 0 ? seen : seen + Math.max(0, count));
     }
 
     private int countForWarning(boolean summaries) {
@@ -1083,6 +1104,9 @@ public final class MemoryStore {
             return SpliceResult.FAILED;
         }
         WriteResult wrote = publishEdits(file, text, edits, logger, summaries, outline.format2, secrets, deadlineNanos);
+        if (wrote == WriteResult.PUBLISHED) {
+            noteStopWritten(extra.size());
+        }
         return switch (wrote) {
             case PUBLISHED -> SpliceResult.PUBLISHED;
             case PAST_DEADLINE -> SpliceResult.PAST_DEADLINE;
@@ -1192,7 +1216,11 @@ public final class MemoryStore {
         for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
             writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
         }
-        return switch (publishYamlLocked(file, yaml, logger, summaries, deadlineNanos)) {
+        WriteResult appended = publishYamlLocked(file, yaml, logger, summaries, deadlineNanos);
+        if (appended == WriteResult.PUBLISHED) {
+            noteStopWritten(extra.size());
+        }
+        return switch (appended) {
             case PUBLISHED -> FullAppend.PUBLISHED;
             case PAST_DEADLINE -> FullAppend.NOT_FINISHED;
             case FAILED -> FullAppend.UNWRITTEN;

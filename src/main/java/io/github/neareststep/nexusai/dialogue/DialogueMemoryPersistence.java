@@ -223,14 +223,20 @@ final class DialogueMemoryPersistence {
             if (pending != null && pending.isAlive()) {
                 File target = file.get();
                 long bytes = target != null && target.isFile() ? target.length() : 0L;
-                long deadline = System.nanoTime()
-                        + appendBudgetMillis(bytes) * 1_000_000L;
-                MemoryStore.LiveSplice splice = memory.spliceForStop(
-                        target, logger, summaries, secretList(), scan, deadline);
-                if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
-                    awaitLoaderAndSave(pending, deadline, summaries);
-                } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
-                    memory.forbidLoaderPublish();
+                long budgetMillis = appendBudgetMillis(bytes);
+                long started = System.nanoTime();
+                long deadline = started + budgetMillis * 1_000_000L;
+                try {
+                    MemoryStore.LiveSplice splice = memory.spliceForStop(
+                            target, logger, summaries, secretList(), scan, deadline);
+                    if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
+                        awaitLoaderAndSave(pending, deadline, summaries);
+                    } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
+                        memory.forbidLoaderPublish();
+                    }
+                } finally {
+                    logBudgetStop(budgetMillis, bytes, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                            memory.stopWrittenCount(), memory.stopHeldCount(summaries));
                 }
                 return;
             }
@@ -245,6 +251,26 @@ final class DialogueMemoryPersistence {
             }
             MemoryStore.abandonScan(started);
         }
+    }
+
+    /**
+     * One INFO line when stop took the budget path, that is, the first off-to-on load was still
+     * running. A normal stop never reaches this. {@code dialogue.log-stop-budget: false} turns it off.
+     * Runs on the thread that calls stop, after the budget work, so it adds no wait of its own.
+     */
+    private void logBudgetStop(long budgetMillis, long fileBytes, long usedMillis, int written, int held) {
+        DialogueSettings current = settings.get();
+        if (logger == null || (current != null && !current.logStopBudget())) {
+            return;
+        }
+        logger.info(budgetStopLine(budgetMillis, fileBytes, usedMillis, written, held));
+    }
+
+    static String budgetStopLine(long budgetMillis, long fileBytes, long usedMillis, int written, int held) {
+        long kib = (Math.max(0L, fileBytes) + 1023L) / 1024L;
+        return "Stop ran during the first dialogue memory load and used the stop budget: "
+                + budgetMillis + " ms for a " + kib + " KiB dialogue-memory.yml, " + usedMillis + " ms used. "
+                + "Wrote " + written + " of " + held + " dialogue characters held in memory.";
     }
 
     /**
