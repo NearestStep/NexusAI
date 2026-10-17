@@ -1,6 +1,6 @@
 # Migration to 1.3.0
 
-Replace the previous jar with `NexusAI-1.3.0.jar` (or a `1.3.0-SNAPSHOT` build) on Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+ (Java 25 for Paper/Folia 26.x). Stop the server, swap the jar, start it. The first start appends the new keys. You do not edit `config-version`.
+Replace the previous jar with `NexusAI-1.3.0.jar` on Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+ (Java 25 for Paper/Folia 26.x). Stop the server, swap the jar, start it. The first start appends the new keys. You do not edit `config-version`.
 
 ## What is written for you
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.3.0] - Unreleased
+## [1.3.0] - 2026-10-17
 
 - `generateJson` response validation is configurable under `plugin-api.response-validation`: `enabled` (default true), `on-invalid` (`retry` or `fallback`, default `retry`), `max-retries` (0..3, default 1), and `deliver-on-region` (default false, opt-in). When enabled, a reply with a wrong type, a value outside a range, or an action outside an allowlist never reaches `json()` / `asMap()`. Validation and correction retries stay off the main thread. The future still completes on a NexusAI thread by default (same as 1.2.0). Set `deliver-on-region: true`, or `ResponseValidation.deliverOnRegion(true)`, to complete on the player's region thread when a player entity is set (Paper: main thread). `GenerationRequest.responseValidation(...)` overrides the config per call. `JsonSchema.withActionAllowlist` adds a string `enum` for an action property. `API_VERSION` stays 3. `config-version` stays 2. Missing keys are appended on startup and `/nai reload`.
 - On stop, the player and character key scan prefers a line-oriented walk of the block shape MemoryStore writes. SnakeYAML events remain the fallback when that walk refuses (flow nodes, anchors, tags, complex keys, double-quoted escapes, and similar). The stop append budget after the load-grace join is the configured base plus one millisecond per 8 KiB of `dialogue-memory.yml`, capped at that base, so a multi-megabyte file gets more room without stretching a short test budget on a tiny file.
