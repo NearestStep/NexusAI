@@ -156,6 +156,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -201,7 +202,8 @@ public final class NexusAI extends JavaPlugin {
         registerModerationListener();
 
         long readyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
-        ConsoleBanner.print(ConsoleBanner.Snapshot.from(this, pluginConfig, readyMs));
+        ConsoleBanner.announce(pluginConfig.startupBanner(),
+                ConsoleBanner.Snapshot.from(this, pluginConfig, readyMs), getLogger());
     }
 
     @Override
@@ -267,6 +269,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -663,6 +666,13 @@ public final class NexusAI extends JavaPlugin {
         } catch (Exception e) {
             LogRedaction.warning(getLogger(), "Failed to flush usage files", e, loggingSecrets());
             flush.run();
+        }
+    }
+
+    private void logStartupBannerWarning() {
+        String warning = pluginConfig.startupBannerWarning();
+        if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
         }
     }
 

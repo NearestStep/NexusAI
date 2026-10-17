@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.1] - Unreleased
+
+- `startup-banner` in `config.yml` is back as a boolean. `true` (default) prints the full console banner, as in 1.3.0. `false` prints no banner and logs one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. A value that is not `true` or `false` logs one warning on startup and on `/nai reload` and uses `true`. The words `full` and `compact` from 1.3.0 development builds are read as `true`, and `off` as `false`, without a warning.
+- On startup and `/nai reload`, a missing `startup-banner` is appended as `true` from the jar default (one `config.yml.bak`, `config-version` stays 2), so a 1.3.0 config keeps the full banner. An upgrade from 1.2.x appends 20 keys: the 19 listed for 1.3.0 plus `startup-banner`. See `docs/migration-1.3.1.md`.
+
 ## [1.3.0] - 2026-10-17
 
 - `generateJson` response validation is configurable under `plugin-api.response-validation`: `enabled` (default true), `on-invalid` (`retry` or `fallback`, default `retry`), `max-retries` (0..3, default 1), and `deliver-on-region` (default false, opt-in). When enabled, a reply with a wrong type, a value outside a range, or an action outside an allowlist never reaches `json()` / `asMap()`. Validation and correction retries stay off the main thread. The future still completes on a NexusAI thread by default (same as 1.2.0). Set `deliver-on-region: true`, or `ResponseValidation.deliverOnRegion(true)`, to complete on the player's region thread when a player entity is set (Paper: main thread). `GenerationRequest.responseValidation(...)` overrides the config per call. `JsonSchema.withActionAllowlist` adds a string `enum` for an action property. `API_VERSION` stays 3. `config-version` stays 2. Missing keys are appended on startup and `/nai reload`.

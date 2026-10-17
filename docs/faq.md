@@ -221,6 +221,10 @@ From 1.0.x to 1.1.0 the appended keys are `model-queue-strategy`, `context.*`, `
 
 1.2.0 keeps `config-version` at 2 and appends `plugin-api.*`, `quotas.*` (with `enabled: false`), `knowledge.select`, and `knowledge.keywords.*`. Quotas and keyword selection stay off until you turn them on. Details: [Migration to 1.2.0](migration-1.2.0.md).
 
+1.3.0 appends 19 keys: `cache.enabled`, `cache.max-memory-bytes`, `latency.*`, `world-context.*`, and `plugin-api.response-validation.*`. Details: [Migration to 1.3.0](migration-1.3.0.md).
+
+1.3.1 appends one key, `startup-banner: true`, so the full console banner stays on. An upgrade from 1.2.x straight to 1.3.1 appends 20 keys in one start with one backup. Details: [Migration to 1.3.1](migration-1.3.1.md).
+
 If `config.yml` is not valid YAML, startup and `/nai reload` leave the file as it is. Reload reports the failure and keeps the configuration already in memory.
 
 `prompts.yml` is created only when the file is missing. `/nai reload` does not rewrite a valid prompts file.

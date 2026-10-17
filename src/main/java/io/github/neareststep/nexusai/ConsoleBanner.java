@@ -17,6 +17,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 /**
  * Startup console banner. Each line is one {@link ConsoleCommandSender#sendMessage}
@@ -107,6 +109,33 @@ public final class ConsoleBanner {
             label = label == null ? "" : label;
             value = value == null ? "" : value;
         }
+    }
+
+    /**
+     * Prints what {@code startup-banner} asks for: the full banner on the console when
+     * {@code banner} is true, otherwise the one {@link #readyLine} through the plugin logger.
+     */
+    public static void announce(boolean banner, Snapshot snapshot, Logger logger) {
+        announce(banner, snapshot, line -> Bukkit.getConsoleSender().sendMessage(line), logger);
+    }
+
+    static void announce(boolean banner, Snapshot snapshot, Consumer<Component> console, Logger logger) {
+        if (snapshot == null) {
+            return;
+        }
+        if (banner) {
+            components(snapshot).forEach(console);
+        } else if (logger != null) {
+            logger.info(readyLine(snapshot.readyMs()));
+        }
+    }
+
+    /**
+     * The short line printed instead of the banner when {@code startup-banner} is false.
+     * It carries both markers the smoke and load scripts look for.
+     */
+    public static String readyLine(long readyMs) {
+        return "NexusAI enabled. Ready in " + Math.max(0L, readyMs) + " ms";
     }
 
     public static void print(Snapshot snapshot) {

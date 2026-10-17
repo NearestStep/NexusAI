@@ -22,6 +22,10 @@ config-version: 2
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
 
+# Startup console banner. true (default) prints the full brand banner.
+# false prints one short line instead: NexusAI enabled. Ready in <N> ms
+startup-banner: true
+
 api:
   # openai | groq | cerebras | gemini | deepseek | ollama | openrouter
   provider: openai

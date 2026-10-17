@@ -838,52 +838,87 @@ class ConfigMigrationTest {
     }
 
     /**
-     * 1.3.0 development builds had a {@code startup-banner} key. The banner is now always printed,
-     * so an old file with that key must start without a warning, an error, a rewrite, or a backup.
+     * A 1.3.0 config has no {@code startup-banner}. The first 1.3.1 start appends {@code true}
+     * once, keeps comments and values, and a second start leaves the file alone.
      */
     @Test
-    void oldStartupBannerKeyIsIgnoredSilently() throws Exception {
+    void oldConfigWithoutStartupBannerGetsTrue() throws Exception {
         String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
-        assertFalse(defaults.contains("startup-banner"));
-        for (String value : List.of("full", "compact", "off", "loud")) {
-            String original = defaults.replace("locale: en\n",
-                    "locale: en\n\n# Startup console banner\nstartup-banner: " + value + "\n");
-            assertTrue(original.contains("startup-banner: " + value));
-            Path dir = Files.createTempDirectory("nexusai-old-banner");
+        assertTrue(defaults.contains("\nstartup-banner: true\n"));
+        String original = defaults.replace(
+                "\n# Startup console banner. true (default) prints the full brand banner.\n"
+                        + "# false prints one short line instead: NexusAI enabled. Ready in <N> ms\n"
+                        + "startup-banner: true\n", "\n")
+                .replace("locale: en\n", "locale: ru\n# keep this comment\n");
+        assertFalse(original.contains("startup-banner"));
+        assertEquals(null, new PluginConfig(load(original)).startupBannerWarning());
+        assertTrue(new PluginConfig(load(original)).startupBanner());
+
+        Path dir = Files.createTempDirectory("nexusai-startup-banner-merge");
+        Path file = dir.resolve("config.yml");
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        List<LogRecord> records = new ArrayList<>();
+        Logger logger = capturing("startup-banner-merge-" + UUID.randomUUID(), records);
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.valid());
+        assertEquals(List.of("startup-banner"), outcome.addedKeys());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("startup-banner:", -1).length - 1, written);
+        YamlConfiguration yaml = load(written);
+        assertEquals(ConfigVersions.CONFIG, yaml.getInt("config-version"));
+        assertEquals("ru", yaml.getString("locale"));
+        assertTrue(yaml.isBoolean("startup-banner"));
+        assertTrue(yaml.getBoolean("startup-banner"));
+        PluginConfig merged = new PluginConfig(yaml);
+        assertTrue(merged.startupBanner());
+        assertEquals(null, merged.startupBannerWarning());
+        assertTrue(records.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
+                records.stream().map(LogRecord::getMessage).toList().toString());
+
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    /** A value already in the file, including false and old 1.3.0 development words, is kept. */
+    @Test
+    void existingStartupBannerValueIsKept() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        for (String value : List.of("false", "true", "full", "compact", "off")) {
+            String original = defaults.replace("startup-banner: true\n", "startup-banner: " + value + "\n");
+            Path dir = Files.createTempDirectory("nexusai-startup-banner-kept");
             Path file = dir.resolve("config.yml");
             Files.writeString(file, original, StandardCharsets.UTF_8);
             List<LogRecord> records = new ArrayList<>();
-            Logger logger = capturing("old-banner-" + UUID.randomUUID(), records);
-
-            ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+            ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(
+                    file, defaults, capturing("startup-banner-kept-" + UUID.randomUUID(), records));
             assertTrue(outcome.valid());
             assertTrue(outcome.addedKeys().isEmpty(), outcome.addedKeys().toString());
             assertEquals(null, outcome.backup());
             assertEquals(original, Files.readString(file, StandardCharsets.UTF_8));
-            try (var listing = Files.list(dir)) {
-                assertEquals(1, listing.count());
-            }
             assertTrue(records.isEmpty(), records.stream().map(LogRecord::getMessage).toList().toString());
-            assertEquals(warnings(new PluginConfig(load(defaults))), warnings(new PluginConfig(load(original))));
+            PluginConfig config = new PluginConfig(load(original));
+            assertEquals(!value.equals("false") && !value.equals("off"), config.startupBanner(), value);
+            assertEquals(null, config.startupBannerWarning());
         }
+    }
 
-        String versionOne = V06 + "startup-banner: off\n";
-        Path dir = Files.createTempDirectory("nexusai-old-banner-v1");
+    @Test
+    void versionOneConfigMigratesWithStartupBannerTrue() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Path dir = Files.createTempDirectory("nexusai-startup-banner-v1");
         Path file = dir.resolve("config.yml");
-        Files.writeString(file, versionOne, StandardCharsets.UTF_8);
+        Files.writeString(file, V06, StandardCharsets.UTF_8);
         List<LogRecord> records = new ArrayList<>();
         ConfigStartup.Outcome migrated = ConfigStartup.prepareConfig(
-                file, defaults, capturing("old-banner-v1-" + UUID.randomUUID(), records));
+                file, defaults, capturing("startup-banner-v1-" + UUID.randomUUID(), records));
         assertTrue(migrated.valid());
-        assertFalse(migrated.addedKeys().contains("startup-banner"));
-        assertTrue(records.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
-                records.stream().map(LogRecord::getMessage).toList().toString());
+        assertTrue(migrated.addedKeys().contains("startup-banner"), migrated.addedKeys().toString());
         YamlConfiguration written = load(Files.readString(file, StandardCharsets.UTF_8));
         assertEquals(ConfigVersions.CONFIG, written.getInt("config-version"));
-        assertEquals("groq", written.getString("api.provider"));
-        assertEquals(
-                warnings(new PluginConfig(load(Files.readString(file).replace("startup-banner: off\n", "")))),
-                warnings(new PluginConfig(written)));
+        assertTrue(written.getBoolean("startup-banner"));
+        assertTrue(new PluginConfig(written).startupBanner());
     }
 
     private static Logger capturing(String name, List<LogRecord> records) {
@@ -904,21 +939,6 @@ class ConfigMigrationTest {
             }
         });
         return logger;
-    }
-
-    private static List<Object> warnings(PluginConfig config) {
-        return List.of(
-                String.valueOf(config.credentialWarning()),
-                String.valueOf(config.groqUnlimitedOutputWarning()),
-                String.valueOf(config.modelQueueStrategyWarning()),
-                config.knowledgeWarnings(),
-                config.missingEnvVars(),
-                config.keyFileWarnings(),
-                config.httpLimitWarnings(),
-                config.pluginApiWarnings(),
-                config.quotaWarnings(),
-                config.shortKeyWarnings(),
-                config.structuredOutputWarnings());
     }
 
     private static YamlConfiguration load(String yaml) {

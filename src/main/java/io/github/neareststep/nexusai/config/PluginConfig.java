@@ -140,6 +140,8 @@ public final class PluginConfig {
     private Map<String, QuotaSettings.GroupLimit> quotaGroups = Map.of();
     private Map<String, QuotaSettings.ConsumerLimit> quotaConsumers = Map.of();
     private final List<String> quotaWarnings = new ArrayList<>();
+    private boolean startupBanner = true;
+    private String startupBannerWarning;
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -155,6 +157,7 @@ public final class PluginConfig {
         pluginApiWarnings.clear();
         quotaWarnings.clear();
         knowledgeWarnings.clear();
+        startupBannerWarning = null;
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -255,7 +258,40 @@ public final class PluginConfig {
         readHttpLimits(config);
         readPluginApi(config);
         readQuotas(config);
+        readStartupBanner(config);
         noteShortKeys();
+    }
+
+    private void readStartupBanner(FileConfiguration config) {
+        Object raw = config.get("startup-banner", Boolean.TRUE);
+        Boolean parsed = parseStartupBanner(raw);
+        if (parsed == null) {
+            this.startupBanner = true;
+            this.startupBannerWarning = "Unknown startup-banner '" + raw + "'. Use true or false. Using true.";
+        } else {
+            this.startupBanner = parsed;
+            this.startupBannerWarning = null;
+        }
+    }
+
+    /**
+     * {@code true} or {@code false}. A missing or blank value is {@code true}. The words
+     * {@code full}, {@code compact}, and {@code off} from 1.3.0 development builds are read as
+     * {@code true}, {@code true}, and {@code false}. Anything else is {@code null}.
+     */
+    static Boolean parseStartupBanner(Object raw) {
+        if (raw == null) {
+            return Boolean.TRUE;
+        }
+        if (raw instanceof Boolean bool) {
+            return bool;
+        }
+        String text = String.valueOf(raw).trim().toLowerCase(Locale.ROOT);
+        return switch (text) {
+            case "", "true", "full", "compact" -> Boolean.TRUE;
+            case "false", "off" -> Boolean.FALSE;
+            default -> null;
+        };
     }
 
     private void readQuotas(FileConfiguration config) {
@@ -1477,6 +1513,19 @@ public final class PluginConfig {
     /** Daily caps. Enforcement uses this only when {@link QuotaSettings#enabled()} is true. */
     public QuotaSettings quotaSettings() {
         return new QuotaSettings(quotasEnabled, serverTokensPerDay, playerTokensPerDay, quotaGroups, quotaConsumers);
+    }
+
+    /** {@code startup-banner}. Missing means {@code true}: the full console banner. */
+    public boolean startupBanner() {
+        return startupBanner;
+    }
+
+    /**
+     * Non-null when {@code startup-banner} is not {@code true} or {@code false}.
+     * The plugin logs it once per startup and per {@code /nai reload}.
+     */
+    public String startupBannerWarning() {
+        return startupBannerWarning;
     }
 
     /**

@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExamplesConfigTest {
 
     private static final Set<String> ROOT = Set.of(
-            "config-version", "locale", "api", "providers", "model-queue-strategy",
+            "config-version", "locale", "startup-banner", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "latency", "limits", "pool", "prewarm", "moderation", "fallback",
             "dialogue", "actions", "context", "world-context", "plugin-api", "quotas", "sanitize", "http");

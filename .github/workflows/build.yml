@@ -94,6 +94,14 @@ jobs:
           PLUGIN_DIR: dist
           DRIVER_DIR: driver
         run: python3 .github/scripts/paper-smoke.py
+      - name: Boot stable Paper with startup-banner false
+        if: matrix.mc == '26.2'
+        env:
+          MC_VERSION: ${{ matrix.mc }}
+          PLUGIN_DIR: dist
+          DRIVER_DIR: driver
+          STARTUP_BANNER: "false"
+        run: python3 .github/scripts/paper-smoke.py
 
   folia-smoke:
     name: Folia ${{ matrix.mc }} (Java ${{ matrix.java }})

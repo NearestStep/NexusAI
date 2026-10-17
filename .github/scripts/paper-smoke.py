@@ -82,6 +82,12 @@ def main() -> int:
         choices=("auto", "startup", "full"),
         help="Folia only. auto runs full checks when plugin.yml sets folia-supported: true",
     )
+    parser.add_argument(
+        "--startup-banner",
+        default=os.environ.get("STARTUP_BANNER", ""),
+        choices=("", "true", "false"),
+        help="startup-banner value written into the smoke config; empty keeps the plugin default (true)",
+    )
     parser.add_argument("--self-check", action="store_true", help="check smoke helpers and exit")
     args = parser.parse_args()
     if args.self_check:
@@ -125,12 +131,14 @@ def main() -> int:
             check_api = True
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, mock)
+        return boot(
+            work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, mock,
+            startup_banner=args.startup_banner)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
@@ -485,7 +493,7 @@ def start_mock(
     return handle
 
 
-def write_config(path: Path, mock_port: int) -> None:
+def write_config(path: Path, mock_port: int, startup_banner: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"http://127.0.0.1:{mock_port}/v1"
     path.write_text(
@@ -512,6 +520,7 @@ def write_config(path: Path, mock_port: int) -> None:
             "  enabled: false",
             "  prompts: []",
             'fallback: "..."',
+        ] + ([f"startup-banner: {startup_banner}"] if startup_banner else []) + [
             "",
         ]),
         encoding="utf-8",
@@ -598,6 +607,7 @@ def boot(
     timeout: int,
     check_api: bool = False,
     mock: MockHandle | None = None,
+    startup_banner: str = "",
 ) -> int:
     log_chunks: list[str] = []
 
@@ -644,7 +654,7 @@ def boot(
         text = "".join(log_chunks)
         if not nexusai_enabled(text):
             raise RuntimeError("NexusAI did not log that it enabled")
-        problem = banner_problem(text)
+        problem = ready_line_problem(text) if startup_banner == "false" else banner_problem(text)
         if problem:
             raise RuntimeError(problem)
         if f"127.0.0.1:{mock_port}/v1" not in text:
@@ -980,6 +990,22 @@ def banner_problem(text: str) -> str:
     return ""
 
 
+READY_LINE = re.compile(r"\[NexusAI\] NexusAI enabled\. Ready in \d+ ms$")
+
+
+def ready_line_problem(text: str) -> str:
+    """Empty when startup-banner: false left exactly one short ready line and no banner."""
+    lines = [log_message(line).rstrip("\r") for line in plain_log(text).splitlines()]
+    ready = [line for line in lines if READY_LINE.search(line)]
+    if len(ready) != 1:
+        return f"expected one short ready line, found {len(ready)}"
+    if any(BANNER_READY.search(line) and not READY_LINE.search(line) for line in lines):
+        return "startup banner printed although startup-banner is false"
+    if any(line.startswith("\u2500" * 10) for line in lines):
+        return "startup banner rule printed although startup-banner is false"
+    return ""
+
+
 def strip_colors(text: str) -> str:
     out = []
     skip = False
@@ -1093,7 +1119,7 @@ def run_folia(args) -> int:
             print("folia startup checks leave the load driver and events probe uninstalled")
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         if mode == "full":
             append_context_prompt(work / "plugins" / "NexusAI")
@@ -1621,6 +1647,12 @@ def _smoke_self_check() -> None:
     _need(banner_problem(full.replace("Version", "[NexusAI] Version")) != "", "prefixed banner accepted")
     _need(banner_problem(full.replace("[01:00:01 INFO]: \n", "[01:00:01 INFO]: x\n", 1)) != "", "banner without spacer accepted")
     _need(banner_problem("\n".join(full.splitlines()[-3:])) != "", "short banner accepted")
+    short = "[01:00:00 INFO]: [NexusAI] Using provider\n[01:00:01 INFO]: [NexusAI] NexusAI enabled. Ready in 97 ms"
+    _need(nexusai_enabled(short), "short ready line missed")
+    _need(ready_line_problem(short) == "", "short ready line rejected")
+    _need(ready_line_problem(full) != "", "full banner accepted as the short line")
+    _need(ready_line_problem(short + "\n" + full) != "", "banner next to the short line accepted")
+    _need(banner_problem(short) != "", "short line accepted as the full banner")
 
     stable = [
         {"id": 3, "channel": "BETA"},

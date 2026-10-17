@@ -143,4 +143,51 @@ class ConsoleBannerTest {
             collectColors(child, colors);
         }
     }
+
+    @Test
+    void startupBannerTruePrintsTheFullBannerAndNoReadyLogLine() {
+        List<Component> console = new ArrayList<>();
+        List<java.util.logging.LogRecord> records = new ArrayList<>();
+        ConsoleBanner.announce(true, sample(), console::add, capturing(records));
+        assertEquals(ConsoleBanner.components(sample()), console);
+        assertEquals(9, console.size());
+        assertEquals("Ready in 412 ms  |  github.com/NearestStep/NexusAI", PLAIN.serialize(console.get(8)));
+        assertTrue(records.isEmpty(), records.toString());
+    }
+
+    @Test
+    void startupBannerFalsePrintsOneShortReadyLine() {
+        List<Component> console = new ArrayList<>();
+        List<java.util.logging.LogRecord> records = new ArrayList<>();
+        ConsoleBanner.announce(false, sample(), console::add, capturing(records));
+        assertTrue(console.isEmpty(), console.toString());
+        assertEquals(1, records.size());
+        assertEquals(java.util.logging.Level.INFO, records.get(0).getLevel());
+        String line = records.get(0).getMessage();
+        assertEquals("NexusAI enabled. Ready in 412 ms", line);
+        assertTrue(line.contains("NexusAI enabled."));
+        assertTrue(java.util.regex.Pattern.compile("(?:^|\\s)Ready in \\d+ ms").matcher(line).find());
+        assertTrue(PREFIX_COLS + "[NexusAI] ".length() + line.length() <= 70);
+        assertEquals("NexusAI enabled. Ready in 0 ms", ConsoleBanner.readyLine(-5));
+    }
+
+    private static java.util.logging.Logger capturing(List<java.util.logging.LogRecord> records) {
+        java.util.logging.Logger logger = java.util.logging.Logger.getLogger("banner-" + System.nanoTime());
+        logger.setUseParentHandlers(false);
+        logger.addHandler(new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+        return logger;
+    }
 }
