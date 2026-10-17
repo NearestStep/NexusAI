@@ -639,6 +639,43 @@ class ConfigMigrationTest {
     }
 
     @Test
+    void contextLogTimeoutsIsAppendedOnceAndAnExistingFalseIsKept() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        Path dir = Files.createTempDirectory("nexusai-context-log-timeouts");
+        Path file = dir.resolve("config.yml");
+        String original = """
+                # keep this comment
+                config-version: 2
+                context:
+                  enabled: true
+                  suspend-seconds: 90
+                """;
+        Files.writeString(file, original, StandardCharsets.UTF_8);
+        Logger logger = Logger.getLogger("context-log-timeouts-merge");
+        ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(outcome.addedKeys().contains("context.log-timeouts"), outcome.addedKeys().toString());
+        String written = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(written.contains("# keep this comment"), written);
+        assertEquals(1, written.split("log-timeouts:", -1).length - 1, written);
+        YamlConfiguration yaml = new YamlConfiguration();
+        yaml.loadFromString(written);
+        assertTrue(yaml.getBoolean("context.log-timeouts"));
+        assertEquals(90, yaml.getInt("context.suspend-seconds"));
+        ConfigStartup.Outcome again = ConfigStartup.prepareConfig(file, defaults, logger);
+        assertTrue(again.addedKeys().isEmpty());
+        assertEquals(written, Files.readString(file, StandardCharsets.UTF_8));
+
+        Path quietDir = Files.createTempDirectory("nexusai-context-log-timeouts-false");
+        Path quiet = quietDir.resolve("config.yml");
+        Files.writeString(quiet, defaults.replace("  log-timeouts: true\n", "  log-timeouts: false\n"), StandardCharsets.UTF_8);
+        ConfigStartup.Outcome kept = ConfigStartup.prepareConfig(quiet, defaults, logger);
+        assertFalse(kept.addedKeys().contains("context.log-timeouts"), kept.addedKeys().toString());
+        YamlConfiguration quietYaml = new YamlConfiguration();
+        quietYaml.loadFromString(Files.readString(quiet, StandardCharsets.UTF_8));
+        assertFalse(quietYaml.getBoolean("context.log-timeouts"));
+    }
+
+    @Test
     void pluginApiKeysAreAppendedOnce() throws Exception {
         Path dir = Files.createTempDirectory("nexusai-plugin-api-merge");
         Path file = dir.resolve("config.yml");

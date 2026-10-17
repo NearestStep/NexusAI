@@ -105,7 +105,7 @@ class ExamplesConfigTest {
 
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
-            "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds");
+            "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds", "log-timeouts");
 
     private static final Set<String> WORLD_CONTEXT = Set.of(
             "enabled", "radius", "max-blocks", "max-block-types", "max-inventory-items", "max-chars",

@@ -431,6 +431,9 @@ context:
   refresh-seconds: 30                # 1..3600, snapshot age for cached_ placeholders
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
+  # One INFO line when a provider overruns its timeout, at most once per provider per
+  # limits.error-log-cooldown-seconds. false keeps single timeouts out of the log.
+  log-timeouts: true
 
 # World snapshot for NexusAIApi.worldContext (player, inventory, nearby blocks, biome).
 # Off by default. When enabled, world reads run on the player's region thread with the

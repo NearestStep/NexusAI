@@ -4,6 +4,7 @@
 
 - `startup-banner` in `config.yml` is back as a boolean. `true` (default) prints the full console banner, as in 1.3.0. `false` prints no banner and logs one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. A value that is not `true` or `false` logs one warning on startup and on `/nai reload` and uses `true`. The words from 1.3.0 development builds are read without a warning: `full` as `true`, and `compact` and `off` as `false`.
 - On startup and `/nai reload`, a missing `startup-banner` is appended as `true` from the jar default (one `config.yml.bak`, `config-version` stays 2), so a 1.3.0 config keeps the full banner. An upgrade from 1.2.x appends 20 keys: the 19 listed for 1.3.0 plus `startup-banner`. See `docs/migration-1.3.1.md`.
+- A context provider call that overruns its timeout now logs one INFO line: `Context provider '<id>' timed out after <N> ms and was skipped.` Per provider, at most one line per `limits.error-log-cooldown-seconds` (30); the next line adds `<K> more timeouts since the last notice.` The line is written on the context scheduler thread, never on the main thread. A task that never started because the pool was full is not counted, as before. `context.log-timeouts: false` turns the line off. A missing `context.log-timeouts` is appended as `true` on startup and `/nai reload` (one `config.yml.bak`, `config-version` stays 2).
 
 ## [1.3.0] - 2026-10-17
 
