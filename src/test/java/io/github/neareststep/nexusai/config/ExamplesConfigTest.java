@@ -29,8 +29,8 @@ class ExamplesConfigTest {
     private static final Set<String> ROOT = Set.of(
             "config-version", "locale", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
-            "formats", "cache", "limits", "pool", "prewarm", "moderation", "fallback",
-            "dialogue", "actions", "context", "plugin-api", "quotas", "sanitize", "http");
+            "formats", "cache", "latency", "limits", "pool", "prewarm", "moderation", "fallback",
+            "dialogue", "actions", "context", "world-context", "plugin-api", "quotas", "sanitize", "http");
 
     private static final Set<String> API = Set.of(
             "provider", "model", "base-url", "key", "system-prompt", "temperature", "max-tokens",
@@ -50,7 +50,15 @@ class ExamplesConfigTest {
             "instruction", "max-lines", "max-chars", "max-chars-per-line", "max-words",
             "max-sentences", "strip-markdown", "strip-trailing-punctuation");
 
-    private static final Set<String> CACHE = Set.of("ttl", "max-size");
+    private static final Set<String> CACHE = Set.of("ttl", "max-size", "enabled", "max-memory-bytes");
+
+    private static final Set<String> LATENCY = Set.of("streaming", "thinking-indicator", "timeout");
+
+    private static final Set<String> LATENCY_STREAMING = Set.of("enabled", "chars-per-chunk", "chunk-delay-millis");
+
+    private static final Set<String> LATENCY_TOGGLE = Set.of("enabled");
+
+    private static final Set<String> LATENCY_TIMEOUT = Set.of("enabled", "millis");
 
     private static final Set<String> LIMITS = Set.of(
             "requests-per-minute", "requests-per-day", "player-requests-per-minute",
@@ -84,7 +92,10 @@ class ExamplesConfigTest {
     private static final Set<String> HTTP = Set.of("max-in-flight", "queue-size");
 
     private static final Set<String> PLUGIN_API = Set.of(
-            "enabled", "max-template-chars", "max-var-chars");
+            "enabled", "max-template-chars", "max-var-chars", "response-validation");
+
+    private static final Set<String> RESPONSE_VALIDATION = Set.of(
+            "enabled", "on-invalid", "max-retries", "deliver-on-region");
 
     private static final Set<String> QUOTAS = Set.of(
             "enabled", "missing-usage", "server-tokens-per-day", "player-tokens-per-day",
@@ -95,6 +106,10 @@ class ExamplesConfigTest {
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
             "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds");
+
+    private static final Set<String> WORLD_CONTEXT = Set.of(
+            "enabled", "radius", "max-blocks", "max-block-types", "max-inventory-items", "max-chars",
+            "cooldown-millis");
 
     private static final Set<String> PROMPT_SETTINGS = Set.of(
             "prompt", "vars", "ttl", "fallback", "max-prompt-length", "model", "system-prompt",
@@ -276,6 +291,18 @@ class ExamplesConfigTest {
         if ("cache".equals(parent)) {
             return CACHE.contains(key);
         }
+        if ("latency".equals(parent)) {
+            return LATENCY.contains(key);
+        }
+        if ("latency.streaming".equals(parent)) {
+            return LATENCY_STREAMING.contains(key);
+        }
+        if ("latency.thinking-indicator".equals(parent)) {
+            return LATENCY_TOGGLE.contains(key);
+        }
+        if ("latency.timeout".equals(parent)) {
+            return LATENCY_TIMEOUT.contains(key);
+        }
         if ("limits".equals(parent)) {
             return LIMITS.contains(key);
         }
@@ -300,8 +327,14 @@ class ExamplesConfigTest {
         if ("context".equals(parent)) {
             return CONTEXT.contains(key);
         }
+        if ("world-context".equals(parent)) {
+            return WORLD_CONTEXT.contains(key);
+        }
         if ("plugin-api".equals(parent)) {
             return PLUGIN_API.contains(key);
+        }
+        if ("plugin-api.response-validation".equals(parent)) {
+            return RESPONSE_VALIDATION.contains(key);
         }
         if ("quotas".equals(parent)) {
             return QUOTAS.contains(key);

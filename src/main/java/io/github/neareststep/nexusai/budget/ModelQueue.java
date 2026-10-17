@@ -56,12 +56,12 @@ public final class ModelQueue {
     private final Logger logger;
     private final QueueStrategy strategy;
     /** Next starting row for {@link QueueStrategy#ROUND_ROBIN}. Not used for failover. */
-    private final AtomicInteger roundRobinCursor = new AtomicInteger();
+    private final AtomicInteger roundRobinIndex = new AtomicInteger();
     /**
      * Next starting row for an unpinned dialogue summary. Player replies and placeholders
-     * keep {@link #roundRobinCursor}.
+     * keep {@link #roundRobinIndex}.
      */
-    private final AtomicInteger summaryRoundRobinCursor = new AtomicInteger();
+    private final AtomicInteger summaryRoundRobinIndex = new AtomicInteger();
     private final Object ioLock = new Object();
     /** When set, {@link #save()} writes on this executor instead of the caller. Tests leave it empty. */
     private volatile Executor saveExecutor;
@@ -233,7 +233,7 @@ public final class ModelQueue {
      *                        A daily cap is never ignored.
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown) {
-        return selectFrom(nowMillis, ignoreCooldown, roundRobinCursor);
+        return selectFrom(nowMillis, ignoreCooldown, roundRobinIndex);
     }
 
     /**
@@ -242,7 +242,7 @@ public final class ModelQueue {
      * the call uses the row's own model. The failed model stays blocked.
      */
     public synchronized List<Choice> selectable(long nowMillis, boolean ignoreCooldown, String overrideModel) {
-        return addUnknownModelOverride(selectFrom(nowMillis, ignoreCooldown, roundRobinCursor), overrideModel, nowMillis);
+        return addUnknownModelOverride(selectFrom(nowMillis, ignoreCooldown, roundRobinIndex), overrideModel, nowMillis);
     }
 
     /**
@@ -290,24 +290,24 @@ public final class ModelQueue {
 
     /**
      * Same walk as {@link #selectable(long, boolean)} for an unpinned dialogue summary.
-     * Round-robin advances {@link #summaryRoundRobinCursor} and leaves the player-reply cursor
-     * where it is. Failover does not use either cursor. A pinned summary must not call this.
+     * Round-robin advances {@link #summaryRoundRobinIndex} and leaves the player-reply index
+     * where it is. Failover does not use either index. A pinned summary must not call this.
      */
     public synchronized List<Choice> selectableSummary(long nowMillis) {
-        return selectFrom(nowMillis, false, summaryRoundRobinCursor);
+        return selectFrom(nowMillis, false, summaryRoundRobinIndex);
     }
 
-    private List<Choice> selectFrom(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
+    private List<Choice> selectFrom(long nowMillis, boolean ignoreCooldown, AtomicInteger rotation) {
         roll(nowMillis);
         if (strategy != QueueStrategy.ROUND_ROBIN || slots.isEmpty()) {
             return readyInOrder(nowMillis, ignoreCooldown);
         }
-        int start = nextIndex(nowMillis, ignoreCooldown, cursor);
+        int start = nextIndex(nowMillis, ignoreCooldown, rotation);
         if (start < 0) {
             return List.of();
         }
-        // The next request of this cursor starts at the following row.
-        cursor.set(Math.floorMod(start + 1, slots.size()));
+        // The next request of this rotation starts at the following row.
+        rotation.set(Math.floorMod(start + 1, slots.size()));
         List<Choice> ready = new ArrayList<>();
         for (int i = 0; i < slots.size(); i++) {
             Slot slot = slots.get(Math.floorMod(start + i, slots.size()));
@@ -323,7 +323,7 @@ public final class ModelQueue {
     }
 
     /**
-     * The row the next request will start from. Does not advance the round-robin cursor.
+     * The row the next request will start from. Does not advance the round-robin index.
      * Failover and round-robin both report the next selectable row. A cooled, exhausted, or
      * threshold-blocked row is skipped. Empty when nothing is selectable.
      */
@@ -348,18 +348,18 @@ public final class ModelQueue {
     }
 
     /**
-     * First selectable row at or after the round-robin cursor. Does not move the cursor.
+     * First selectable row at or after the round-robin index. Does not move the index.
      */
     private int nextRoundRobinIndex(long nowMillis, boolean ignoreCooldown) {
-        return nextIndex(nowMillis, ignoreCooldown, roundRobinCursor);
+        return nextIndex(nowMillis, ignoreCooldown, roundRobinIndex);
     }
 
-    private int nextIndex(long nowMillis, boolean ignoreCooldown, AtomicInteger cursor) {
+    private int nextIndex(long nowMillis, boolean ignoreCooldown, AtomicInteger rotation) {
         int size = slots.size();
         if (size == 0) {
             return -1;
         }
-        int at = Math.floorMod(cursor.get(), size);
+        int at = Math.floorMod(rotation.get(), size);
         for (int i = 0; i < size; i++) {
             int index = Math.floorMod(at + i, size);
             if (isSelectable(slots.get(index), nowMillis, ignoreCooldown)) {

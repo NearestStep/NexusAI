@@ -55,7 +55,18 @@ public final class MessageService {
     /** Temporary stand-in so {@link PlayerInput#stripSectionSigns(String)} cannot treat {@code &o} as italic. */
     private static final char AMP_GUARD = '\uF8FF';
     private static final Pattern YAML_LOCATION = Pattern.compile("line \\d+, column \\d+");
-    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
+    /**
+     * Section-char legacy deserializer with Bungee {@code §x§R§R§G§G§B§B} hex support.
+     * {@link #colorize(String)} turns {@code &x&0&0&c&5&c&2} into that form first; without
+     * {@link LegacyComponentSerializer.Builder#hexColors()} and
+     * {@link LegacyComponentSerializer.Builder#useUnusualXRepeatedCharacterHexFormat()}, the
+     * brand hex would not become {@code #00C5C2} on a plain Adventure build.
+     */
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.builder()
+            .character(LegacyComponentSerializer.SECTION_CHAR)
+            .hexColors()
+            .useUnusualXRepeatedCharacterHexFormat()
+            .build();
 
     private final JavaPlugin plugin;
     private String locale = DEFAULT_LOCALE;

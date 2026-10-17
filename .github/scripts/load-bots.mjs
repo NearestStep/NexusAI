@@ -27,6 +27,22 @@ for (let i = 0; i < count; i++) {
     port,
     username: name,
     auth: "offline",
+    // Mode B only needs an online Player entity (and /nai talk for S5). Skip world /
+    // physics plugins so a Paper version slightly ahead of mineflayer still joins.
+    plugins: {
+      blocks: false,
+      physics: false,
+      breath: false,
+      rain: false,
+      scoreboard: false,
+      team: false,
+      boss_bar: false,
+      tablist: false,
+      time: false,
+      resource_pack: false,
+      explosion: false,
+      particle: false,
+    },
   };
   if (requested) {
     options.version = requested;

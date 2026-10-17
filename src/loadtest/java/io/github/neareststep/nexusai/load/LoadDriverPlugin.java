@@ -74,7 +74,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
     static final String UNIQUE_PREFIX = "Reply with the single word pong. case ";
 
     private static final Set<String> SCENARIOS = Set.of(
-            "baseline", "S1", "S1-keywords", "S2", "S2-over", "S2-probe", "S3", "S4", "S5", "S6", "S-pool");
+            "baseline", "S1", "S1-keywords", "S2", "S2-over", "S2-probe", "S3", "S4", "S5", "S6", "S-pool",
+            "S-world");
 
     private final EmptyEventProbe eventProbe = new EmptyEventProbe();
     private LoadContextProviders providers;
@@ -138,7 +139,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         String scenario = args[0];
         if (!SCENARIOS.contains(scenario)) {
             sender.sendMessage("unknown scenario " + scenario
-                    + ". expected baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S4, S5, S6, S-pool");
+                    + ". expected baseline, S1, S1-keywords, S2, S2-over, S2-probe, S3, S4, S5, S6, S-pool, S-world");
             return true;
         }
         int rate;
@@ -161,7 +162,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             return true;
         }
         Run next = new Run(scenario, rate, seconds, viewers);
-        if (("S4".equals(scenario) || "S5".equals(scenario)) && Bukkit.getOnlinePlayers().isEmpty()) {
+        if (("S4".equals(scenario) || "S5".equals(scenario) || "S-world".equals(scenario))
+                && Bukkit.getOnlinePlayers().isEmpty()) {
             next.error = scenario + " needs online players (mode B). No bot is connected.";
             next.skipped = true;
             next.phase = Phase.DONE;
@@ -400,7 +402,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             }
             if (current.phase == Phase.DRAIN) {
                 boolean settled = poolIdle();
-                if ("S6".equals(current.scenario)) {
+                if ("S6".equals(current.scenario) || "S-world".equals(current.scenario)) {
                     settled = settled && current.futuresOpen.get() == 0;
                 }
                 if (settled || now - current.drainStartedAt >= current.drainMillis) {
@@ -445,11 +447,11 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         current.carry += current.rate / 20.0d;
         int count = (int) current.carry;
         current.carry -= count;
-        List<Player> players = "S4".equals(current.scenario)
+        List<Player> players = ("S4".equals(current.scenario) || "S-world".equals(current.scenario))
                 ? new ArrayList<>(Bukkit.getOnlinePlayers())
                 : List.of();
-        if ("S4".equals(current.scenario) && players.isEmpty()) {
-            current.error = "S4 lost its online players";
+        if (("S4".equals(current.scenario) || "S-world".equals(current.scenario)) && players.isEmpty()) {
+            current.error = current.scenario + " lost its online players";
             finish(current, false);
             return;
         }
@@ -465,9 +467,15 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
                 generateQuota(current, measure);
                 continue;
             }
+            if ("S-world".equals(current.scenario)) {
+                Player player = players.get(current.playerIndex % players.size());
+                current.playerIndex++;
+                worldContextCall(current, player, measure);
+                continue;
+            }
             if ("S4".equals(current.scenario)) {
-                Player player = players.get(current.playerCursor % players.size());
-                current.playerCursor++;
+                Player player = players.get(current.playerIndex % players.size());
+                current.playerIndex++;
                 resolve(current, CONTEXT, player, measure);
                 continue;
             }
@@ -487,6 +495,34 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
                 PlaceholderAPI.setPlaceholders((OfflinePlayer) null, token);
             } else {
                 PlaceholderAPI.setPlaceholders(player, token);
+            }
+        } catch (Throwable thrown) {
+            noteError(current, thrown);
+        } finally {
+            current.resolutions++;
+            if (measure) {
+                current.calls.add(System.nanoTime() - start);
+            }
+        }
+    }
+
+    /**
+     * Fires {@link NexusAIApi#worldContext} without joining. On Paper the caller's thread owns
+     * the player, so capture runs inside this window; format is queued off-thread. That window is
+     * the region-thread budget that load MSPT sees.
+     */
+    private void worldContextCall(Run current, Player player, boolean measure) {
+        long start = System.nanoTime();
+        try {
+            CompletableFuture<String> future = NexusAIApi.worldContext(this, player);
+            if (future != null) {
+                current.futuresOpen.incrementAndGet();
+                future.whenComplete((ignored, error) -> {
+                    current.futuresOpen.decrementAndGet();
+                    if (error != null) {
+                        noteError(current, error);
+                    }
+                });
             }
         } catch (Throwable thrown) {
             noteError(current, thrown);
@@ -605,7 +641,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         root.put("finished", true);
         root.put("skipped", current.skipped);
         root.put("error", current.error == null ? "" : current.error);
-        root.put("mode", "S4".equals(current.scenario) || "S5".equals(current.scenario) ? "B" : "A");
+        root.put("mode", "S4".equals(current.scenario) || "S5".equals(current.scenario)
+                || "S-world".equals(current.scenario) ? "B" : "A");
         root.put("rate", current.rate);
         root.put("seconds", current.seconds);
         root.put("viewers", current.viewers);
@@ -925,7 +962,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         private int unique;
         private int resolutions;
         private int warmAttempts;
-        private int playerCursor;
+        private int playerIndex;
         private int talkCommands;
         private boolean skipped;
         private boolean settled;

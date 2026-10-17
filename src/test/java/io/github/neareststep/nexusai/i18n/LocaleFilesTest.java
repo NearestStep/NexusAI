@@ -94,7 +94,10 @@ class LocaleFilesTest {
             "talk.quota",
             "talk.failed",
             "talk.empty",
-            "talk.reply"
+            "talk.reply",
+            "talk.reply-stream",
+            "talk.thinking",
+            "talk.timeout-fallback"
     );
 
     @Test
@@ -104,8 +107,26 @@ class LocaleFilesTest {
             files = stream.filter(path -> path.toString().endsWith(".yml")).sorted().toList();
         }
         assertEquals(15, files.size());
+        String brand = "&x&0&0&c&5&c&2";
         for (Path file : files) {
             YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file.toFile());
+            assertTrue(yaml.contains("prefix"), file.getFileName() + " missing prefix");
+            assertEquals("&8[" + brand + "NexusAI&8]&r ", yaml.getString("prefix"),
+                    file.getFileName() + " prefix palette");
+            assertFalse(yaml.getString("talk.reply").contains("{prefix}"),
+                    file.getFileName() + " talk.reply must not use {prefix}");
+            assertTrue(yaml.getString("talk.reply").contains("{character}"),
+                    file.getFileName() + " talk.reply {character}");
+            assertTrue(yaml.getString("talk.reply").contains("{reply}"),
+                    file.getFileName() + " talk.reply {reply}");
+            assertTrue(yaml.getString("talk.daily").contains("&6"), file.getFileName() + " talk.daily limit colour");
+            assertTrue(yaml.getString("talk.quota").contains("&6"), file.getFileName() + " talk.quota limit colour");
+            assertTrue(yaml.getString("talk.too-long").contains("&6"), file.getFileName() + " talk.too-long limit colour");
+            assertTrue(yaml.getString("command.help-header").contains(brand),
+                    file.getFileName() + " help-header brand colour");
+            assertFalse(yaml.getString("prefix").contains("&b"), file.getFileName() + " prefix still uses &b");
+            assertFalse(yaml.getString("command.help-header").contains("&e"),
+                    file.getFileName() + " help-header still uses &e");
             for (String key : REQUIRED) {
                 assertTrue(yaml.contains(key), file.getFileName() + " missing " + key);
                 assertFalse(yaml.getString(key).isBlank(), file.getFileName() + " blank " + key);

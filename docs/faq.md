@@ -1,6 +1,6 @@
 # FAQ
 
-Short answers for the first week. Key priority, the cache, and the player-input guard are in the [README](../README.md). Files you can copy are in [examples/](../examples/README.md).
+Short answers for the first week. Key priority, the cache, and the player-input guard are in the [README](../README.md). Where NexusAI fits (latency, world context, validating replies) is in [Limitations and best practices](limitations.md). Files you can copy are in [examples/](../examples/README.md).
 
 ## The plugin loaded, but nothing is sent
 
@@ -126,6 +126,8 @@ Each new request starts at the next available row, then walks the circle. A row 
 
 ## Context from your own plugin
 
+The model does not see blocks, coordinates, or inventory by itself. Your plugin collects that state and passes it in (variables, context providers, or prompt text), or calls the optional `NexusAIApi.worldContext` helper (off by default, `world-context.enabled`). See [Limitations and best practices](limitations.md#the-model-does-not-see-the-world).
+
 A prompt with no `context:` key is unchanged. To attach a short line (balance, rank, quest):
 
 1. `softdepend: [NexusAI]` in your `plugin.yml`. Compile against the NexusAI jar (`compileOnly`). There is no separate API jar.
@@ -177,6 +179,12 @@ A refused summary (rate limit, provider pause, daily cap, `HTTP queue is full`, 
 
 With `persist-memory: true`, the file stores `summary`, `summary-updated`, and `format: 2`. The first rewrite of a file that is not format 2 copies it to `dialogue-memory.yml.bak` once.
 
+## When is `dialogue-memory.yml` written, and what happens to expired transcripts?
+
+A periodic save (every 30 seconds) and the save on stop write the file only when memory differs from it. After a load that dropped nothing, with no new or changed lines, the file is left byte for byte, and stop does not rewrite it, also when stop waited for a first load that was still running. Each value is written on one line, so a rewrite does not grow a file by folding long text.
+
+`dialogue.memory-expiry-hours` is applied on every save as well as on load: a transcript whose last update is older than that is cleared from memory before the write, so it is not written back. If every transcript has expired, the file becomes a valid empty document (`format` and an empty `entries` section), never 0 bytes. When stop runs while the first load is still reading a large file, NexusAI only appends characters that are missing from the file; expired in-memory transcripts are not appended, and expired entries already in the file stay there until the next load, which skips them, and the next full save removes them.
+
 ## The `lang/` folder is empty
 
 On enable, NexusAI copies every bundled locale into `plugins/NexusAI/lang/` when that file is missing. An empty folder is filled. A file that is already there is not overwritten. Bundled codes: `en`, `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`.
@@ -201,7 +209,7 @@ Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not 
 
 On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency stays PlaceholderAPI 2.11.6.
 
-Call `NexusAIApi.generate` and `generateJson` from any thread. Do not join the future on the main thread or a region thread. The future completes on a NexusAI thread. To touch the world from the callback, schedule that work: the player's scheduler for that player, or the global region scheduler when there is no player. On Paper both of those are the main thread. Player state for a request (world, biome, permission groups for quotas, and `%` values in `vars:`) is read on the thread that owns the player. A foreign PlaceholderAPI expansion used from `vars:` is called on that same thread. After that call, the expansion's own thread rules apply. NexusAI does not make a third-party expansion safe on Folia.
+Call `NexusAIApi.generate` and `generateJson` from any thread. Do not join the future on the main thread or a region thread. The future completes on a NexusAI thread. To touch the world from the callback, schedule that work: the player's scheduler for that player, or the global region scheduler when there is no player. On Paper both of those are the main thread. Player state for a request (world, biome, permission groups for quotas, and `%` values in `vars:`) is read on the thread that owns the player. A foreign PlaceholderAPI expansion used from `vars:` is called on that same thread. After that call, the expansion's own thread rules apply. NexusAI does not make a third-party expansion safe on Folia. API answers still take hundreds of milliseconds to several seconds, so they are not for real-time PvP reactions — see [Limitations and best practices](limitations.md#response-latency).
 
 CI smoke boots those four Folia versions with PlaceholderAPI 2.12.3 and checks startup, `/nai status`, `/nai test`, `/nai usage`, and that the log has no region-thread error. A manual in-game check on Folia is separate and is not recorded here.
 
@@ -232,6 +240,8 @@ Prewarm fills the shared TTL cache used by `%ainexus_cached_*%` so a hologram or
 `success()` is false when the reply was not one JSON object that matched the schema, including after the one correction retry. `meta().error().kind()` is `INVALID_JSON`, `validationErrors()` names the paths (at most 10), and `meta().text()` is the fallback. That does not pause the provider. A schema keyword outside the supported subset, or a root that is not an object, throws `IllegalArgumentException` from `JsonSchema.parse` before any HTTP call. The message has the path, not the schema text.
 
 `QUOTA_EXCEEDED`, `LOCAL_LIMIT`, and `PROVIDER_ERROR` are the same kinds as `generate`. HTTP 429 or 5xx on the first attempt walks the model queue and does not use the correction retry. The same errors on the retry complete with that provider error. `request.format()` does not change the JSON call. A cached text answer is not reused as JSON.
+
+Even when `success()` is true, check the values again before changing the world. Patterns and compiling examples: [Limitations and best practices](limitations.md#validate-before-you-act).
 
 ## A scoreboard, a menu, and an NPC
 

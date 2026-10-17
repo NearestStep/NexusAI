@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.api;
 
 import io.github.neareststep.nexusai.context.ContextRegistry;
+import io.github.neareststep.nexusai.context.WorldContextFormatter;
+import io.github.neareststep.nexusai.context.WorldContextService;
 import io.github.neareststep.nexusai.dialogue.DialogueService;
 import io.github.neareststep.nexusai.generate.ApiPromptRegistry;
 import io.github.neareststep.nexusai.generate.GenerationService;
@@ -35,6 +37,7 @@ public final class NexusAIApi {
     private static volatile DialogueService service;
     private static volatile ContextRegistry contexts;
     private static volatile GenerationService generation;
+    private static volatile WorldContextService worldContext;
 
     private NexusAIApi() {
     }
@@ -55,6 +58,12 @@ public final class NexusAIApi {
     @ApiStatus.Internal
     public static void bindGeneration(GenerationService generationService) {
         generation = generationService;
+    }
+
+    /** Installed by NexusAI. Not part of the plugin contract. */
+    @ApiStatus.Internal
+    public static void bindWorldContext(WorldContextService worldContextService) {
+        worldContext = worldContextService;
     }
 
     /**
@@ -160,12 +169,19 @@ public final class NexusAIApi {
 
     /**
      * Like {@link #generate}, but the model must answer with one JSON object that matches {@code schema}.
-     * Call from any thread. The future completes on a NexusAI thread, the same way {@link #generate} does.
-     * It completes exceptionally only when NexusAI is not enabled.
+     * Call from any thread. Local schema checks and correction retries run off the main thread.
+     * The future completes on a NexusAI thread by default, the same way {@link #generate} does.
+     * When {@code plugin-api.response-validation.deliver-on-region} is true (opt-in) or the request
+     * sets {@link ResponseValidation.Builder#deliverOnRegion(boolean)}, and the request has a player
+     * entity, the future completes on that player's region thread instead. It completes exceptionally
+     * only when NexusAI is not enabled.
      * <p>
-     * Do not join the future on the main thread or a region thread. On Folia, hop to the global region
-     * scheduler before creating a world object. Values in {@link JsonGenerationResult#asMap()} came from
-     * a model. Check them again before using one in a command, a name, or a path.
+     * With response validation enabled (default), {@link JsonGenerationResult#success()} is true only
+     * after types, ranges, and any action allowlist pass. An invalid reply retries or falls back per
+     * {@code plugin-api.response-validation} (overridable with
+     * {@link GenerationRequest.Builder#responseValidation}). Values in
+     * {@link JsonGenerationResult#asMap()} still came from a model: check them again before using one
+     * in a command, a name, or a path.
      * <p>
      * {@code request.format()} is ignored. A cached call and an in-flight join do not call the model again.
      * <pre>{@code
@@ -297,5 +313,66 @@ public final class NexusAIApi {
             return List.of();
         }
         return ApiPromptRegistry.get().ids(owner);
+    }
+
+    /**
+     * One call that collects player name/world/coordinates, inventory materials, nearby block
+     * counts, and biome into a compact prompt block (see {@link WorldContextFormatter#HEADER}).
+     * Call from any thread. World reads run on the player's region thread (Paper main thread,
+     * Folia region owner). Formatting runs off that thread.
+     * <p>
+     * The future completes with {@code ""} when {@code world-context.enabled} is false, NexusAI
+     * is not enabled, or the player is gone. It does not complete exceptionally for those cases.
+     * Do not join the future on the main thread or a region thread.
+     * <p>
+     * Token size: the body is capped by {@code world-context.max-chars} (default 400 code points
+     * ≈ {@code ceil(400/4)} = 100 tokens). Use {@link #worldContextEstimatedTokens(String)} for a
+     * given block. Typical plains/short-inventory blocks are about 30–45 tokens.
+     * <pre>{@code
+     * NexusAIApi.worldContext(plugin, player)
+     *         .thenAccept(block -> {
+     *             if (block.isEmpty()) {
+     *                 return;
+     *             }
+     *             NexusAIApi.generate(plugin, GenerationRequest.template(
+     *                             "Describe what the player can craft.\n\n" + block)
+     *                     .player(player)
+     *                     .build());
+     *         });
+     * }</pre>
+     *
+     * @throws IllegalArgumentException when {@code owner} or {@code player} is null
+     */
+    public static CompletableFuture<String> worldContext(Plugin owner, Player player) {
+        return worldContext(owner, player, WorldContextLimits.unset());
+    }
+
+    /**
+     * Like {@link #worldContext(Plugin, Player)} with per-call limit overrides.
+     * Empty fields on {@code limits} keep {@code world-context.*} from config.
+     *
+     * @throws IllegalArgumentException when {@code owner} or {@code player} is null
+     */
+    public static CompletableFuture<String> worldContext(
+            Plugin owner,
+            Player player,
+            WorldContextLimits limits
+    ) {
+        if (owner == null || player == null) {
+            throw new IllegalArgumentException("owner and player are required");
+        }
+        WorldContextService current = worldContext;
+        if (current == null) {
+            return CompletableFuture.completedFuture("");
+        }
+        return current.collect(player, limits == null ? WorldContextLimits.unset() : limits);
+    }
+
+    /**
+     * {@code ceil(codePoints / 4)} for a block from {@link #worldContext}. Empty or null is 0.
+     * Matches the missing-usage estimate used elsewhere in NexusAI.
+     */
+    public static int worldContextEstimatedTokens(String block) {
+        return WorldContextFormatter.estimatedTokens(block);
     }
 }

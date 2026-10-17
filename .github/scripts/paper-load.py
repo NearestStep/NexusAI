@@ -78,6 +78,7 @@ def main() -> int:
 
 SCENARIO_NAMES = {
     "baseline", "S1", "S1-keywords", "S2", "S2-over", "S2-probe", "S3", "S4", "S5", "S6", "S-pool",
+    "S-world",
 }
 
 
@@ -141,23 +142,29 @@ def run(args, scenarios: list[str]) -> int:
     try:
         wait_for_done(process, log_chunks, args.timeout)
         text = "".join(log_chunks)
-        if "NexusAI enabled." not in text or "NexusAI-LoadDriver enabled." not in text:
+        if not nexusai_enabled(text) or "NexusAI-LoadDriver enabled." not in text:
             raise RuntimeError("NexusAI or the load driver did not enable")
         if CANARY in text:
             raise RuntimeError("canary key appeared in the boot log")
 
         planned = ["baseline"] + [item for item in scenarios if item != "baseline"]
-        needs_bots = any(item in {"S4", "S5"} for item in planned)
+        needs_bots = any(item in {"S4", "S5", "S-world"} for item in planned)
         bot_note = ""
         if needs_bots:
             if args.bots <= 0:
-                bot_note = "S4/S5 were requested without --bots"
+                bot_note = "S4/S5/S-world were requested without --bots"
             else:
                 bots, bot_note = start_bots(args, server_port, work, out)
                 if bots is None:
                     print(f"bots not started: {bot_note}")
                 else:
-                    wait_for_players(smoke, rcon_port, args.bots, log_chunks, process)
+                    try:
+                        wait_for_players(smoke, rcon_port, args.bots, log_chunks, process)
+                    except RuntimeError as error:
+                        bot_note = str(error)
+                        print(f"bots did not join: {bot_note}")
+                        stop_bots(bots)
+                        bots = None
 
         current_limits = high_limits()
         baseline_mean = None
@@ -202,7 +209,7 @@ def execute_scenario(
     smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
     requests_path, baseline_mean, bot_note, bots_up,
 ) -> dict:
-    if scenario in {"S4", "S5"} and not bots_up:
+    if scenario in {"S4", "S5", "S-world"} and not bots_up:
         return {
             "scenario": scenario,
             "status": "not-run",
@@ -423,6 +430,18 @@ def judge(scenario: str, report: dict, ctx: dict) -> dict:
             reasons.append(f"rejection p99 {p99} ns is not a fast fail")
         if not report.get("drain", {}).get("settled", False):
             reasons.append("pool did not drain after the burst")
+    elif scenario == "S-world":
+        reasons.extend(load_budget(delta, report, 2.0))
+        if report.get("tpsMin", 0) < 19.8:
+            reasons.append(f"TPS {report.get('tpsMin')} < 19.8")
+        p99 = report.get("callNanos", {}).get("p99", 10**12)
+        # Region capture + schedule of format; budget matches the 0.2 ms region target with headroom.
+        if p99 > 500_000:
+            reasons.append(f"worldContext schedule p99 {p99} ns > 500 µs")
+        if report.get("resolutions", 0) < 10:
+            reasons.append("too few worldContext calls")
+        if not report.get("drain", {}).get("settled", False):
+            reasons.append("worldContext futures still open after drain")
     if scenario != "baseline" and report.get("mspt", {}).get("samples", 0) == 0 and scenario != "S-pool":
         if scenario != "S1":
             pass
@@ -664,6 +683,11 @@ def mock_window(path: Path, started: float, ended: float) -> tuple[list[str], li
 S6_CONSUMER_TOKENS = 7200
 
 
+def world_context_enabled() -> bool:
+    raw = os.environ.get("WORLD_CONTEXT_ENABLED", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def high_limits() -> dict:
     return {
         "minute": 100000,
@@ -672,6 +696,7 @@ def high_limits() -> dict:
         "player_day": 100000,
         "quotas_enabled": False,
         "consumer_tokens": 0,
+        "world_context_enabled": world_context_enabled(),
     }
 
 
@@ -684,6 +709,7 @@ def limits_for(scenario: str) -> dict:
             "player_day": 200,
             "quotas_enabled": False,
             "consumer_tokens": 0,
+            "world_context_enabled": world_context_enabled(),
         }
     if scenario == "S1-keywords":
         limits = high_limits()
@@ -693,6 +719,11 @@ def limits_for(scenario: str) -> dict:
         limits = high_limits()
         limits["quotas_enabled"] = True
         limits["consumer_tokens"] = S6_CONSUMER_TOKENS
+        return limits
+    if scenario == "S-world":
+        limits = high_limits()
+        # S-world only measures the helper when it is on.
+        limits["world_context_enabled"] = True
         return limits
     return high_limits()
 
@@ -718,13 +749,15 @@ def rate_for(scenario: str) -> int:
         "S5": 0,
         "S6": 50,
         "S-pool": 0,
+        # 20 bots × 10 worldContext calls/s each.
+        "S-world": 200,
     }[scenario]
 
 
 def viewers_for(args, scenario: str) -> int:
     if scenario in {"S1", "S1-keywords"}:
         return 100
-    if scenario in {"S4", "S5"}:
+    if scenario in {"S4", "S5", "S-world"}:
         return max(1, args.bots)
     return 0
 
@@ -732,6 +765,7 @@ def viewers_for(args, scenario: str) -> int:
 def write_load_config(path: Path, mock_port: int, limits: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"http://127.0.0.1:{mock_port}/v1"
+    world_on = bool(limits.get("world_context_enabled", False))
     path.write_text(
         "\n".join([
             "config-version: 1",
@@ -782,6 +816,14 @@ def write_load_config(path: Path, mock_port: int, limits: dict) -> None:
             "    max-tokens: 80",
             "context:",
             "  enabled: true",
+            "world-context:",
+            f"  enabled: {'true' if world_on else 'false'}",
+            "  radius: 2",
+            "  max-blocks: 125",
+            "  max-block-types: 16",
+            "  max-inventory-items: 36",
+            "  max-chars: 400",
+            "  cooldown-millis: 250",
             "quotas:",
             f"  enabled: {'true' if limits['quotas_enabled'] else 'false'}",
             "  missing-usage: estimate",
@@ -881,6 +923,24 @@ def read_log(pipe, chunks: list[str]) -> None:
         sys.stdout.flush()
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+LEGACY_COLOR = re.compile(r"[\u00a7&](?:x(?:[\u00a7&][0-9a-fA-F]){6}|[0-9a-fk-orA-FK-ORxX])")
+BANNER_READY = re.compile(r"(?:^|\s)Ready in \d+ ms")
+
+
+def plain_log(text: str) -> str:
+    """Drop ANSI escapes and legacy section/ampersand colour codes."""
+    return LEGACY_COLOR.sub("", ANSI_ESCAPE.sub("", text))
+
+
+def nexusai_enabled(text: str) -> bool:
+    """True when NexusAI finished enabling: banner 'Ready in' line or the plain 'NexusAI enabled.' line."""
+    plain = plain_log(text)
+    if "NexusAI enabled." in plain:
+        return True
+    return any(BANNER_READY.search(line) for line in plain.splitlines())
+
+
 def wait_for_done(process, chunks: list[str], timeout: int) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -917,6 +977,125 @@ def bot_report_paths(work: Path, out: Path) -> tuple[str, str]:
     return str((out / "bots.json").resolve()), str((work / "talk.flag").resolve())
 
 
+def _extend_version_lists(bot_dir: Path, donor: str, target: str) -> None:
+    for relative in (
+        Path("mineflayer") / "lib" / "version.js",
+        Path("minecraft-protocol") / "src" / "version.js",
+    ):
+        version_js = bot_dir / "node_modules" / relative
+        if not version_js.is_file():
+            continue
+        vtext = version_js.read_text(encoding="utf-8")
+        if f"'{target}'" in vtext:
+            continue
+        needle = f"'{donor}']"
+        if needle in vtext:
+            version_js.write_text(vtext.replace(needle, f"'{donor}', '{target}']", 1), encoding="utf-8")
+
+
+def _alias_prismarine_chunk(bot_dir: Path, donor: str, target: str) -> None:
+    chunk_js = bot_dir / "node_modules" / "prismarine-chunk" / "src" / "index.js"
+    if not chunk_js.is_file():
+        return
+    ctext = chunk_js.read_text(encoding="utf-8")
+    if f"'{target}'" in ctext or f" {target}:" in ctext:
+        return
+    target_line = f"    '{target}': require('./pc/1.18/chunk')"
+    raw = f"    {donor}: require('./pc/1.18/chunk')"
+    quoted = f"    '{donor}': require('./pc/1.18/chunk')"
+    if raw in ctext:
+        chunk_js.write_text(ctext.replace(raw, raw + ",\n" + target_line, 1), encoding="utf-8")
+    elif quoted in ctext:
+        chunk_js.write_text(ctext.replace(quoted, quoted + ",\n" + target_line, 1), encoding="utf-8")
+
+
+def shim_minecraft_data(bot_dir: Path, paper_version: str) -> str:
+    """Ensure mineflayer can target Paper's version string.
+
+    minecraft-data may list a version (e.g. 26.2) without shipping packet data yet.
+    When that happens, clone the nearest older release folder and pin the protocol
+    number from Paper so bots can log in. Returns the MC_VERSION to pass to bots.
+    """
+    modules = bot_dir / "node_modules" / "minecraft-data"
+    data_js = modules / "data.js"
+    pc_root = modules / "minecraft-data" / "data" / "pc"
+    if not data_js.is_file() or not pc_root.is_dir():
+        return ""
+    target = (paper_version or "").strip()
+    if not target:
+        return ""
+
+    donor = None
+    if target.startswith("26.") and (pc_root / "26.1").is_dir():
+        donor = "26.1"
+    else:
+        candidates = sorted(
+            (p.name for p in pc_root.iterdir() if p.is_dir() and p.name[0].isdigit()),
+            reverse=True,
+        )
+        for name in candidates:
+            if name < target and (pc_root / name / "version.json").is_file():
+                donor = name
+                break
+    if donor is None:
+        return ""
+
+    if f"'{target}':" not in data_js.read_text(encoding="utf-8"):
+        protocol = None
+        env_proto = os.environ.get("MC_PROTOCOL", "").strip()
+        if env_proto.isdigit():
+            protocol = int(env_proto)
+        elif target == "26.2":
+            protocol = 776
+        else:
+            try:
+                donor_ver = json.loads((pc_root / donor / "version.json").read_text(encoding="utf-8"))
+                protocol = int(donor_ver.get("version", 0)) + 1
+            except (OSError, ValueError, json.JSONDecodeError, TypeError):
+                return ""
+
+        dest = pc_root / target
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(pc_root / donor, dest)
+        ver_path = dest / "version.json"
+        ver = json.loads(ver_path.read_text(encoding="utf-8"))
+        ver["version"] = protocol
+        ver["minecraftVersion"] = target
+        ver["majorVersion"] = target
+        ver_path.write_text(json.dumps(ver, indent=2) + "\n", encoding="utf-8")
+
+        text = data_js.read_text(encoding="utf-8")
+        marker = f"    '{donor}': {{"
+        start = text.find(marker)
+        if start < 0:
+            return ""
+        depth = 0
+        end = -1
+        for index, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end < 0:
+            return ""
+        block = text[start:end]
+        block = block.replace(f"'{donor}':", f"'{target}':", 1)
+        block = block.replace(
+            f'require("./minecraft-data/data/pc/{donor}/version.json")',
+            f'require("./minecraft-data/data/pc/{target}/version.json")',
+            1,
+        )
+        data_js.write_text(text[:end] + ",\n" + block + text[end:], encoding="utf-8")
+
+    _extend_version_lists(bot_dir, donor, target)
+    _alias_prismarine_chunk(bot_dir, donor, target)
+    return target
+
+
 def start_bots(args, server_port: int, work: Path, out: Path):
     node = shutil.which("node")
     npm = shutil.which("npm")
@@ -928,7 +1107,8 @@ def start_bots(args, server_port: int, work: Path, out: Path):
         "name": "nexusai-load-bots",
         "private": True,
         "type": "module",
-        "dependencies": {"mineflayer": "4.33.0"},
+        # 4.39.0 tests through Minecraft 26.1; shim_minecraft_data extends that to 26.2.
+        "dependencies": {"mineflayer": "4.39.0"},
     }
     (bot_dir / "package.json").write_text(json.dumps(package), encoding="utf-8")
     script = Path(__file__).with_name("load-bots.mjs")
@@ -939,6 +1119,7 @@ def start_bots(args, server_port: int, work: Path, out: Path):
     )
     if install.returncode != 0:
         return None, "npm install mineflayer failed: " + (install.stderr or install.stdout)[-500:]
+    mc_version = shim_minecraft_data(bot_dir, args.version)
     report, talk_flag = bot_report_paths(work, out)
     env = os.environ.copy()
     env.update({
@@ -947,7 +1128,7 @@ def start_bots(args, server_port: int, work: Path, out: Path):
         "BOTS": str(args.bots),
         "TALK_FLAG": talk_flag,
         "BOT_REPORT": report,
-        "MC_VERSION": "",
+        "MC_VERSION": mc_version,
     })
     proc = subprocess.Popen(
         [node, "load-bots.mjs"],

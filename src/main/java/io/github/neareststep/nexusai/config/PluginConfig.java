@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.api.InvalidJsonAction;
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.api.ResponseValidation;
 import io.github.neareststep.nexusai.budget.MissingUsage;
 import io.github.neareststep.nexusai.budget.QuotaSettings;
 import io.github.neareststep.nexusai.knowledge.KeywordSettings;
@@ -73,6 +75,9 @@ public final class PluginConfig {
     private Duration readTimeout;
     private Duration cacheTtl;
     private long cacheMaxSize;
+    private boolean cacheEnabled = true;
+    private long cacheMaxMemoryBytes;
+    private LatencySettings latencySettings = LatencySettings.defaults();
     private int requestsPerMinute;
     private int requestsPerDay;
     private int playerRequestsPerMinute;
@@ -112,6 +117,8 @@ public final class PluginConfig {
     private ModerationSettings moderation = ModerationSettings.defaults();
     private io.github.neareststep.nexusai.context.ContextSettings contextSettings =
             io.github.neareststep.nexusai.context.ContextSettings.defaults();
+    private io.github.neareststep.nexusai.context.WorldContextSettings worldContextSettings =
+            io.github.neareststep.nexusai.context.WorldContextSettings.defaults();
     private int httpMaxInFlight = io.github.neareststep.nexusai.ai.HttpPool.MAX_IN_FLIGHT;
     private int httpQueueSize = io.github.neareststep.nexusai.ai.HttpPool.WAIT_QUEUE_CAPACITY;
     private final List<String> httpLimitWarnings = new ArrayList<>();
@@ -120,6 +127,7 @@ public final class PluginConfig {
     private boolean pluginApiEnabled = true;
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
+    private ResponseValidationSettings responseValidation = ResponseValidationSettings.defaults();
     private final List<String> pluginApiWarnings = new ArrayList<>();
     private static final Pattern QUOTA_GROUP_NAME = Pattern.compile("[a-z0-9_-]{1,32}");
     private static final Set<String> QUOTA_FIELDS = Set.of("tokens-per-day", "requests-per-day");
@@ -165,6 +173,9 @@ public final class PluginConfig {
         this.readTimeout = Duration.ofSeconds(Math.max(1, config.getInt("api.read-timeout", 30)));
         this.cacheTtl = Duration.ofSeconds(Math.max(1, config.getInt("cache.ttl", 300)));
         this.cacheMaxSize = Math.max(1L, config.getLong("cache.max-size", 1000L));
+        this.cacheEnabled = config.getBoolean("cache.enabled", true);
+        this.cacheMaxMemoryBytes = Math.max(0L, config.getLong("cache.max-memory-bytes", 0L));
+        this.latencySettings = LatencySettings.read(config);
         this.requestsHeld = false;
         this.requestsPerMinute = Math.max(1, config.getInt("limits.requests-per-minute", 30));
         this.requestsPerDay = Math.max(1, config.getInt("limits.requests-per-day", 1000));
@@ -240,6 +251,7 @@ public final class PluginConfig {
         this.dialogueSettings = io.github.neareststep.nexusai.dialogue.DialogueSettings.read(config);
         this.moderation = ModerationSettings.load(config);
         this.contextSettings = io.github.neareststep.nexusai.context.ContextSettings.read(config);
+        this.worldContextSettings = io.github.neareststep.nexusai.context.WorldContextSettings.read(config);
         readHttpLimits(config);
         readPluginApi(config);
         readQuotas(config);
@@ -416,6 +428,27 @@ public final class PluginConfig {
         this.pluginApiEnabled = config.getBoolean("plugin-api.enabled", true);
         this.pluginApiMaxTemplateChars = clampPluginApi(config, "plugin-api.max-template-chars", 8000, 100, 100_000);
         this.pluginApiMaxVarChars = clampPluginApi(config, "plugin-api.max-var-chars", 1000, 10, 20_000);
+        boolean validationEnabled = config.getBoolean("plugin-api.response-validation.enabled", true);
+        String onInvalidRaw = config.getString("plugin-api.response-validation.on-invalid", "retry");
+        InvalidJsonAction onInvalid = ResponseValidation.parseAction(onInvalidRaw).orElse(null);
+        if (onInvalid == null) {
+            String shown = onInvalidRaw == null ? "" : onInvalidRaw.trim();
+            pluginApiWarnings.add(
+                    "plugin-api.response-validation.on-invalid '" + shown
+                            + "' is unknown. Using retry.");
+            onInvalid = InvalidJsonAction.RETRY;
+        }
+        int maxRetries = config.getInt("plugin-api.response-validation.max-retries", 1);
+        int clampedRetries = clamp(maxRetries, 0, ResponseValidation.MAX_RETRIES);
+        if (clampedRetries != maxRetries) {
+            pluginApiWarnings.add(
+                    "plugin-api.response-validation.max-retries is " + maxRetries
+                            + ". It must be from 0 to " + ResponseValidation.MAX_RETRIES
+                            + ". Using " + clampedRetries + ".");
+        }
+        boolean deliverOnRegion = config.getBoolean("plugin-api.response-validation.deliver-on-region", false);
+        this.responseValidation = ResponseValidationSettings.of(
+                validationEnabled, onInvalid, clampedRetries, deliverOnRegion);
     }
 
     private int clampPluginApi(FileConfiguration config, String key, int fallback, int min, int max) {
@@ -1146,6 +1179,22 @@ public final class PluginConfig {
         return cacheMaxSize;
     }
 
+    public boolean isCacheEnabled() {
+        return cacheEnabled;
+    }
+
+    /**
+     * Soft memory cap for the shared response cache in bytes. {@code 0} keeps entry-count eviction
+     * via {@link #getCacheMaxSize()}.
+     */
+    public long getCacheMaxMemoryBytes() {
+        return cacheMaxMemoryBytes;
+    }
+
+    public LatencySettings latencySettings() {
+        return latencySettings;
+    }
+
     public int getRequestsPerMinute() {
         return requestsPerMinute;
     }
@@ -1321,6 +1370,12 @@ public final class PluginConfig {
                 : contextSettings;
     }
 
+    public io.github.neareststep.nexusai.context.WorldContextSettings worldContextSettings() {
+        return worldContextSettings == null
+                ? io.github.neareststep.nexusai.context.WorldContextSettings.defaults()
+                : worldContextSettings;
+    }
+
     /**
      * Names of {@code ${ENV_VAR}} placeholders whose variable was unset at the last reload.
      * The placeholder text itself is not a key and is not returned.
@@ -1394,6 +1449,11 @@ public final class PluginConfig {
     /** {@code plugin-api.max-var-chars}, clamped to 10..20000. */
     public int pluginApiMaxVarChars() {
         return pluginApiMaxVarChars;
+    }
+
+    /** {@code plugin-api.response-validation}. Missing keys use the jar defaults. */
+    public ResponseValidationSettings responseValidation() {
+        return responseValidation == null ? ResponseValidationSettings.defaults() : responseValidation;
     }
 
     public List<String> pluginApiWarnings() {

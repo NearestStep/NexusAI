@@ -234,10 +234,31 @@ cache:
   # Seconds
   ttl: 300
   max-size: 1000
+  # false skips reads and writes of this shared response cache. In-flight joins stay.
+  enabled: true
+  # Soft UTF-8 weight cap for cached replies (key + text + metadata). 0 = use max-size only.
+  # When set above 0, eviction uses this weight instead of max-size.
+  max-memory-bytes: 0
   # Length-trim notices are not this cache. Each prompt id is logged twice, then suppressed.
   # The notice key is that id (named prompt, pool entry, or talk character), not the template.
   # The line names a prompts.yml id or "nai talk", plus its length. A literal is not printed.
   # The notice map is an access-order LRU of 256 ids. /nai reload clears it.
+
+# Perceived latency for /nai talk. Each part is independent. Placeholders and the plugin API
+# are unchanged. Chat sends hop to the player's entity scheduler (Folia-safe).
+latency:
+  streaming:
+    # Progressive chat delivery of a finished talk reply. false = one message when ready.
+    enabled: false
+    chars-per-chunk: 48
+    chunk-delay-millis: 40
+  thinking-indicator:
+    # Sends talk.thinking while the model works.
+    enabled: false
+  timeout:
+    # After this wait, the player gets talk.timeout-fallback. The model call may still finish.
+    enabled: false
+    millis: 15000
 
 limits:
   # Server-wide caps. Console commands, the pool, and prewarm spend only these.
@@ -407,6 +428,20 @@ context:
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
 
+# World snapshot for NexusAIApi.worldContext (player, inventory, nearby blocks, biome).
+# Off by default. When enabled, world reads run on the player's region thread with the
+# caps below; sorting and formatting stay off that thread. Body max-chars 400 ≈ 100 tokens
+# (ceil(codePoints/4)). A typical short block is about 30–45 tokens.
+# cooldown-millis skips a fresh region read and returns the last block for that player.
+world-context:
+  enabled: false
+  radius: 2                          # 0..8, inclusive cube around the player feet block
+  max-blocks: 125                    # 1..1331, hard cap on blocks examined
+  max-block-types: 16                # 1..64, distinct materials kept in the near= line
+  max-inventory-items: 36            # 0..54, distinct materials kept in the inv= line
+  max-chars: 400                     # 40..2000, body code points under the World: header
+  cooldown-millis: 250               # 0..5000; 0 = always read fresh
+
 # Java API for other plugins (NexusAIApi.generate and generateJson).
 # API calls spend limits.* like placeholders, and the quotas below when quotas.enabled is true.
 plugin-api:
@@ -415,6 +450,18 @@ plugin-api:
   max-template-chars: 8000
   # Longest value of one variable. 10..20000.
   max-var-chars: 1000
+  # Local checks for generateJson. Validation and correction retries run off the main thread.
+  # deliver-on-region is opt-in (default false): the future still completes on a NexusAI thread,
+  # matching 1.2.0. Set true, or ResponseValidation.deliverOnRegion(true), to hop to the player's
+  # region thread when a player entity is set (Paper: main thread). generate ignores this block.
+  response-validation:
+    enabled: true
+    # retry = correction retries then fallback; fallback = no correction retry.
+    on-invalid: retry
+    # Correction retries when on-invalid is retry. 0..3.
+    max-retries: 1
+    # Opt-in: complete generateJson on the player's region thread when a player entity is set.
+    deliver-on-region: false
 
 # Token accounting and daily quotas. Usage is always counted in token-usage.yml.
 # Limits below apply only when enabled is true. 0 = no limit. Days reset at local midnight.

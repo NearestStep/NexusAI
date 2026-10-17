@@ -184,4 +184,25 @@ class ConfigMergerTest {
         ConfigMerger.Result second = ConfigMerger.mergeMissing(result.yaml(), defaults);
         assertTrue(second.addedKeys().isEmpty());
     }
+
+    @Test
+    void appendsNewTopLevelKeyWithoutTouchingUserLocale() {
+        String existing = """
+                # keep
+                locale: ru
+                fallback: "wait"
+                """;
+        String defaults = """
+                locale: en
+                new-key: full
+                fallback: "..."
+                """;
+        ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
+        assertTrue(result.addedKeys().contains("new-key"));
+        assertTrue(result.yaml().contains("# keep"));
+        YamlConfiguration parsed = YamlConfiguration.loadConfiguration(new StringReader(result.yaml()));
+        assertEquals("ru", parsed.getString("locale"));
+        assertEquals("full", parsed.getString("new-key"));
+        assertEquals("wait", parsed.getString("fallback"));
+    }
 }

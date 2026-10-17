@@ -56,6 +56,56 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
         MemoryStore.fullDocumentAppends.set(0);
         MemoryStore.eventScans.set(0);
+        MemoryStore.lineScans.set(0);
+        MemoryStore.lineScanHits.set(0);
+    }
+
+    @Test
+    void fullyExpiredMemoryStopsWithAValidEmptyDocument() throws Exception {
+        for (boolean summaries : new boolean[] {false, true}) {
+            Fixture fixture = fixture("expired-" + summaries, summaries);
+            long expiry = DialogueSettings.defaults().memoryExpiryHours() * 3_600_000L;
+            fixture.clock.set(50L + expiry + 1_000L);
+            fixture.files.onReload();
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk());
+            fixture.files.shutdown();
+
+            String saved = Files.readString(fixture.file);
+            assertFalse(saved.isBlank(), "stop left an empty dialogue-memory.yml");
+            assertFalse(saved.contains("kept-from-disk"), saved);
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.loadFromString(saved);
+            assertTrue(yaml.contains("format"), saved);
+            assertEquals(summaries ? 2 : 1, yaml.getInt("format"), saved);
+            try (var siblings = Files.list(fixture.file.getParent())) {
+                assertTrue(siblings.noneMatch(path -> path.getFileName().toString().endsWith(".tmp")));
+            }
+
+            List<LogRecord> reload = new ArrayList<>();
+            Logger logger = Logger.getLogger("memory-expired-reload-" + UUID.randomUUID());
+            logger.setUseParentHandlers(false);
+            logger.setLevel(Level.ALL);
+            logger.addHandler(new Handler() {
+                @Override
+                public void publish(LogRecord record) {
+                    reload.add(record);
+                }
+
+                @Override
+                public void flush() {
+                }
+
+                @Override
+                public void close() {
+                }
+            });
+            MemoryStore again = new MemoryStore();
+            assertTrue(again.loadForPersistence(fixture.file.toFile(), fixture.clock.get(), expiry, logger, List.of()));
+            assertTrue(reload.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
+                    "reload of the empty document warned");
+            assertEquals(saved, Files.readString(fixture.file), "reload rewrote the empty document");
+        }
     }
 
     @Test
@@ -462,6 +512,10 @@ class DialogueMemoryReliabilityTest {
             writer.append(player, "npc_" + i, "user", "third line " + i, 42L, 8, 8_000, 0L);
         }
         writer.save(fixture.file.toFile(), null, false);
+        // A file from an older build: long text folded at 80 columns by a plain configuration save.
+        YamlConfiguration folded = new YamlConfiguration();
+        folded.load(fixture.file.toFile());
+        folded.save(fixture.file.toFile());
         long bytes = Files.size(fixture.file);
         assertTrue(bytes >= 11_000_000L && bytes <= 14_000_000L, "saved file is " + bytes + " bytes");
         String original = Files.readString(fixture.file);
@@ -560,10 +614,12 @@ class DialogueMemoryReliabilityTest {
             long heap = Runtime.getRuntime().maxMemory();
             System.out.println("qa-shaped stop " + elapsed + " ms, bytes=" + bytes
                     + ", cpus=" + cpus + ", heapMax=" + heap
+                    + ", lineScanHits=" + MemoryStore.lineScanHits.get()
                     + ", eventScans=" + MemoryStore.eventScans.get()
                     + ", fullDocumentAppends=" + MemoryStore.fullDocumentAppends.get());
             assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
-            assertTrue(MemoryStore.eventScans.get() > 0, "stop did not scan keys");
+            assertTrue(MemoryStore.lineScanHits.get() + MemoryStore.eventScans.get() > 0,
+                    "stop did not scan keys");
             assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
             String merged = Files.readString(fixture.file);
             assertTrue(merged.startsWith("format: 2"), merged.substring(0, Math.min(40, merged.length())));
@@ -802,7 +858,9 @@ class DialogueMemoryReliabilityTest {
                     notes.get(0));
             assertNoExtraReader();
             assertNoTempFile(fixture.file.getParent());
-            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis + 200L + 1_500L;
+            long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis
+                    + DialogueMemoryPersistence.appendBudgetMillis(Files.size(fixture.file))
+                    + 1_500L;
             assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
         } finally {
             DialogueMemoryPersistence.shutdownAppendBudgetMillis = previousBudget;
@@ -862,7 +920,7 @@ class DialogueMemoryReliabilityTest {
         fixture.files.shutdown();
         long elapsed = millisSince(started);
         long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis
-                + DialogueMemoryPersistence.shutdownAppendBudgetMillis
+                + DialogueMemoryPersistence.appendBudgetMillis(Files.size(fixture.file))
                 + 1_500L;
         assertTrue(elapsed <= limit, "stop took " + elapsed + " ms");
         assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop parsed the file again");

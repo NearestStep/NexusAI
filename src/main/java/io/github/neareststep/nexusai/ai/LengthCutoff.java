@@ -210,18 +210,18 @@ public final class LengthCutoff {
         if (index < 0 || index >= text.length()) {
             return false;
         }
-        int cursor = index;
-        while (cursor > 0) {
-            char previous = text.charAt(cursor - 1);
+        int pos = index;
+        while (pos > 0) {
+            char previous = text.charAt(pos - 1);
             if (previous == '\n' || previous == '\r') {
                 break;
             }
-            cursor--;
+            pos--;
         }
-        while (cursor < text.length() && (text.charAt(cursor) == ' ' || text.charAt(cursor) == '\t')) {
-            cursor++;
+        while (pos < text.length() && (text.charAt(pos) == ' ' || text.charAt(pos) == '\t')) {
+            pos++;
         }
-        return cursor < text.length() && text.charAt(cursor) == '#';
+        return pos < text.length() && text.charAt(pos) == '#';
     }
 
     private static boolean decimalPoint(String text, int index) {
@@ -246,11 +246,11 @@ public final class LengthCutoff {
         while (start >= 0 && Character.isDigit(text.charAt(start))) {
             start--;
         }
-        int cursor = start;
-        while (cursor >= 0 && (text.charAt(cursor) == ' ' || text.charAt(cursor) == '\t')) {
-            cursor--;
+        int pos = start;
+        while (pos >= 0 && (text.charAt(pos) == ' ' || text.charAt(pos) == '\t')) {
+            pos--;
         }
-        return cursor < 0 || text.charAt(cursor) == '\n' || text.charAt(cursor) == '\r';
+        return pos < 0 || text.charAt(pos) == '\n' || text.charAt(pos) == '\r';
     }
 
     /**
@@ -276,17 +276,17 @@ public final class LengthCutoff {
         if (!isStandaloneRoman(text.substring(from, index))) {
             return false;
         }
-        int cursor = from - 1;
-        while (cursor >= 0 && (text.charAt(cursor) == ' ' || text.charAt(cursor) == '\t')) {
-            cursor--;
+        int pos = from - 1;
+        while (pos >= 0 && (text.charAt(pos) == ' ' || text.charAt(pos) == '\t')) {
+            pos--;
         }
-        while (cursor >= 0 && text.charAt(cursor) == '#') {
-            cursor--;
+        while (pos >= 0 && text.charAt(pos) == '#') {
+            pos--;
         }
-        while (cursor >= 0 && (text.charAt(cursor) == ' ' || text.charAt(cursor) == '\t')) {
-            cursor--;
+        while (pos >= 0 && (text.charAt(pos) == ' ' || text.charAt(pos) == '\t')) {
+            pos--;
         }
-        return cursor < 0 || text.charAt(cursor) == '\n' || text.charAt(cursor) == '\r';
+        return pos < 0 || text.charAt(pos) == '\n' || text.charAt(pos) == '\r';
     }
 
     private static boolean isRomanLetter(char ch) {

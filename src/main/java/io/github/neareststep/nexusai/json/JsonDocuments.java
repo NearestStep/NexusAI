@@ -9,11 +9,14 @@ import io.github.neareststep.nexusai.api.JsonSchema;
 import io.github.neareststep.nexusai.config.SecretMask;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Reads one model reply into compact JSON: extract, parse, check, then clean string values.
@@ -29,6 +32,23 @@ public final class JsonDocuments {
             boolean allowMarkup,
             Iterable<String> secrets,
             String prompt
+    ) {
+        return read(raw, schema, allowMarkup, secrets, prompt, true, List.of(), "action");
+    }
+
+    /**
+     * @param checkSchema when false, only extraction, parse, sanitize, and player-input checks run
+     * @param allowedActions optional allowlist for {@code actionProperty}; empty means no extra check
+     */
+    public static Outcome read(
+            String raw,
+            JsonSchema schema,
+            boolean allowMarkup,
+            Iterable<String> secrets,
+            String prompt,
+            boolean checkSchema,
+            Collection<String> allowedActions,
+            String actionProperty
     ) {
         if (JsonExtractor.tooLarge(raw)) {
             return Outcome.invalid(List.of("$: response is longer than 64 KiB"));
@@ -50,14 +70,22 @@ public final class JsonDocuments {
         if (tree == null || !tree.isObject()) {
             return Outcome.invalid(List.of("$: expected object, got " + JsonSchemaValidator.jsonType(tree)));
         }
-        List<String> errors = JsonSchemaValidator.validate(schema, tree);
-        if (!errors.isEmpty()) {
-            return Outcome.invalid(errors);
+        if (checkSchema) {
+            List<String> errors = JsonSchemaValidator.validate(schema, tree);
+            if (!errors.isEmpty()) {
+                return Outcome.invalid(errors);
+            }
+            List<String> actionErrors = actionAllowlistErrors(tree, allowedActions, actionProperty);
+            if (!actionErrors.isEmpty()) {
+                return Outcome.invalid(actionErrors);
+            }
         }
         JsonNode cleaned = sanitize(tree, allowMarkup, secrets);
-        List<String> shortened = JsonSchemaValidator.minLengths(schema, cleaned);
-        if (!shortened.isEmpty()) {
-            return Outcome.invalid(shortened);
+        if (checkSchema) {
+            List<String> shortened = JsonSchemaValidator.minLengths(schema, cleaned);
+            if (!shortened.isEmpty()) {
+                return Outcome.invalid(shortened);
+            }
         }
         String joined = joinStrings(cleaned);
         String rejection = PlayerInput.rejectionReason(joined, prompt);
@@ -70,6 +98,47 @@ public final class JsonDocuments {
         } catch (JsonProcessingException ex) {
             return Outcome.invalid(List.of("$: JSON could not be parsed"));
         }
+    }
+
+    static List<String> actionAllowlistErrors(
+            JsonNode tree,
+            Collection<String> allowedActions,
+            String actionProperty
+    ) {
+        if (tree == null || allowedActions == null || allowedActions.isEmpty()) {
+            return List.of();
+        }
+        String property = actionProperty == null || actionProperty.isBlank() ? "action" : actionProperty;
+        if (!tree.has(property) || tree.get(property).isNull()) {
+            return List.of();
+        }
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String action : allowedActions) {
+            if (action != null) {
+                allowed.add(action);
+            }
+        }
+        if (allowed.isEmpty()) {
+            return List.of();
+        }
+        JsonNode value = tree.get(property);
+        if (value.isTextual()) {
+            if (!allowed.contains(value.asText())) {
+                return List.of("$." + property + ": action is not in allowlist");
+            }
+            return List.of();
+        }
+        if (value.isArray()) {
+            List<String> errors = new ArrayList<>();
+            for (int i = 0; i < value.size() && errors.size() < JsonSchemaValidator.MAX_ERRORS; i++) {
+                JsonNode item = value.get(i);
+                if (!item.isTextual() || !allowed.contains(item.asText())) {
+                    errors.add("$." + property + "[" + i + "]: action is not in allowlist");
+                }
+            }
+            return errors;
+        }
+        return List.of("$." + property + ": expected string or array of strings");
     }
 
     /** True when {@code json} is one JSON object. */

@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class KeyRing {
 
     private final List<String> keys;
-    private final AtomicInteger cursor = new AtomicInteger();
+    private final AtomicInteger nextKey = new AtomicInteger();
     private final ConcurrentHashMap<String, Long> skipUntil = new ConcurrentHashMap<>();
 
     public KeyRing(List<String> keys) {
@@ -45,7 +45,7 @@ public final class KeyRing {
             return "";
         }
         int size = keys.size();
-        int start = Math.floorMod(cursor.getAndIncrement(), size);
+        int start = Math.floorMod(nextKey.getAndIncrement(), size);
         if (ignoreSkip) {
             return keys.get(Math.floorMod(start, size));
         }

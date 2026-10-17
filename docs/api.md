@@ -28,6 +28,39 @@ NexusAIApi.generate(plugin, GenerationRequest.prompt("quests:intro")
 
 `result.text()` is the fallback when `success()` is false. Check a value again before placing it in a command, a name, or a path.
 
+## World context
+
+`NexusAIApi.worldContext(plugin, player)` collects player name, world, block coordinates, inventory materials, nearby block counts, and biome into one compact prompt block in a single call. Call from any thread. World reads run on the player's region thread (Paper main thread, Folia region owner) with the caps in `world-context.*`. Sorting and formatting run off that thread on `nexusai-context-*`. Within `world-context.cooldown-millis` (default 250) a second call for the same player returns the last block without a fresh region read. The future completes with `""` when `world-context.enabled` is false, NexusAI is not enabled, or the player is gone. It does not complete exceptionally for those cases. Do not join the future on the main thread or a region thread.
+
+Optional overrides: `NexusAIApi.worldContext(plugin, player, WorldContextLimits.builder().radius(1).maxBlocks(27).build())`. Empty fields keep the config values. Cooldown is config-only.
+
+Token size: the body under the `World:` header is capped by `world-context.max-chars` (default 400 code points). NexusAI estimates tokens as `ceil(codePoints / 4)`, the same formula as missing usage. At the default cap the body is at most 100 tokens. A typical plains scene with a short inventory is about 30–45 tokens for the whole block including the header. `NexusAIApi.worldContextEstimatedTokens(block)` returns that estimate for a finished block.
+
+`world-context.enabled` defaults to `false`. Missing keys are appended on startup; `config-version` stays 2. `API_VERSION` stays 3.
+
+```java
+NexusAIApi.worldContext(plugin, player)
+        .thenAccept(block -> {
+            if (block.isEmpty()) {
+                return;
+            }
+            NexusAIApi.generate(plugin, GenerationRequest.template(
+                            "Suggest one craft from what the player can reach.\n\n" + block)
+                    .player(player)
+                    .label("craft-hint")
+                    .build());
+        });
+```
+
+Example block shape (materials are Minecraft path names, amounts use `×`):
+
+```text
+World:
+p=Steve w=world @10,64,-3 bio=plains
+inv=dirt×64,oak_log×12,iron_pickaxe
+near=r2 grass_block×40,dirt×30,stone×20
+```
+
 ## Prompt registration
 
 `NexusAIApi.registerPrompt(plugin, localId, definition)` stores a prompt under `namespace:localId`. The namespace is the plugin name in lower case, and any character outside `[a-z0-9_-]` becomes `_`. `localId` matches `[a-z0-9_-]{1,64}`. The same plugin may register that id again to replace it. A second plugin with the same namespace gets `IllegalStateException`. The prompt is not written to a file. `/nai reload` keeps it. Disabling the owner plugin removes it.
@@ -53,7 +86,9 @@ public void onEnable() {
 
 ## Structured JSON
 
-`NexusAIApi.generateJson(plugin, request, schema)` completes with a `JsonGenerationResult` on a NexusAI thread. `success()` is true only after the reply was extracted and checked against the schema. `json()` is the compact text. `asMap()` uses `String`, `Long`, `Double`, `Boolean`, `List`, `Map`, and null. An integer that fits in a long is a `Long`. `mode()` is the mode that was actually requested after a downgrade: `JSON_SCHEMA`, `JSON_OBJECT`, or `PROMPT_ONLY`. `repaired()` is true when the one correction retry was sent. `validationErrors()` has at most 10 lines and is empty when `success()` is true.
+`NexusAIApi.generateJson(plugin, request, schema)` completes with a `JsonGenerationResult`. Local schema checks and correction retries run off the main thread. The future completes on a NexusAI thread by default (same as 1.2.0). When `plugin-api.response-validation.deliver-on-region` is true (opt-in) or the request sets `ResponseValidation.deliverOnRegion(true)`, and the request has a player entity, the future completes on that player's region thread instead. With response validation enabled (default), `success()` is true only after the reply was extracted and checked against the schema (types, ranges, `enum` / action allowlists). `json()` is the compact text. `asMap()` uses `String`, `Long`, `Double`, `Boolean`, `List`, `Map`, and null. An integer that fits in a long is a `Long`. `mode()` is the mode that was actually requested after a downgrade: `JSON_SCHEMA`, `JSON_OBJECT`, or `PROMPT_ONLY`. `repaired()` is true when at least one correction retry was sent. `validationErrors()` has at most 10 lines and is empty when `success()` is true.
+
+`plugin-api.response-validation` controls the checks: `enabled` (default true), `on-invalid` (`retry` or `fallback`, default `retry`), `max-retries` (0..3, default 1), and `deliver-on-region` (default false, opt-in). `GenerationRequest.responseValidation(...)` overrides those values for one call and may set `allowedActions` for a JSON property (default name `action`). `JsonSchema.withActionAllowlist(schema, property, actions)` embeds the allowlist in the schema as a string `enum` so the provider can see it. When `enabled` is false, NexusAI still extracts a JSON object and sanitizes strings, but does not run the schema or allowlist checks and does not send correction retries.
 
 `generateJson(plugin, request)` reads `JsonSchema` from the registered prompt (`request.promptId()`). A prompt with no schema completes as `INVALID_REQUEST` and does not call the model. An unknown prompt id completes as `UNKNOWN_PROMPT`. An override of that prompt in `prompts.yml` can replace the text. It cannot replace the schema. There is no schema key in `prompts.yml`.
 
@@ -63,9 +98,9 @@ public void onEnable() {
 
 When the request and the prompt omit `max_tokens`, the JSON call uses 1024. That is not `api.max-tokens`. `0` still omits the field.
 
-A reply that is not valid JSON, or that does not match the schema, is sent back once. The retry uses the same queue row, model, and mode. `attempts` counts both HTTP calls. `NexusPreGenerateEvent` is not fired again. Both calls are counted in the token ledger. The quota reservation is taken again. `limits.*` is not spent a second time. If `finish_reason` is `length`, the retry uses `max_tokens` doubled, at most 4096, and does not send the cut reply back. If the retry still fails, `success()` is false, `meta().error().kind()` is `INVALID_JSON`, `validationErrors()` lists the paths, and `meta().text()` is the fallback. Prompt backoff is not started. HTTP 429 or 5xx on the first attempt uses the normal queue walk and does not spend this retry.
+When `on-invalid` is `retry`, a reply that is not valid JSON, or that does not match the schema, is sent back up to `max-retries` times (default 1). Each retry uses the same queue row, model, and mode. `attempts` counts every HTTP call. `NexusPreGenerateEvent` is not fired again. All calls are counted in the token ledger. The quota reservation is taken again for each repair. `limits.*` is not spent a second time. If `finish_reason` is `length`, the retry uses `max_tokens` doubled, at most 4096, and does not send the cut reply back. When `on-invalid` is `fallback`, or retries are exhausted, `success()` is false, `meta().error().kind()` is `INVALID_JSON`, `validationErrors()` lists the paths, and `meta().text()` is the fallback. Prompt backoff is not started. HTTP 429 or 5xx on the first attempt uses the normal queue walk and does not spend a correction retry.
 
-String values are stripped of section signs and markup, and configured secrets are masked. Check the values again before placing one in a command, a name, or a path. Do not join the future on the main thread or a region thread.
+String values are stripped of section signs and markup, and configured secrets are masked. Check the values again before placing one in a command, a name, or a path. Do not join the future on the main thread or a region thread. Latency, world context, and validation patterns (including a compiling `generateJson` check and cancelling `NexusActionEvent`) are in [Limitations and best practices](limitations.md).
 
 ```java
 JsonSchema schema = JsonSchema.parse("""
@@ -167,4 +202,4 @@ public final class AiAudit implements Listener {
 }
 ```
 
-Register it with the plugin manager in `onEnable`. Keep each handler short. Read world state from a region scheduler, not from an asynchronous handler.
+Register it with the plugin manager in `onEnable`. Keep each handler short. Read world state from a region scheduler, not from an asynchronous handler. Cancelling an action so the command never runs is also covered in [Limitations and best practices](limitations.md#validate-before-you-act).

@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.api.InvalidJsonAction;
 import io.github.neareststep.nexusai.budget.MissingUsage;
 import io.github.neareststep.nexusai.budget.QuotaSettings;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -433,6 +434,32 @@ class PluginConfigTest {
                 "plugin-api.max-template-chars is 100001. It must be from 100 to 100000. Using 100000.",
                 "plugin-api.max-var-chars is 20001. It must be from 10 to 20000. Using 20000."),
                 clampedHigh.pluginApiWarnings());
+
+        PluginConfig validationDefaults = new PluginConfig(baseYaml());
+        assertTrue(validationDefaults.responseValidation().enabled());
+        assertEquals(InvalidJsonAction.RETRY, validationDefaults.responseValidation().onInvalid());
+        assertEquals(1, validationDefaults.responseValidation().maxRetries());
+        assertFalse(validationDefaults.responseValidation().deliverOnRegion());
+
+        YamlConfiguration validation = baseYaml();
+        validation.set("plugin-api.response-validation.enabled", false);
+        validation.set("plugin-api.response-validation.on-invalid", "fallback");
+        validation.set("plugin-api.response-validation.max-retries", 9);
+        validation.set("plugin-api.response-validation.deliver-on-region", true);
+        PluginConfig tuned = new PluginConfig(validation);
+        assertFalse(tuned.responseValidation().enabled());
+        assertEquals(InvalidJsonAction.FALLBACK, tuned.responseValidation().onInvalid());
+        assertEquals(3, tuned.responseValidation().maxRetries());
+        assertTrue(tuned.responseValidation().deliverOnRegion());
+        assertTrue(tuned.pluginApiWarnings().stream().anyMatch(line ->
+                line.contains("plugin-api.response-validation.max-retries is 9")));
+
+        YamlConfiguration unknown = baseYaml();
+        unknown.set("plugin-api.response-validation.on-invalid", "explode");
+        PluginConfig unknownAction = new PluginConfig(unknown);
+        assertEquals(InvalidJsonAction.RETRY, unknownAction.responseValidation().onInvalid());
+        assertTrue(unknownAction.pluginApiWarnings().stream().anyMatch(line ->
+                line.contains("plugin-api.response-validation.on-invalid 'explode'")));
     }
 
     @Test

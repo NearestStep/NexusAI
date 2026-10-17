@@ -193,17 +193,45 @@ public final class GenerationService {
         if (owner == null || request == null || schema == null) {
             throw new IllegalArgumentException("owner, request, and schema are required");
         }
-        JsonSession session = new JsonSession(schema);
+        GenerationRuntime current = runtime;
+        EffectiveResponseValidation validation = EffectiveResponseValidation.resolve(
+                current == null ? null : current.config(), request);
+        JsonSession session = new JsonSession(schema, validation);
         CompletableFuture<GenerationResult> inner = generate(owner, request, session);
         CompletableFuture<JsonGenerationResult> outer = new CompletableFuture<>();
-        inner.whenComplete((result, error) -> {
+        inner.whenComplete((result, error) -> completeJson(owner, request, session, outer, result, error));
+        return outer;
+    }
+
+    private void completeJson(
+            Plugin owner,
+            GenerationRequest request,
+            JsonSession session,
+            CompletableFuture<JsonGenerationResult> outer,
+            GenerationResult result,
+            Throwable error
+    ) {
+        Runnable finish = () -> {
             if (error != null) {
                 outer.completeExceptionally(unwrap(error));
                 return;
             }
             outer.complete(session.toResult(result));
-        });
-        return outer;
+        };
+        if (session == null || !session.validation.deliverOnRegion()) {
+            finish.run();
+            return;
+        }
+        Player player = GenerationRequestFacts.player(request);
+        if (player == null) {
+            finish.run();
+            return;
+        }
+        if (regions.owns(player)) {
+            finish.run();
+            return;
+        }
+        regions.run(owner == null ? plugin : owner, player, finish, finish);
     }
 
     /**
@@ -330,18 +358,16 @@ public final class GenerationService {
         if (request.cacheMode() == CacheMode.CACHED) {
             Optional<AiCache.CachedAnswer> hit = current.cache().lookup(prepared.cacheKey);
             JsonSession session = jsonSessions.get(future);
-            if (hit.isPresent() && (session == null || JsonDocuments.isObject(hit.get().text()))) {
+            if (hit.isPresent() && (session == null || acceptCachedJson(hit.get().text(), session, current, prepared.prompt))) {
                 AiCache.CachedAnswer cached = hit.get();
                 if (session != null) {
-                    session.json = cached.text();
-                    session.map = JsonDocuments.mapOf(cached.text());
                     session.mode = modeOf(cached.note());
                     session.repaired = false;
                 }
                 GenerationResult result = GenerationResult.of(
                         trace,
                         true,
-                        cached.text(),
+                        session != null && !session.json.isEmpty() ? session.json : cached.text(),
                         ResultSource.CACHE,
                         cached.providerId(),
                         cached.model(),
@@ -562,7 +588,7 @@ public final class GenerationService {
             ModelAnswer answer,
             Throwable error
     ) {
-        if (error != null && !session.repairUsed) {
+        if (error != null && session.repairsUsed == 0) {
             return false;
         }
         if (error != null) {
@@ -572,7 +598,7 @@ public final class GenerationService {
             if (typed != null && typed.usage() != null) {
                 usage = usage.plus(typed.usage());
             }
-            session.repaired = true;
+            session.repaired = session.repairsUsed > 0;
             recordHttpFailure(current, admissionKey, error);
             GenerationError generationError = NexusErrors.fromThrowable(current.config(), error);
             releaseShared(current, prepared, shared, SharedCompletion.fail(AiErrors.unwrap(error), generationError, session.errors));
@@ -587,7 +613,10 @@ public final class GenerationService {
                 session.schema,
                 current.config().allowMarkup(),
                 current.config().configuredSecrets(),
-                prepared.prompt);
+                prepared.prompt,
+                session.validation.enabled(),
+                session.validation.allowedActions(),
+                session.validation.actionProperty());
         if (outcome.rejected()) {
             Throwable rejected = new AiRequestException(AiErrorKind.REJECTED, 0, outcome.rejection(), null);
             recordHttpFailure(current, admissionKey, rejected);
@@ -602,11 +631,18 @@ public final class GenerationService {
         }
         if (!outcome.valid()) {
             session.errors = outcome.errors();
-            if (!session.repairUsed && answer != null) {
-                session.repairUsed = true;
+            if (session.validation.canRepair()
+                    && session.repairsUsed < session.validation.maxRetries()
+                    && answer != null) {
+                if (session.repairsUsed == 0) {
+                    session.firstUsage = answer.usage();
+                    session.firstAttempts = answer.attempts();
+                } else {
+                    session.firstUsage = session.firstUsage.plus(answer.usage());
+                    session.firstAttempts = session.firstAttempts + answer.attempts();
+                }
+                session.repairsUsed++;
                 session.errors = outcome.errors();
-                session.firstUsage = answer.usage();
-                session.firstAttempts = answer.attempts();
                 boolean length = JsonRepair.lengthLimited(answer.finishReason());
                 GenerationOverrides repairOverrides = StructuredOutputSupport.repair(
                         prepared.overrides, answer.text(), outcome.errors(), length);
@@ -643,11 +679,11 @@ public final class GenerationService {
         session.json = json;
         session.map = outcome.map();
         session.errors = List.of();
-        session.repaired = session.repairUsed;
-        ResponseUsage usage = session.repairUsed ? session.firstUsage.plus(answer.usage()) : answer.usage();
-        int attempts = session.repairUsed ? session.firstAttempts + answer.attempts() : answer.attempts();
+        session.repaired = session.repairsUsed > 0;
+        ResponseUsage usage = session.repairsUsed > 0 ? session.firstUsage.plus(answer.usage()) : answer.usage();
+        int attempts = session.repairsUsed > 0 ? session.firstAttempts + answer.attempts() : answer.attempts();
         long nanos = answer.httpNanos();
-        if (session.repairUsed) {
+        if (session.repairsUsed > 0) {
             nanos = saturatingNanos(nanos, 0L);
         }
         EventDispatcher.get().post(
@@ -705,8 +741,8 @@ public final class GenerationService {
             JsonSession session,
             ModelAnswer answer
     ) {
-        session.repaired = session.repairUsed;
-        if (answer != null && session.repairUsed) {
+        session.repaired = session.repairsUsed > 0;
+        if (answer != null && session.repairsUsed > 0) {
             session.errors = session.errors.isEmpty() ? List.of("$: JSON could not be parsed") : session.errors;
         }
         GenerationError error = NexusErrors.of(
@@ -863,10 +899,16 @@ public final class GenerationService {
                 PlayerInput.stripSectionSigns(answer.text(), current.config().allowMarkup()).trim(),
                 current.config().configuredSecrets());
         if (session != null) {
-            session.json = text;
-            session.map = JsonDocuments.mapOf(text);
+            if (!acceptCachedJson(text, session, current, text)) {
+                GenerationError generationError = NexusErrors.of(
+                        current.config(), NexusErrorKind.INVALID_JSON, "The reply was not valid JSON", 0, 0L);
+                session.errors = List.of("$: cached JSON failed validation");
+                deliver(future, trace, failure(trace, request, lookup, current, generationError), true, false);
+                return;
+            }
             session.mode = modeOf(answer.structuredMode());
             session.repaired = false;
+            text = session.json;
         }
         GenerationResult result = GenerationResult.of(
                 trace,
@@ -1083,6 +1125,11 @@ public final class GenerationService {
                 overrides = overrides.withMaxTokens(StructuredOutputSupport.DEFAULT_MAX_TOKENS);
             }
             String suffix = "json:" + session.schema.hash();
+            if (!session.validation.enabled()) {
+                suffix = suffix + ":nocheck";
+            } else if (!session.validation.allowlistToken().isEmpty()) {
+                suffix = suffix + ":" + session.validation.allowlistToken();
+            }
             token = token == null || token.isBlank() ? suffix : token + suffix;
             format = config.defaultFormatId();
         }
@@ -1402,9 +1449,40 @@ public final class GenerationService {
         return raw.length() <= 64 ? raw : raw.substring(0, 64);
     }
 
+    private boolean acceptCachedJson(
+            String cached,
+            JsonSession session,
+            GenerationRuntime current,
+            String prompt
+    ) {
+        if (session == null) {
+            return true;
+        }
+        if (!JsonDocuments.isObject(cached)) {
+            return false;
+        }
+        JsonDocuments.Outcome outcome = JsonDocuments.read(
+                cached,
+                session.schema,
+                current.config().allowMarkup(),
+                current.config().configuredSecrets(),
+                prompt == null ? "" : prompt,
+                session.validation.enabled(),
+                session.validation.allowedActions(),
+                session.validation.actionProperty());
+        if (!outcome.valid()) {
+            return false;
+        }
+        session.json = outcome.json();
+        session.map = outcome.map();
+        session.errors = List.of();
+        return true;
+    }
+
     private static final class JsonSession {
         private final JsonSchema schema;
-        private volatile boolean repairUsed;
+        private final EffectiveResponseValidation validation;
+        private volatile int repairsUsed;
         private volatile boolean repaired;
         private volatile StructuredMode mode = StructuredMode.JSON_SCHEMA;
         private volatile String json = "";
@@ -1414,8 +1492,11 @@ public final class GenerationService {
         private volatile int firstAttempts;
         private volatile GenerationOverrides repairOverrides = GenerationOverrides.none();
 
-        private JsonSession(JsonSchema schema) {
+        private JsonSession(JsonSchema schema, EffectiveResponseValidation validation) {
             this.schema = schema;
+            this.validation = validation == null
+                    ? EffectiveResponseValidation.resolve(null, null)
+                    : validation;
         }
 
         private JsonGenerationResult toResult(GenerationResult meta) {

@@ -16,10 +16,30 @@ public final class TurnMemory {
     private long summaryUpdatedAt;
     private boolean summaryInFlight;
     private int epoch;
+    private final Runnable onChange;
+
+    public TurnMemory() {
+        this(null);
+    }
+
+    /**
+     * @param onChange runs after every change to the saved fields (lines, updated, summary).
+     *                 The fold buffer and in-flight state are not saved and do not call it.
+     */
+    TurnMemory(Runnable onChange) {
+        this.onChange = onChange;
+    }
+
+    private void changed() {
+        if (onChange != null) {
+            onChange.run();
+        }
+    }
 
     public synchronized void add(String role, String text, long nowMillis) {
         lines.add(new Line(role, text == null ? "" : text));
         updatedAt = nowMillis;
+        changed();
     }
 
     public synchronized void expire(long nowMillis, long expiryMillis) {
@@ -31,6 +51,7 @@ public final class TurnMemory {
             summaryInFlight = false;
             updatedAt = 0L;
             epoch++;
+            changed();
         }
     }
 
@@ -47,6 +68,16 @@ public final class TurnMemory {
      * in {@link #pendingView()} instead of being discarded. The kept window is unchanged.
      */
     public synchronized void trim(int turns, int maxChars, boolean fold) {
+        // trim only drops lines from the front or shortens the first one.
+        int sizeBefore = lines.size();
+        Line firstBefore = lines.isEmpty() ? null : lines.get(0);
+        trimLines(turns, maxChars, fold);
+        if (lines.size() != sizeBefore || (!lines.isEmpty() && lines.get(0) != firstBefore)) {
+            changed();
+        }
+    }
+
+    private void trimLines(int turns, int maxChars, boolean fold) {
         List<Line> dropped = fold ? new ArrayList<>() : null;
         int keepTurns = Math.max(1, turns);
         int users = 0;
@@ -142,6 +173,7 @@ public final class TurnMemory {
         this.updatedAt = updatedAt;
         this.summary = summary == null ? "" : summary;
         this.summaryUpdatedAt = this.summary.isBlank() ? 0L : summaryUpdatedAt;
+        changed();
     }
 
     public synchronized String summary() {
@@ -192,6 +224,7 @@ public final class TurnMemory {
         summary = text == null ? "" : text;
         summaryUpdatedAt = summary.isBlank() ? 0L : nowMillis;
         summaryInFlight = false;
+        changed();
         return !summary.isBlank();
     }
 
