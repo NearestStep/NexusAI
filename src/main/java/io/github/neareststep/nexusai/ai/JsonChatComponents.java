@@ -48,8 +48,8 @@ final class JsonChatComponents {
     }
 
     private static Node parseAt(String text, int start) {
-        Cursor cursor = new Cursor(text, start);
-        return parseValue(cursor, 0);
+        TextPos pos = new TextPos(text, start);
+        return parseValue(pos, 0);
     }
 
     private static boolean looksLikeComponent(Node node) {
@@ -177,118 +177,118 @@ final class JsonChatComponents {
         }
     }
 
-    private static Node parseValue(Cursor cursor, int depth) {
+    private static Node parseValue(TextPos pos, int depth) {
         if (depth > MAX_DEPTH) {
             return null;
         }
-        cursor.skipWs();
-        if (!cursor.has()) {
+        pos.skipWs();
+        if (!pos.has()) {
             return null;
         }
-        char c = cursor.peek();
+        char c = pos.peek();
         if (c == '{') {
-            return parseObject(cursor, depth);
+            return parseObject(pos, depth);
         }
         if (c == '[') {
-            return parseArray(cursor, depth);
+            return parseArray(pos, depth);
         }
         if (c == '"') {
-            return parseString(cursor);
+            return parseString(pos);
         }
         if (c == 't' || c == 'f' || c == 'n' || c == '-' || (c >= '0' && c <= '9')) {
-            return parseLiteral(cursor);
+            return parseLiteral(pos);
         }
         return null;
     }
 
-    private static Node parseObject(Cursor cursor, int depth) {
-        cursor.i++;
+    private static Node parseObject(TextPos pos, int depth) {
+        pos.i++;
         Map<String, Node> fields = new LinkedHashMap<>();
-        cursor.skipWs();
-        if (cursor.has() && cursor.peek() == '}') {
-            cursor.i++;
-            return Node.object(fields, cursor.i);
+        pos.skipWs();
+        if (pos.has() && pos.peek() == '}') {
+            pos.i++;
+            return Node.object(fields, pos.i);
         }
-        while (cursor.has()) {
-            cursor.skipWs();
-            if (!cursor.has() || cursor.peek() != '"') {
+        while (pos.has()) {
+            pos.skipWs();
+            if (!pos.has() || pos.peek() != '"') {
                 return null;
             }
-            Node key = parseString(cursor);
+            Node key = parseString(pos);
             if (key == null) {
                 return null;
             }
-            cursor.skipWs();
-            if (!cursor.has() || cursor.peek() != ':') {
+            pos.skipWs();
+            if (!pos.has() || pos.peek() != ':') {
                 return null;
             }
-            cursor.i++;
-            Node value = parseValue(cursor, depth + 1);
+            pos.i++;
+            Node value = parseValue(pos, depth + 1);
             if (value == null) {
                 return null;
             }
             fields.put(key.text, value);
-            cursor.skipWs();
-            if (!cursor.has()) {
+            pos.skipWs();
+            if (!pos.has()) {
                 return null;
             }
-            if (cursor.peek() == '}') {
-                cursor.i++;
-                return Node.object(fields, cursor.i);
+            if (pos.peek() == '}') {
+                pos.i++;
+                return Node.object(fields, pos.i);
             }
-            if (cursor.peek() != ',') {
+            if (pos.peek() != ',') {
                 return null;
             }
-            cursor.i++;
+            pos.i++;
         }
         return null;
     }
 
-    private static Node parseArray(Cursor cursor, int depth) {
-        cursor.i++;
+    private static Node parseArray(TextPos pos, int depth) {
+        pos.i++;
         List<Node> elements = new ArrayList<>();
-        cursor.skipWs();
-        if (cursor.has() && cursor.peek() == ']') {
-            cursor.i++;
-            return Node.array(elements, cursor.i);
+        pos.skipWs();
+        if (pos.has() && pos.peek() == ']') {
+            pos.i++;
+            return Node.array(elements, pos.i);
         }
-        while (cursor.has()) {
-            Node value = parseValue(cursor, depth + 1);
+        while (pos.has()) {
+            Node value = parseValue(pos, depth + 1);
             if (value == null) {
                 return null;
             }
             elements.add(value);
-            cursor.skipWs();
-            if (!cursor.has()) {
+            pos.skipWs();
+            if (!pos.has()) {
                 return null;
             }
-            if (cursor.peek() == ']') {
-                cursor.i++;
-                return Node.array(elements, cursor.i);
+            if (pos.peek() == ']') {
+                pos.i++;
+                return Node.array(elements, pos.i);
             }
-            if (cursor.peek() != ',') {
+            if (pos.peek() != ',') {
                 return null;
             }
-            cursor.i++;
+            pos.i++;
         }
         return null;
     }
 
-    private static Node parseString(Cursor cursor) {
-        cursor.i++;
+    private static Node parseString(TextPos pos) {
+        pos.i++;
         StringBuilder sb = new StringBuilder();
-        while (cursor.has()) {
-            char c = cursor.peek();
-            cursor.i++;
+        while (pos.has()) {
+            char c = pos.peek();
+            pos.i++;
             if (c == '"') {
-                return Node.string(sb.toString(), cursor.i);
+                return Node.string(sb.toString(), pos.i);
             }
             if (c == '\\') {
-                if (!cursor.has()) {
+                if (!pos.has()) {
                     return null;
                 }
-                char esc = cursor.peek();
-                cursor.i++;
+                char esc = pos.peek();
+                pos.i++;
                 switch (esc) {
                     case '"', '\\', '/' -> sb.append(esc);
                     case 'b' -> sb.append('\b');
@@ -297,12 +297,12 @@ final class JsonChatComponents {
                     case 'r' -> sb.append('\r');
                     case 't' -> sb.append('\t');
                     case 'u' -> {
-                        if (cursor.i + 4 > cursor.s.length()) {
+                        if (pos.i + 4 > pos.s.length()) {
                             return null;
                         }
                         int code = 0;
                         for (int k = 0; k < 4; k++) {
-                            int digit = Character.digit(cursor.s.charAt(cursor.i++), 16);
+                            int digit = Character.digit(pos.s.charAt(pos.i++), 16);
                             if (digit < 0) {
                                 return null;
                             }
@@ -324,31 +324,31 @@ final class JsonChatComponents {
         return null;
     }
 
-    private static Node parseLiteral(Cursor cursor) {
-        int start = cursor.i;
-        if (cursor.startsWith("true")) {
-            cursor.i += 4;
-            return Node.other(cursor.i);
+    private static Node parseLiteral(TextPos pos) {
+        int start = pos.i;
+        if (pos.startsWith("true")) {
+            pos.i += 4;
+            return Node.other(pos.i);
         }
-        if (cursor.startsWith("false")) {
-            cursor.i += 5;
-            return Node.other(cursor.i);
+        if (pos.startsWith("false")) {
+            pos.i += 5;
+            return Node.other(pos.i);
         }
-        if (cursor.startsWith("null")) {
-            cursor.i += 4;
-            return Node.other(cursor.i);
+        if (pos.startsWith("null")) {
+            pos.i += 4;
+            return Node.other(pos.i);
         }
-        if (cursor.peek() == '-') {
-            cursor.i++;
+        if (pos.peek() == '-') {
+            pos.i++;
         }
-        if (!cursor.has() || cursor.peek() < '0' || cursor.peek() > '9') {
-            cursor.i = start;
+        if (!pos.has() || pos.peek() < '0' || pos.peek() > '9') {
+            pos.i = start;
             return null;
         }
-        while (cursor.has() && isNumberChar(cursor.peek())) {
-            cursor.i++;
+        while (pos.has() && isNumberChar(pos.peek())) {
+            pos.i++;
         }
-        return Node.other(cursor.i);
+        return Node.other(pos.i);
     }
 
     private static boolean isNumberChar(char c) {
@@ -395,11 +395,11 @@ final class JsonChatComponents {
         }
     }
 
-    private static final class Cursor {
+    private static final class TextPos {
         private final String s;
         private int i;
 
-        private Cursor(String s, int i) {
+        private TextPos(String s, int i) {
             this.s = s;
             this.i = i;
         }

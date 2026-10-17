@@ -546,7 +546,7 @@ public final class SecretMask {
         Matcher matcher = pattern.matcher(text);
         matcher.useTransparentBounds(true);
         StringBuilder masked = null;
-        int cursor = 0;
+        int pos = 0;
         while (matcher.find()) {
             int start = matcher.start();
             int end = matcher.end();
@@ -565,9 +565,9 @@ public final class SecretMask {
             if (masked == null) {
                 masked = new StringBuilder();
             }
-            masked.append(text, cursor, start);
+            masked.append(text, pos, start);
             masked.append(mask(token));
-            cursor = kept;
+            pos = kept;
             if (kept < end) {
                 resume(matcher, kept, text.length());
             }
@@ -575,7 +575,7 @@ public final class SecretMask {
         if (masked == null) {
             return text;
         }
-        masked.append(text, cursor, text.length());
+        masked.append(text, pos, text.length());
         return masked.toString();
     }
 
@@ -593,25 +593,25 @@ public final class SecretMask {
      * An underscore whose next segment still looks like key material stays inside the token.
      */
     private static int trimPathTail(String text, int start, int end) {
-        int cursor = end;
-        while (cursor > start && text.charAt(cursor - 1) == '_') {
-            cursor--;
+        int pos = end;
+        while (pos > start && text.charAt(pos - 1) == '_') {
+            pos--;
         }
         while (true) {
-            int underscore = text.lastIndexOf('_', cursor - 1);
+            int underscore = text.lastIndexOf('_', pos - 1);
             if (underscore <= start) {
                 break;
             }
-            String segment = text.substring(underscore + 1, cursor);
+            String segment = text.substring(underscore + 1, pos);
             if (!isPathSegment(segment)) {
                 break;
             }
-            cursor = underscore;
-            while (cursor > start && text.charAt(cursor - 1) == '_') {
-                cursor--;
+            pos = underscore;
+            while (pos > start && text.charAt(pos - 1) == '_') {
+                pos--;
             }
         }
-        return cursor;
+        return pos;
     }
 
     private static boolean isPathSegment(String segment) {

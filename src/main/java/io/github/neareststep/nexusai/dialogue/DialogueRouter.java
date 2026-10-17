@@ -105,8 +105,8 @@ public final class DialogueRouter {
         }
         try {
         long now = clock.getAsLong();
-        // selectable() advances the player-reply round-robin cursor.
-        // A summary uses its own cursor. A pin must not take either turn.
+        // selectable() advances the player-reply round-robin index.
+        // A summary uses its own index. A pin must not take either turn.
         List<ModelQueue.Choice> choices = call.summaryPinned()
                 ? pin(currentQueue, call, now)
                 : call.kind() == DialogueEngine.CallKind.SUMMARY
@@ -747,7 +747,7 @@ public final class DialogueRouter {
      * Pinned summary calls follow {@code ModerationService.reserveDaily}: a queue row on cooldown
      * or over its daily cap is not called. A provider and model that are not in the queue are
      * called directly. This does not call {@link ModelQueue#selectable(long, boolean)}, so a pin
-     * does not advance the round-robin cursor.
+     * does not advance the round-robin index.
      */
     private static List<ModelQueue.Choice> pin(ModelQueue queue, DialogueEngine.ModelCall call, long now) {
         for (ModelQueue.Status row : queue.status(now)) {

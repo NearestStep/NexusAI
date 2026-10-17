@@ -238,7 +238,7 @@ class DialogueRouterSummaryTest {
     }
 
     @Test
-    void unpinnedSummaryFollowsRoundRobinAndAPinDoesNotMoveTheCursor() throws Exception {
+    void unpinnedSummaryFollowsRoundRobinAndAPinDoesNotMoveTheIndex() throws Exception {
         List<String> bodies = new ArrayList<>();
         HttpServer server = server(bodies, "{\"choices\":[{\"message\":{\"content\":\"folded\"}}]}");
         try {
