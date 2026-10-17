@@ -57,7 +57,7 @@ class StopDuringLoadTimingTest {
             UUID created = UUID.randomUUID();
             store.append(created, "npc_d", "user", "new player", 70L, 8, 8000, 0L);
             DialogueMemoryPersistence files = new DialogueMemoryPersistence(
-                    store, copy::toFile, () -> persisting(true), List::of, logger, System::currentTimeMillis);
+                    store, copy::toFile, () -> persisting(true), List::of, logger, () -> 1_000L);
             CountDownLatch inside = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
             MemoryStore.pauseDuringLoad = () -> {

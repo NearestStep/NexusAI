@@ -166,6 +166,7 @@ final class DialogueMemoryPersistence {
     /** Periodic save. Skipped, with one warning, when the first off-to-on load failed or hung. */
     void save() {
         try {
+            expireStale();
             writeSave(Long.MAX_VALUE);
         } catch (Throwable thrown) {
             logSkipped(thrown);
@@ -193,6 +194,7 @@ final class DialogueMemoryPersistence {
         Thread pending;
         MemoryStore.AbsentScan scan;
         try {
+            expireStale();
             memory.beginStopCount(summaries);
             synchronized (this) {
                 pending = diskLoader;
@@ -304,6 +306,18 @@ final class DialogueMemoryPersistence {
             case SAVED, SKIPPED -> {
             }
         }
+    }
+
+    /**
+     * Clears transcripts that expired while the server ran, so a save does not write them back.
+     * A cleared transcript counts as a change, so the next write drops it from the file.
+     */
+    private void expireStale() {
+        DialogueSettings current = settings.get();
+        if (current == null || !current.persistMemory()) {
+            return;
+        }
+        memory.expireStale(clock.getAsLong(), current.memoryExpiryMillis());
     }
 
     private boolean summaries() {

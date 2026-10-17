@@ -43,6 +43,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +52,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
@@ -66,6 +68,17 @@ public final class MemoryStore {
             "^dialogue-memory\\.yml\\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.tmp$");
 
     private final ConcurrentHashMap<String, TurnMemory> memories = new ConcurrentHashMap<>();
+    /** Bumped by every change to a saved field of any transcript. */
+    private final AtomicLong changes = new AtomicLong();
+    /**
+     * Value of {@link #changes} at which memory matched {@code dialogue-memory.yml} on disk,
+     * after a load or a successful save. {@code -1} when that is not known.
+     */
+    private volatile long matchesDiskAt = -1L;
+    /** Whether the file that matched was format 2 (summaries on). */
+    private volatile boolean matchesDiskFormat2;
+    /** Set by a load when masking changed the document but the masked copy was not written. */
+    private boolean maskNotWritten;
     /** Set when a broken file could not be moved aside, so a later save must not replace it. */
     private boolean saveBlocked;
     private boolean saveBlockedLogged;
@@ -167,7 +180,7 @@ public final class MemoryStore {
     }
 
     public TurnMemory get(UUID player, String characterId) {
-        return memories.computeIfAbsent(key(player, characterId), ignored -> new TurnMemory());
+        return memories.computeIfAbsent(key(player, characterId), ignored -> new TurnMemory(changes::incrementAndGet));
     }
 
     public synchronized void append(
@@ -289,6 +302,8 @@ public final class MemoryStore {
         if (abandonActiveLoad) {
             return;
         }
+        long changesBefore = changes.get();
+        maskNotWritten = false;
         YamlConfiguration yaml = readRedacting(file, secrets, logger, this);
         if (yaml == null) {
             return;
@@ -297,6 +312,9 @@ public final class MemoryStore {
         if (entries == null) {
             return;
         }
+        boolean dropped = false;
+        int published = 0;
+        Set<String> loadedKeys = new HashSet<>();
         for (String playerKey : entries.getKeys(false)) {
             UUID player;
             try {
@@ -315,6 +333,7 @@ public final class MemoryStore {
                 }
                 long updated = one.getLong("updated", 0L);
                 if (expiryMillis > 0 && updated > 0 && nowMillis - updated >= expiryMillis) {
+                    dropped = true;
                     continue;
                 }
                 List<TurnMemory.Line> lines = new ArrayList<>();
@@ -336,8 +355,66 @@ public final class MemoryStore {
                 String summary = one.getString("summary", "");
                 long summaryUpdated = summary == null || summary.isBlank() ? 0L : one.getLong("summary-updated", 0L);
                 get(player, characterId).load(lines, updated, summary, summaryUpdated);
+                published++;
+                loadedKeys.add(key(player, characterId));
             }
         }
+        noteLoadMatchesDisk(yaml, changesBefore, published, dropped, loadedKeys);
+    }
+
+    /**
+     * After a load, memory matches the file when the load dropped nothing, a masked copy (if any)
+     * was written, no other thread changed a transcript meanwhile, and every transcript with
+     * content came from this file. A stop or autosave then has nothing to write.
+     */
+    private void noteLoadMatchesDisk(
+            YamlConfiguration yaml, long changesBefore, int published, boolean dropped, Set<String> loadedKeys) {
+        if (dropped || maskNotWritten) {
+            return;
+        }
+        long now = changes.get();
+        if (now != changesBefore + published) {
+            return;
+        }
+        for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
+            if (loadedKeys.contains(entry.getKey())) {
+                continue;
+            }
+            TurnMemory other = entry.getValue();
+            if (!other.view().isEmpty() || !other.summary().isBlank()) {
+                return;
+            }
+        }
+        matchesDiskFormat2 = yaml.getInt("format", 0) >= 2;
+        matchesDiskAt = now;
+    }
+
+    /** True when memory still equals the file a load read or the last save wrote. */
+    boolean matchesDisk(File file, boolean summaries) {
+        long at = matchesDiskAt;
+        return at >= 0 && at == changes.get() && matchesDiskFormat2 == summaries && file != null && file.isFile();
+    }
+
+    /**
+     * Clears every transcript whose last update is older than {@code expiryMillis}, the same rule
+     * a load and a conversation use. Saves call this first, so an entry that expired while the
+     * server ran is not written back.
+     *
+     * @return how many transcripts were cleared
+     */
+    public int expireStale(long nowMillis, long expiryMillis) {
+        if (expiryMillis <= 0) {
+            return 0;
+        }
+        int cleared = 0;
+        for (TurnMemory memory : memories.values()) {
+            long before = memory.updatedAt();
+            memory.expire(nowMillis, expiryMillis);
+            if (before > 0 && memory.updatedAt() == 0L) {
+                cleared++;
+            }
+        }
+        return cleared;
     }
 
     /**
@@ -401,8 +478,14 @@ public final class MemoryStore {
             }
             return null;
         }
-        if (redactDocument(yaml, secrets) && rewrite(file, yaml, logger, secrets, store) && logger != null) {
-            logger.info("Masked API keys in dialogue-memory.yml");
+        if (redactDocument(yaml, secrets)) {
+            if (rewrite(file, yaml, logger, secrets, store)) {
+                if (logger != null) {
+                    logger.info("Masked API keys in dialogue-memory.yml");
+                }
+            } else if (store != null) {
+                store.maskNotWritten = true;
+            }
         }
         return yaml;
     }
@@ -578,8 +661,15 @@ public final class MemoryStore {
                 noteSaveBlocked(logger);
                 return StopSave.NOT_WRITTEN;
             }
+            if (matchesDisk(file, summaries)) {
+                return StopSave.SKIPPED;
+            }
+            long snapshot = changes.get();
             WriteResult wrote = publishYaml(
                     file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+            if (wrote == WriteResult.PUBLISHED) {
+                noteSaved(snapshot, summaries);
+            }
             return switch (wrote) {
                 case PUBLISHED -> StopSave.SAVED;
                 case PAST_DEADLINE -> StopSave.PAST_DEADLINE;
@@ -595,7 +685,15 @@ public final class MemoryStore {
             noteSaveBlocked(logger);
             return;
         }
-        publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos);
+        long snapshot = changes.get();
+        if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos) == WriteResult.PUBLISHED) {
+            noteSaved(snapshot, summaries);
+        }
+    }
+
+    private void noteSaved(long snapshot, boolean summaries) {
+        matchesDiskFormat2 = summaries;
+        matchesDiskAt = snapshot;
     }
 
     private void noteSaveBlocked(Logger logger) {
@@ -1692,6 +1790,7 @@ public final class MemoryStore {
             yaml.set("summary", transcript.summary);
             yaml.set("summary-updated", transcript.summaryUpdatedAt);
         }
+        disableLineSplit(yaml);
         String dumped = yaml.saveToString().replace("\r\n", "\n").replace("\r", "\n");
         if (dumped.endsWith("\n")) {
             dumped = dumped.substring(0, dumped.length() - 1);
@@ -1757,6 +1856,7 @@ public final class MemoryStore {
         DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
         options.setMaxSimpleKeyLength(MAX_SIMPLE_KEY);
+        options.setSplitLines(false);
         Representer representer = new Representer(options) {
             {
                 representers.put(String.class, data -> {
@@ -1789,6 +1889,23 @@ public final class MemoryStore {
             }
         } catch (ReflectiveOperationException ignored) {
             // A long id then stays a complex key. The scan measures that key at the question mark.
+        }
+        disableLineSplit(yaml);
+    }
+
+    /**
+     * Keeps each value on one line instead of folding long text at 80 columns, so a rewrite does not
+     * grow the file it read. Files written with folded lines are still read the same way.
+     */
+    private static void disableLineSplit(YamlConfiguration yaml) {
+        try {
+            Field field = YamlConfiguration.class.getDeclaredField("yamlDumperOptions");
+            field.setAccessible(true);
+            if (field.get(yaml) instanceof DumperOptions dumper) {
+                dumper.setSplitLines(false);
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // Long values are then folded as before.
         }
     }
 

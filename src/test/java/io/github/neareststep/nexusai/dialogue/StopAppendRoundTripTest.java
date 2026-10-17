@@ -151,6 +151,10 @@ class StopAppendRoundTripTest {
                 yaml.set("entries." + player + ".npc.summary-updated", 41L);
             }
             Path plain = ours.resolveSibling("plain.yml");
+            // The store keeps every value on one line; the plain save matches it with the same option.
+            java.lang.reflect.Field dumper = YamlConfiguration.class.getDeclaredField("yamlDumperOptions");
+            dumper.setAccessible(true);
+            ((org.yaml.snakeyaml.DumperOptions) dumper.get(yaml)).setSplitLines(false);
             yaml.save(plain.toFile());
             assertArrayEquals(Files.readAllBytes(plain), Files.readAllBytes(ours), summaries ? "summaries" : "plain");
             String saved = Files.readString(ours);

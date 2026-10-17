@@ -512,6 +512,10 @@ class DialogueMemoryReliabilityTest {
             writer.append(player, "npc_" + i, "user", "third line " + i, 42L, 8, 8_000, 0L);
         }
         writer.save(fixture.file.toFile(), null, false);
+        // A file from an older build: long text folded at 80 columns by a plain configuration save.
+        YamlConfiguration folded = new YamlConfiguration();
+        folded.load(fixture.file.toFile());
+        folded.save(fixture.file.toFile());
         long bytes = Files.size(fixture.file);
         assertTrue(bytes >= 11_000_000L && bytes <= 14_000_000L, "saved file is " + bytes + " bytes");
         String original = Files.readString(fixture.file);
