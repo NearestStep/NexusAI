@@ -1,5 +1,7 @@
 # NexusAI
 
+[![Join our Discord](docs/assets/discord-button.png)](https://discord.gg/uNpDrJ6wff)
+
 Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
 
 `%ainexus_cached_*%` returns a cached answer. On a miss it starts a background request when requests are allowed, and returns a stored pooled answer without removing it, or the fallback string. `%ainexus_generate_*%` removes one pooled answer, or returns the fallback string.
@@ -830,6 +832,14 @@ Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is J
 - `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
 - `api.event` / `EventDispatcher` — Bukkit events for a real model call, a character action, and a moderation flag. An event object is created only when that event has listeners.
 - `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
+
+## Community and support
+
+Questions, setup help and release news on our Discord:
+
+[![Join our Discord](docs/assets/discord-button.png)](https://discord.gg/uNpDrJ6wff)
+
+- Bug reports and feature requests: [GitHub Issues](https://github.com/NearestStep/NexusAI/issues).
 
 ## License
 
