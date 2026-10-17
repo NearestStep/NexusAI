@@ -77,6 +77,9 @@ public final class MemoryStore {
     private volatile long matchesDiskAt = -1L;
     /** Whether the file that matched was format 2 (summaries on). */
     private volatile boolean matchesDiskFormat2;
+    /** Size and modification time of the file at that point, so a hand edit is noticed. */
+    private volatile long matchesDiskSize = -1L;
+    private volatile long matchesDiskModified = Long.MIN_VALUE;
     /** Set by a load when masking changed the document but the masked copy was not written. */
     private boolean maskNotWritten;
     /** Set when a broken file could not be moved aside, so a later save must not replace it. */
@@ -359,7 +362,7 @@ public final class MemoryStore {
                 loadedKeys.add(key(player, characterId));
             }
         }
-        noteLoadMatchesDisk(yaml, changesBefore, published, dropped, loadedKeys);
+        noteLoadMatchesDisk(file, yaml, changesBefore, published, dropped, loadedKeys);
     }
 
     /**
@@ -368,7 +371,7 @@ public final class MemoryStore {
      * content came from this file. A stop or autosave then has nothing to write.
      */
     private void noteLoadMatchesDisk(
-            YamlConfiguration yaml, long changesBefore, int published, boolean dropped, Set<String> loadedKeys) {
+            File file, YamlConfiguration yaml, long changesBefore, int published, boolean dropped, Set<String> loadedKeys) {
         if (dropped || maskNotWritten) {
             return;
         }
@@ -385,14 +388,42 @@ public final class MemoryStore {
                 return;
             }
         }
+        long[] stat = stat(file);
+        if (stat == null) {
+            return;
+        }
         matchesDiskFormat2 = yaml.getInt("format", 0) >= 2;
+        matchesDiskSize = stat[0];
+        matchesDiskModified = stat[1];
         matchesDiskAt = now;
+    }
+
+    /** Size and modification time in nanoseconds, or {@code null} when the file cannot be read. */
+    private static long[] stat(File file) {
+        if (file == null) {
+            return null;
+        }
+        try {
+            java.nio.file.attribute.BasicFileAttributes attributes = Files.readAttributes(
+                    file.toPath(), java.nio.file.attribute.BasicFileAttributes.class);
+            if (!attributes.isRegularFile()) {
+                return null;
+            }
+            return new long[] {attributes.size(), attributes.lastModifiedTime().to(TimeUnit.NANOSECONDS)};
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     /** True when memory still equals the file a load read or the last save wrote. */
     boolean matchesDisk(File file, boolean summaries) {
         long at = matchesDiskAt;
-        return at >= 0 && at == changes.get() && matchesDiskFormat2 == summaries && file != null && file.isFile();
+        if (at < 0 || at != changes.get() || matchesDiskFormat2 != summaries) {
+            return false;
+        }
+        // One stat on the saving thread: a hand edit or another writer changes size or time.
+        long[] stat = stat(file);
+        return stat != null && stat[0] == matchesDiskSize && stat[1] == matchesDiskModified;
     }
 
     /**
@@ -668,7 +699,7 @@ public final class MemoryStore {
             WriteResult wrote = publishYaml(
                     file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
             if (wrote == WriteResult.PUBLISHED) {
-                noteSaved(snapshot, summaries);
+                noteSaved(file, snapshot, summaries);
             }
             return switch (wrote) {
                 case PUBLISHED -> StopSave.SAVED;
@@ -687,12 +718,19 @@ public final class MemoryStore {
         }
         long snapshot = changes.get();
         if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos) == WriteResult.PUBLISHED) {
-            noteSaved(snapshot, summaries);
+            noteSaved(file, snapshot, summaries);
         }
     }
 
-    private void noteSaved(long snapshot, boolean summaries) {
+    private void noteSaved(File file, long snapshot, boolean summaries) {
+        long[] stat = stat(file);
+        if (stat == null) {
+            matchesDiskAt = -1L;
+            return;
+        }
         matchesDiskFormat2 = summaries;
+        matchesDiskSize = stat[0];
+        matchesDiskModified = stat[1];
         matchesDiskAt = snapshot;
     }
 

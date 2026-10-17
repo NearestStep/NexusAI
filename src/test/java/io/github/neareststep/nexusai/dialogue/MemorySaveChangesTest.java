@@ -37,8 +37,14 @@ class MemorySaveChangesTest {
     private static final String LONG_TEXT =
             "the blacksmith says the old sword needs a new grip and some oil before the long trip north to the pass";
 
+    private static final MemoryStore.DiskSync ORIGINAL_SYNC = MemoryStore.diskSync;
+    private static final String SECRET = "sk-saveChangesKey1234567890";
+
     @AfterEach
     void reset() {
+        MemoryStore.durableTrace = null;
+        MemoryStore.diskSync = ORIGINAL_SYNC;
+        MemoryStore.beforeLoaderRewrite = null;
         MemoryStore.pauseDuringLoad = null;
         MemoryStore.abandonActiveLoad = false;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
@@ -57,12 +63,15 @@ class MemorySaveChangesTest {
             fx.files.onReload();
             awaitFinished(fx.files);
             assertTrue(fx.files.memoryLoadedFromDisk());
+            List<String> trace = traceWrites();
             long started = System.nanoTime();
             fx.files.shutdown();
             long elapsed = millisSince(started);
             assertArrayEquals(before, Files.readAllBytes(fx.file), "folded=" + folded);
             assertNoTempFile(fx.file.getParent());
-            assertTrue(elapsed < 1_000L, "stop took " + elapsed + " ms");
+            assertTrue(trace.isEmpty(), "stop wrote the file: " + trace);
+            // Generous bound: the point is that no rewrite ran, not the exact time.
+            assertTrue(elapsed < 5_000L, "stop took " + elapsed + " ms");
             assertNoWarnings(fx.records);
         }
     }
@@ -93,10 +102,10 @@ class MemorySaveChangesTest {
         fx.files.save();
         String saved = Files.readString(fx.file);
         assertTrue(saved.contains("fresh-line"), saved);
-        FileTime old = FileTime.fromMillis(2_000_000L);
-        Files.setLastModifiedTime(fx.file, old);
+        List<String> trace = traceWrites();
         fx.files.save();
-        assertEquals(old, Files.getLastModifiedTime(fx.file), "a second save without changes wrote again");
+        assertTrue(trace.isEmpty(), "a second save without changes wrote again: " + trace);
+        MemoryStore.durableTrace = null;
         fx.store.append(new UUID(7, 7), "npc_new", "assistant", "second-line", T0 + 6_000L, 8, 8_000, 168 * HOUR);
         fx.files.shutdown();
         assertTrue(Files.readString(fx.file).contains("second-line"));
@@ -205,6 +214,151 @@ class MemorySaveChangesTest {
         String saved = Files.readString(fx.file);
         assertTrue(saved.contains("only-in-memory"), saved);
         assertTrue(saved.contains("kept"), saved);
+    }
+
+
+    // ---- the file changed on disk ----
+
+    @Test
+    void aHandEditAfterTheLoadIsOverwrittenByTheNextSave() throws Exception {
+        Fixture fx = fixture(false);
+        writeFile(fx.file, 5, T0, false);
+        fx.files.onReload();
+        awaitFinished(fx.files);
+        String loaded = Files.readString(fx.file);
+        Files.writeString(fx.file, loaded + "# hand edit\n", StandardCharsets.UTF_8);
+        fx.files.save();
+        String saved = Files.readString(fx.file);
+        assertFalse(saved.contains("# hand edit"), "hand edit survived the save");
+        assertEquals(10, entryCount(parse(fx.file)));
+    }
+
+    @Test
+    void aSameSizeHandEditIsNoticedByItsModificationTime() throws Exception {
+        Fixture fx = fixture(false);
+        writeFile(fx.file, 5, T0, false);
+        fx.files.onReload();
+        awaitFinished(fx.files);
+        String loaded = Files.readString(fx.file);
+        String edited = loaded.replace("short reply 0", "SHORT REPLY 0");
+        assertEquals(loaded.length(), edited.length());
+        FileTime modified = Files.getLastModifiedTime(fx.file);
+        Files.writeString(fx.file, edited, StandardCharsets.UTF_8);
+        Files.setLastModifiedTime(fx.file, FileTime.fromMillis(modified.toMillis() + 2_000L));
+        fx.files.shutdown();
+        String saved = Files.readString(fx.file);
+        assertFalse(saved.contains("SHORT REPLY 0"), "same-size hand edit survived stop");
+        assertTrue(saved.contains("short reply 0"));
+    }
+
+    @Test
+    void persistenceOffThenOnWritesMemoryOverAHandEdit() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean persist = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Path file = Files.createTempDirectory("off-on").resolve("dialogue-memory.yml");
+        writeFile(file, 5, T0, false);
+        MemoryStore store = new MemoryStore();
+        AtomicLong clock = new AtomicLong(T0 + 1_000L);
+        DialogueSettings on = persisting(false);
+        DialogueSettings off = withPersist(on, false);
+        DialogueMemoryPersistence files = new DialogueMemoryPersistence(
+                store, file::toFile, () -> persist.get() ? on : off, List::of, logger(new ArrayList<>()), clock::get);
+        files.onReload();
+        awaitFinished(files);
+        persist.set(false);
+        files.onReload();
+        Files.writeString(file, "entries: {}\n# replaced by hand while persistence was off\n", StandardCharsets.UTF_8);
+        files.save();
+        assertTrue(Files.readString(file).contains("replaced by hand"), "a save ran while persistence was off");
+        persist.set(true);
+        files.onReload();
+        files.save();
+        YamlConfiguration yaml = parse(file);
+        assertEquals(10, entryCount(yaml), Files.readString(file));
+    }
+
+    // ---- other change paths ----
+
+    @Test
+    void aSummaryOnlyChangeIsWritten() throws Exception {
+        Fixture fx = fixture(true);
+        writeFile(fx.file, 3, T0, false);
+        fx.files.onReload();
+        awaitFinished(fx.files);
+        fx.files.save();
+        UUID player = new UUID(0, 1);
+        TurnMemory memory = fx.store.get(player, "npc0");
+        assertTrue(fx.store.completeSummary(player, "npc0", "summary-only-change", T0 + 2_000L, memory.epoch()));
+        List<String> trace = traceWrites();
+        fx.files.save();
+        assertFalse(trace.isEmpty(), "a summary change was not written");
+        assertTrue(Files.readString(fx.file).contains("summary-only-change"));
+    }
+
+    @Test
+    void turningSummariesOnRewritesTheFileAsFormat2() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean summaries = new java.util.concurrent.atomic.AtomicBoolean(false);
+        Path file = Files.createTempDirectory("summary-switch").resolve("dialogue-memory.yml");
+        writeFile(file, 3, T0, false);
+        byte[] before = Files.readAllBytes(file);
+        MemoryStore store = new MemoryStore();
+        AtomicLong clock = new AtomicLong(T0 + 1_000L);
+        DialogueSettings plain = persisting(false);
+        DialogueSettings folded = persisting(true);
+        DialogueMemoryPersistence files = new DialogueMemoryPersistence(
+                store, file::toFile, () -> summaries.get() ? folded : plain, List::of, logger(new ArrayList<>()), clock::get);
+        files.onReload();
+        awaitFinished(files);
+        files.save();
+        assertArrayEquals(before, Files.readAllBytes(file), "no change and no switch should not write");
+        summaries.set(true);
+        files.save();
+        assertEquals(2, parse(file).getInt("format"), Files.readString(file));
+        assertTrue(Files.exists(file.resolveSibling("dialogue-memory.yml.bak")), "format-2 backup missing");
+    }
+
+    @Test
+    void aChangeDuringTheWriteKeepsTheStoreDirty() throws Exception {
+        Fixture fx = fixture(false);
+        writeFile(fx.file, 3, T0, false);
+        fx.files.onReload();
+        awaitFinished(fx.files);
+        UUID player = new UUID(4, 4);
+        fx.store.append(player, "npc_live", "user", "first", T0 + 2_000L, 8, 8_000, 168 * HOUR);
+        java.util.concurrent.atomic.AtomicBoolean once = new java.util.concurrent.atomic.AtomicBoolean();
+        MemoryStore.diskSync = path -> {
+            if (path.getFileName().toString().endsWith(".tmp") && once.compareAndSet(false, true)) {
+                fx.store.append(player, "npc_live", "assistant", "during-write", T0 + 3_000L, 8, 8_000, 168 * HOUR);
+            }
+        };
+        fx.files.save();
+        MemoryStore.diskSync = ORIGINAL_SYNC;
+        assertTrue(once.get());
+        assertFalse(Files.readString(fx.file).contains("during-write"), "the line was already in the snapshot");
+        fx.files.save();
+        assertTrue(Files.readString(fx.file).contains("during-write"), "a change made during the write was lost");
+    }
+
+    @Test
+    void aMaskThatWasNotWrittenAtLoadIsWrittenOnStop() throws Exception {
+        Path file = Files.createTempDirectory("mask").resolve("dialogue-memory.yml");
+        UUID player = new UUID(2, 2);
+        Files.writeString(file, "entries:\n  " + player + ":\n    npc:\n      updated: " + T0
+                + "\n      lines:\n      - role: user\n        text: my key is " + SECRET + "\n", StandardCharsets.UTF_8);
+        MemoryStore store = new MemoryStore();
+        AtomicLong clock = new AtomicLong(T0 + 1_000L);
+        DialogueSettings settings = persisting(false);
+        DialogueMemoryPersistence files = new DialogueMemoryPersistence(
+                store, file::toFile, () -> settings, () -> List.of(SECRET), logger(new ArrayList<>()), clock::get);
+        MemoryStore.beforeLoaderRewrite = () -> store.loaderMustNotPublish = true;
+        files.onReload();
+        awaitFinished(files);
+        MemoryStore.beforeLoaderRewrite = null;
+        store.loaderMustNotPublish = false;
+        assertTrue(Files.readString(file).contains(SECRET), "fixture: the masked copy should not have been written");
+        files.shutdown();
+        String saved = Files.readString(file);
+        assertFalse(saved.contains(SECRET), "stop left the unmasked key on disk");
+        assertTrue(saved.contains("my key is"), saved);
     }
 
     // ---- long values ----
@@ -343,6 +497,20 @@ class MemorySaveChangesTest {
                 d.sessionTimeoutSeconds(), d.leaveRadius(), d.maxRepliesPerSession(), d.messageCooldownMillis(),
                 d.conversationsPerPlayerPerDay(), d.maxMessageLength(), d.cacheGreeting(), d.greetingCacheSeconds(),
                 d.actionsEnabled(), d.actionLog(), d.maxActionsPerReply(), summaries, d.summaryThresholdTurns(),
+                d.summaryMaxChars(), d.summaryMaxTokens(), d.summaryProvider(), d.summaryModel());
+    }
+
+    private static List<String> traceWrites() {
+        List<String> trace = new ArrayList<>();
+        MemoryStore.durableTrace = trace;
+        return trace;
+    }
+
+    private static DialogueSettings withPersist(DialogueSettings d, boolean persist) {
+        return new DialogueSettings(d.dialogueEnabled(), d.memoryTurns(), persist, d.memoryMaxChars(), d.memoryExpiryHours(),
+                d.sessionTimeoutSeconds(), d.leaveRadius(), d.maxRepliesPerSession(), d.messageCooldownMillis(),
+                d.conversationsPerPlayerPerDay(), d.maxMessageLength(), d.cacheGreeting(), d.greetingCacheSeconds(),
+                d.actionsEnabled(), d.actionLog(), d.maxActionsPerReply(), d.summaryEnabled(), d.summaryThresholdTurns(),
                 d.summaryMaxChars(), d.summaryMaxTokens(), d.summaryProvider(), d.summaryModel());
     }
 
