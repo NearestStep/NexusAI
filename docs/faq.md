@@ -152,7 +152,7 @@ shop_tip:
 
 Until a plugin with that id is registered, startup logs `Prompt 'shop_tip' lists unknown context provider 'economy'.` The prompt still loads. The value is sanitized (markup is always removed), wrapped as player input, and becomes part of the `cached_` cache key. Round the value (`~12k`) so every coin does not open a new cache row. The class that does this for a balance is `src/test/java/io/github/neareststep/nexusai/context/ExampleBalanceProvider.java`. The prompt file is [examples/context-prompt](../examples/context-prompt/README.md).
 
-`context.enabled: false` skips every provider.
+`context.enabled: false` skips every provider. Timeouts, the thread pool, and the pause after repeated failures are described in [Limitations and best practices](limitations.md#context-provider-timeouts).
 
 ## Dialogue summaries
 
@@ -185,6 +185,8 @@ A periodic save (every 30 seconds) and the save on stop write the file only when
 
 `dialogue.memory-expiry-hours` is applied on every save as well as on load: a transcript whose last update is older than that is cleared from memory before the write, so it is not written back. If every transcript has expired, the file becomes a valid empty document (`format` and an empty `entries` section), never 0 bytes. When stop runs while the first load is still reading a large file, NexusAI only appends characters that are missing from the file; expired in-memory transcripts are not appended, and expired entries already in the file stay there until the next load, which skips them, and the next full save removes them.
 
+Stop works within a time budget only in one case: the first load after `dialogue.persist-memory` was switched from false to true with `/nai reload` is still running when the server stops. On a normal startup the file is loaded before the server finishes enabling, and stop writes without a budget. In that one case stop waits up to 1 s for the load, then has a budget of 5 s plus 1 ms for every 8 KiB of `dialogue-memory.yml`, at most 10 s, to read the keys in the file and append the characters that are only in memory. The file on disk stays whole: it is replaced only by a complete new file. If the budget runs out, those characters are not written and the log shows one warning, for example `Did not save 2 dialogue characters because it did not finish within the stop budget.` Saves every 30 seconds are skipped until that first load has finished.
+
 ## The `lang/` folder is empty
 
 On enable, NexusAI copies every bundled locale into `plugins/NexusAI/lang/` when that file is missing. An empty folder is filled. A file that is already there is not overwritten. Bundled codes: `en`, `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`.
@@ -201,7 +203,7 @@ The default is **false**. MiniMessage click and hover tags, hex colours, and JSO
 
 ## Java, Paper, and Folia
 
-Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. The jar is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. `plugin.yml` sets `folia-supported: true`.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. Java 25 is needed only for Paper and Folia 26.x (26.1.2 and 26.2); every other listed version runs on Java 21. The jar is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. `plugin.yml` sets `folia-supported: true`.
 
 Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
 

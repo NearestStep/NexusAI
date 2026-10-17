@@ -20,6 +20,34 @@ Built-in tokens such as `{player}`, `{world}`, `{biome}`, `{time}`, and `{weathe
 
 NexusAI 1.3.0 adds an optional helper for this: `NexusAIApi.worldContext(plugin, player)` (and an overload with `WorldContextLimits`) returns one compact `World:` block with player, world, coordinates, inventory materials, nearby block counts, and biome. It is off by default; enable it with `world-context.enabled: true` and tune `world-context.radius`, `max-blocks`, `max-block-types`, `max-inventory-items`, `max-chars`, and `cooldown-millis`. Only a short snapshot is taken on the player's region thread; sorting and formatting run on `nexusai-context-*`. The future completes with `""` when the feature is off, NexusAI is disabled, or the player is gone, so do not depend on it being non-empty, and never join it on the main thread or a region thread. `NexusAIApi.worldContextEstimatedTokens(block)` returns the token estimate. See [World context](api.md#world-context).
 
+## World context cost
+
+`NexusAIApi.worldContext` is off by default (`world-context.enabled: false`). When it is on, the snapshot (player, inventory, nearby blocks, biome) is taken on the player's region thread: the main thread on Paper, the region owner on Folia. If the caller already owns that region, the snapshot runs inside the caller's current tick. Sorting and formatting run afterwards on `nexusai-context-*`.
+
+The cost of a snapshot grows with the number of blocks it reads. The limits come from `config.yml` and are clamped by the loader. A `WorldContextLimits` override is clamped the same way:
+
+| Key | Default | Range |
+|-----|---------|-------|
+| `world-context.radius` | 2 | 0..8, a cube around the block at the player's feet |
+| `world-context.max-blocks` | 125 | 1..1331, hard cap on blocks examined |
+| `world-context.cooldown-millis` | 250 | 0..5000 |
+
+Within `cooldown-millis` a second call for the same player returns the last block without reading the world again. There is no shared per-tick budget and no merging of calls in flight: calls for the same player that arrive before the first block is ready each take their own snapshot. Keep `max-blocks` near the default if another plugin calls the helper often, and measure before raising it toward 1331.
+
+## Context provider timeouts
+
+Each `NexusContextProvider` runs on `nexusai-context-N` (2 threads, queue of 256), never on the main thread or a region thread. Three limits apply:
+
+| Limit | Default | Where |
+|-------|---------|-------|
+| Provider request | 100 ms | `NexusContextProvider.timeout()` |
+| Ceiling for one provider | 200 ms | `context.max-provider-timeout-millis` (10..1000); `timeout()` is clamped to it |
+| Whole collect | 300 ms | `context.total-timeout-millis` (10..2000) |
+
+A provider that is still running at its limit is interrupted and only its value is dropped. The other providers that finished are kept, and the request to the model goes ahead. A value that arrives after the limit is discarded and is not cached. When the whole collect reaches `total-timeout-millis`, the block is built from the providers that have finished.
+
+After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is paused for `context.suspend-seconds` (60) and the log shows `Context provider '<id>' suspended until ...`. An exception is logged as a warning, at most once per `limits.error-log-cooldown-seconds` per provider. `/nai status` lists each provider with its timeout count and state. A provider that never started because both threads were busy is skipped for that request and does not count against it.
+
 ## Validate before you act
 
 Prompt-injection protection and output sanitising reduce risk. They do not make structured answers safe to run as commands. Even when `generateJson` reports `success()` (JSON extracted and checked against your `JsonSchema`), check the values again in your plugin before changing the world: types you expect, ranges, allow-lists for action names, and strings that must not enter a command, a file name, or a path.
