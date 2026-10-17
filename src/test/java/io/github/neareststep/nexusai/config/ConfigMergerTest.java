@@ -186,7 +186,7 @@ class ConfigMergerTest {
     }
 
     @Test
-    void appendsStartupBannerWithoutTouchingUserLocale() {
+    void appendsNewTopLevelKeyWithoutTouchingUserLocale() {
         String existing = """
                 # keep
                 locale: ru
@@ -194,15 +194,15 @@ class ConfigMergerTest {
                 """;
         String defaults = """
                 locale: en
-                startup-banner: full
+                new-key: full
                 fallback: "..."
                 """;
         ConfigMerger.Result result = ConfigMerger.mergeMissing(existing, defaults);
-        assertTrue(result.addedKeys().contains("startup-banner"));
+        assertTrue(result.addedKeys().contains("new-key"));
         assertTrue(result.yaml().contains("# keep"));
         YamlConfiguration parsed = YamlConfiguration.loadConfiguration(new StringReader(result.yaml()));
         assertEquals("ru", parsed.getString("locale"));
-        assertEquals("full", parsed.getString("startup-banner"));
+        assertEquals("full", parsed.getString("new-key"));
         assertEquals("wait", parsed.getString("fallback"));
     }
 }

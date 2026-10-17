@@ -16,7 +16,6 @@ Keys appended when they are absent:
 
 | Key | Value written |
 |-----|----------------|
-| `startup-banner` | `full` |
 | `cache.enabled` | `true` |
 | `cache.max-memory-bytes` | `0` |
 | `latency.streaming.enabled` | `false` |
@@ -46,14 +45,12 @@ With the defaults, `generateJson` behaviour matches 1.2.0: one correction retry,
 ## What does not change
 
 - `prompts.yml`, `pool.yml`, and `usage.yml` stay on their current versions.
-- With the appended default, the full startup banner is printed. Set `startup-banner: compact` or `startup-banner: off` if you want less console output.
-- An unknown `startup-banner` value logs one warning and behaves as `full`.
 - The appended `latency.*` and `world-context.*` features default to off, and `cache.max-memory-bytes: 0` keeps the old `cache.max-size` limit, so behaviour matches 1.2.0 until you enable them.
 
 ## How to roll back
 
 1. Stop the server.
 2. Remove the 1.3.0 jar and put the previous jar back in `plugins/`.
-3. Leave `config.yml` in place. Older builds ignore the 1.3.0 keys (`startup-banner`, `cache.enabled`, `cache.max-memory-bytes`, `latency.*`, `world-context.*`, `plugin-api.response-validation.*`). The older merger inserts only keys that are in its own defaults and missing from the file. It does not delete extra keys. To drop the appended keys from the file, restore the `config.yml.bak` written by the 1.3.0 start (the log line `Backed up config.yml to …` names it).
+3. Leave `config.yml` in place. Older builds ignore the 1.3.0 keys (`cache.enabled`, `cache.max-memory-bytes`, `latency.*`, `world-context.*`, `plugin-api.response-validation.*`). The older merger inserts only keys that are in its own defaults and missing from the file. It does not delete extra keys. To drop the appended keys from the file, restore the `config.yml.bak` written by the 1.3.0 start (the log line `Backed up config.yml to …` names it).
 
 Do not change `config-version` to force another migration. It stays 2 on both sides of this upgrade once the 1.3.0 start has run.

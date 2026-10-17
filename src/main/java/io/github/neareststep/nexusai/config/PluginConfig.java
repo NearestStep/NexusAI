@@ -140,8 +140,6 @@ public final class PluginConfig {
     private Map<String, QuotaSettings.GroupLimit> quotaGroups = Map.of();
     private Map<String, QuotaSettings.ConsumerLimit> quotaConsumers = Map.of();
     private final List<String> quotaWarnings = new ArrayList<>();
-    private StartupBannerMode startupBannerMode = StartupBannerMode.FULL;
-    private String startupBannerWarning;
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -157,7 +155,6 @@ public final class PluginConfig {
         pluginApiWarnings.clear();
         quotaWarnings.clear();
         knowledgeWarnings.clear();
-        startupBannerWarning = null;
 
         this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
         this.model = config.getString("api.model", "gpt-4o-mini");
@@ -258,20 +255,7 @@ public final class PluginConfig {
         readHttpLimits(config);
         readPluginApi(config);
         readQuotas(config);
-        readStartupBanner(config);
         noteShortKeys();
-    }
-
-    private void readStartupBanner(FileConfiguration config) {
-        String raw = config.getString("startup-banner", "full");
-        StartupBannerMode parsed = StartupBannerMode.parse(raw);
-        if (parsed == null) {
-            this.startupBannerMode = StartupBannerMode.FULL;
-            this.startupBannerWarning = "Unknown startup-banner '" + raw + "'. Using full.";
-        } else {
-            this.startupBannerMode = parsed;
-            this.startupBannerWarning = null;
-        }
     }
 
     private void readQuotas(FileConfiguration config) {
@@ -1493,19 +1477,6 @@ public final class PluginConfig {
     /** Daily caps. Enforcement uses this only when {@link QuotaSettings#enabled()} is true. */
     public QuotaSettings quotaSettings() {
         return new QuotaSettings(quotasEnabled, serverTokensPerDay, playerTokensPerDay, quotaGroups, quotaConsumers);
-    }
-
-    /** {@code startup-banner}. Missing or blank means {@link StartupBannerMode#FULL}. */
-    public StartupBannerMode startupBannerMode() {
-        return startupBannerMode == null ? StartupBannerMode.FULL : startupBannerMode;
-    }
-
-    /**
-     * Non-null when {@code startup-banner} is not {@code full}, {@code compact}, or {@code off}.
-     * The plugin logs it once per startup and per {@code /nai reload}.
-     */
-    public String startupBannerWarning() {
-        return startupBannerWarning;
     }
 
     /**

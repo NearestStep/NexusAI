@@ -837,6 +837,90 @@ class ConfigMigrationTest {
         assertFalse(again.changed());
     }
 
+    /**
+     * 1.3.0 development builds had a {@code startup-banner} key. The banner is now always printed,
+     * so an old file with that key must start without a warning, an error, a rewrite, or a backup.
+     */
+    @Test
+    void oldStartupBannerKeyIsIgnoredSilently() throws Exception {
+        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        assertFalse(defaults.contains("startup-banner"));
+        for (String value : List.of("full", "compact", "off", "loud")) {
+            String original = defaults.replace("locale: en\n",
+                    "locale: en\n\n# Startup console banner\nstartup-banner: " + value + "\n");
+            assertTrue(original.contains("startup-banner: " + value));
+            Path dir = Files.createTempDirectory("nexusai-old-banner");
+            Path file = dir.resolve("config.yml");
+            Files.writeString(file, original, StandardCharsets.UTF_8);
+            List<LogRecord> records = new ArrayList<>();
+            Logger logger = capturing("old-banner-" + UUID.randomUUID(), records);
+
+            ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
+            assertTrue(outcome.valid());
+            assertTrue(outcome.addedKeys().isEmpty(), outcome.addedKeys().toString());
+            assertEquals(null, outcome.backup());
+            assertEquals(original, Files.readString(file, StandardCharsets.UTF_8));
+            try (var listing = Files.list(dir)) {
+                assertEquals(1, listing.count());
+            }
+            assertTrue(records.isEmpty(), records.stream().map(LogRecord::getMessage).toList().toString());
+            assertEquals(warnings(new PluginConfig(load(defaults))), warnings(new PluginConfig(load(original))));
+        }
+
+        String versionOne = V06 + "startup-banner: off\n";
+        Path dir = Files.createTempDirectory("nexusai-old-banner-v1");
+        Path file = dir.resolve("config.yml");
+        Files.writeString(file, versionOne, StandardCharsets.UTF_8);
+        List<LogRecord> records = new ArrayList<>();
+        ConfigStartup.Outcome migrated = ConfigStartup.prepareConfig(
+                file, defaults, capturing("old-banner-v1-" + UUID.randomUUID(), records));
+        assertTrue(migrated.valid());
+        assertFalse(migrated.addedKeys().contains("startup-banner"));
+        assertTrue(records.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()),
+                records.stream().map(LogRecord::getMessage).toList().toString());
+        YamlConfiguration written = load(Files.readString(file, StandardCharsets.UTF_8));
+        assertEquals(ConfigVersions.CONFIG, written.getInt("config-version"));
+        assertEquals("groq", written.getString("api.provider"));
+        assertEquals(
+                warnings(new PluginConfig(load(Files.readString(file).replace("startup-banner: off\n", "")))),
+                warnings(new PluginConfig(written)));
+    }
+
+    private static Logger capturing(String name, List<LogRecord> records) {
+        Logger logger = Logger.getLogger(name);
+        logger.setUseParentHandlers(false);
+        logger.addHandler(new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        });
+        return logger;
+    }
+
+    private static List<Object> warnings(PluginConfig config) {
+        return List.of(
+                String.valueOf(config.credentialWarning()),
+                String.valueOf(config.groqUnlimitedOutputWarning()),
+                String.valueOf(config.modelQueueStrategyWarning()),
+                config.knowledgeWarnings(),
+                config.missingEnvVars(),
+                config.keyFileWarnings(),
+                config.httpLimitWarnings(),
+                config.pluginApiWarnings(),
+                config.quotaWarnings(),
+                config.shortKeyWarnings(),
+                config.structuredOutputWarnings());
+    }
+
     private static YamlConfiguration load(String yaml) {
         YamlConfiguration parsed = new YamlConfiguration();
         try {

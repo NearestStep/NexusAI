@@ -4,7 +4,6 @@ import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
-import io.github.neareststep.nexusai.config.StartupBannerMode;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -23,7 +22,7 @@ import java.util.Objects;
  * Startup console banner. Each line is one {@link ConsoleCommandSender#sendMessage}
  * with no {@code [NexusAI]} prefix (Paper's root logger only adds {@code [HH:MM:SS INFO]: }).
  */
-public final class StartupBanner {
+public final class ConsoleBanner {
 
     /** Brand title colour from mockup v11 ({@code #00C5C2}). */
     public static final TextColor BRAND = TextColor.color(0x00C5C2);
@@ -44,7 +43,7 @@ public final class StartupBanner {
 
     private static final String SEPARATOR = "─".repeat(MAX_CONTENT_COLS);
 
-    private StartupBanner() {
+    private ConsoleBanner() {
     }
 
     /**
@@ -110,12 +109,12 @@ public final class StartupBanner {
         }
     }
 
-    public static void print(StartupBannerMode mode, Snapshot snapshot) {
-        if (mode == null || mode == StartupBannerMode.OFF || snapshot == null) {
+    public static void print(Snapshot snapshot) {
+        if (snapshot == null) {
             return;
         }
         ConsoleCommandSender console = Bukkit.getConsoleSender();
-        for (Component line : components(mode, snapshot)) {
+        for (Component line : components(snapshot)) {
             console.sendMessage(line);
         }
     }
@@ -123,16 +122,12 @@ public final class StartupBanner {
     /**
      * One Adventure component per console record, including the leading empty spacer.
      */
-    public static List<Component> components(StartupBannerMode mode, Snapshot snapshot) {
-        if (mode == null || mode == StartupBannerMode.OFF || snapshot == null) {
+    public static List<Component> components(Snapshot snapshot) {
+        if (snapshot == null) {
             return List.of();
         }
         List<Component> out = new ArrayList<>();
         out.add(Component.empty());
-        if (mode == StartupBannerMode.COMPACT) {
-            out.addAll(compactSummary(snapshot));
-            return List.copyOf(out);
-        }
         for (String line : TITLE) {
             out.add(Component.text(line, BRAND));
         }
@@ -142,12 +137,9 @@ public final class StartupBanner {
     }
 
     /** Plain banner body lines for tests (no spacer). */
-    public static List<String> plainBody(StartupBannerMode mode, Snapshot snapshot) {
-        if (mode == null || mode == StartupBannerMode.OFF || snapshot == null) {
+    public static List<String> plainBody(Snapshot snapshot) {
+        if (snapshot == null) {
             return List.of();
-        }
-        if (mode == StartupBannerMode.COMPACT) {
-            return compactSummary(snapshot).stream().map(StartupBanner::plain).toList();
         }
         List<String> lines = new ArrayList<>(List.of(TITLE));
         lines.add(SEPARATOR);
@@ -173,17 +165,6 @@ public final class StartupBanner {
                         new Field("API", "v" + snapshot.apiVersion() + " + events"),
                         new Field("Quotas", snapshot.quotasEnabled() ? "on" : "off"),
                         new Field("Knowledge", knowledgeLabel(snapshot.knowledgeSelect()))),
-                summaryLine(
-                        new Field("Ready in", snapshot.readyMs() + " ms"),
-                        new Field("", GITHUB)));
-    }
-
-    private static List<Component> compactSummary(Snapshot snapshot) {
-        return List.of(
-                summaryLine(
-                        new Field("NexusAI", snapshot.version()),
-                        new Field("Paper", snapshot.paperVersion()),
-                        new Field("Java", String.valueOf(snapshot.javaFeature()))),
                 summaryLine(
                         new Field("Ready in", snapshot.readyMs() + " ms"),
                         new Field("", GITHUB)));
