@@ -15,6 +15,7 @@
 ### Fixed
 
 - When every entry in `dialogue-memory.yml` has expired, stop and periodic saves now write a valid empty document (`format` and an empty `entries` section) through the usual temporary file and atomic move, instead of leaving a 0-byte file. The next load is clean and logs no warning.
+- `dialogue-memory.yml` is written only when memory differs from it. A stop or periodic save after a load with no changes leaves the file byte for byte, including a stop that waited for a first load still in progress, so stop on a large file no longer spends time on a full rewrite. Values are written on one line, so a rewrite does not grow the file by folding long text; older folded files are read as before. Transcripts that expired while the server ran are cleared before each save and are no longer written back, and stop does not append expired in-memory transcripts.
 
 ### Documentation
 

@@ -179,6 +179,12 @@ A refused summary (rate limit, provider pause, daily cap, `HTTP queue is full`, 
 
 With `persist-memory: true`, the file stores `summary`, `summary-updated`, and `format: 2`. The first rewrite of a file that is not format 2 copies it to `dialogue-memory.yml.bak` once.
 
+## When is `dialogue-memory.yml` written, and what happens to expired transcripts?
+
+A periodic save (every 30 seconds) and the save on stop write the file only when memory differs from it. After a load that dropped nothing, with no new or changed lines, the file is left byte for byte, and stop does not rewrite it, also when stop waited for a first load that was still running. Each value is written on one line, so a rewrite does not grow a file by folding long text.
+
+`dialogue.memory-expiry-hours` is applied on every save as well as on load: a transcript whose last update is older than that is cleared from memory before the write, so it is not written back. If every transcript has expired, the file becomes a valid empty document (`format` and an empty `entries` section), never 0 bytes. When stop runs while the first load is still reading a large file, NexusAI only appends characters that are missing from the file; expired in-memory transcripts are not appended, and expired entries already in the file stay there until the next load, which skips them, and the next full save removes them.
+
 ## The `lang/` folder is empty
 
 On enable, NexusAI copies every bundled locale into `plugins/NexusAI/lang/` when that file is missing. An empty folder is filled. A file that is already there is not overwritten. Bundled codes: `en`, `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`.
