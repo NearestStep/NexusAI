@@ -34,19 +34,19 @@ dependencies {
     // 1.20.6 is the oldest server this jar runs on. Newer Paper APIs are class file 69
     // (Java 25) and would not load on Java 21. Biome and other calls stay on the 1.20.6 shape.
     compileOnly("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    compileOnly("me.clip:placeholderapi:2.11.6")
+    compileOnly("me.clip:placeholderapi:2.12.3")
 
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
     implementation("com.github.ben-manes.caffeine:caffeine:3.2.0")
 
     testImplementation("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    testImplementation("me.clip:placeholderapi:2.11.6")
+    testImplementation("me.clip:placeholderapi:2.12.3")
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     "loadtestCompileOnly"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    "loadtestCompileOnly"("me.clip:placeholderapi:2.11.6")
+    "loadtestCompileOnly"("me.clip:placeholderapi:2.12.3")
     "loadtestCompileOnly"(sourceSets.main.get().output)
     "loadtestTestImplementation"(platform("org.junit:junit-bom:5.12.1"))
     "loadtestTestImplementation"("org.junit.jupiter:junit-jupiter")
