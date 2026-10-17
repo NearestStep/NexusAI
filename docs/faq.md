@@ -207,7 +207,7 @@ Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 2
 
 Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
 
-On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency stays PlaceholderAPI 2.11.6.
+On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency is PlaceholderAPI 2.12.3.
 
 Call `NexusAIApi.generate` and `generateJson` from any thread. Do not join the future on the main thread or a region thread. The future completes on a NexusAI thread. To touch the world from the callback, schedule that work: the player's scheduler for that player, or the global region scheduler when there is no player. On Paper both of those are the main thread. Player state for a request (world, biome, permission groups for quotas, and `%` values in `vars:`) is read on the thread that owns the player. A foreign PlaceholderAPI expansion used from `vars:` is called on that same thread. After that call, the expansion's own thread rules apply. NexusAI does not make a third-party expansion safe on Folia. API answers still take hundreds of milliseconds to several seconds, so they are not for real-time PvP reactions — see [Limitations and best practices](limitations.md#response-latency).
 

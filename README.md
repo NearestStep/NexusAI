@@ -20,7 +20,7 @@ Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible 
 ## Requirements
 
 - Paper or Purpur **1.20.6 through 26.2**, or Folia **1.21.8, 1.21.11, 26.1.2, or 26.2**, Java **21** or newer
-- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. Folia needs PlaceholderAPI 2.11.7 or newer, because an older PlaceholderAPI does not load on Folia by itself. The plugin does not check that version at runtime. The compile-only dependency is PlaceholderAPI 2.11.6.
+- [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 2.11.6 or newer on Paper and Purpur. Folia needs PlaceholderAPI 2.11.7 or newer, because an older PlaceholderAPI does not load on Folia by itself. The plugin does not check that version at runtime. The compile-only dependency is PlaceholderAPI 2.12.3.
 - API key for an OpenAI-compatible provider, unless you use a local endpoint such as Ollama
 
 ## Compatibility
