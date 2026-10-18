@@ -113,6 +113,13 @@ public final class MemoryStore {
      */
     static volatile Runnable afterStopCount;
 
+    /**
+     * Runs with {@link #diskLock} held after a load has put the transcripts from the file into the
+     * store and before it finishes. Tests hold a load here, as a large file is still loading after
+     * its first entries are in memory. A null hook is the production path.
+     */
+    static volatile Runnable afterLoadPublish;
+
     /** When set, the next stop rename fails and the temporary file is removed. */
     static volatile boolean failNextPublish;
 
@@ -183,6 +190,12 @@ public final class MemoryStore {
     private final AtomicInteger stopWritten = new AtomicInteger(-1);
     /** Characters held in memory that stop found already in the file, or -1 outside stop. */
     private final AtomicInteger stopAlreadyInFile = new AtomicInteger(-1);
+    /**
+     * Keys of the characters held in memory when stop began, or null outside stop. The appended and
+     * already-in-file counts use only these, so characters a still-running load or a late turn puts
+     * into memory after that point are not counted.
+     */
+    private volatile Set<String> stopHeldKeys;
 
     @FunctionalInterface
     interface CorruptMove {
@@ -373,6 +386,10 @@ public final class MemoryStore {
                 published++;
                 loadedKeys.add(key(player, characterId));
             }
+        }
+        Runnable published0 = afterLoadPublish;
+        if (published0 != null) {
+            published0.run();
         }
         noteLoadMatchesDisk(file, yaml, changesBefore, published, dropped, loadedKeys);
     }
@@ -1030,7 +1047,12 @@ public final class MemoryStore {
 
     /** Characters that were only in memory when stop began. Later loads do not change the warning. */
     void beginStopCount(boolean summaries) {
-        stopUnsavedCount = unsavedCharacterCount(summaries);
+        Set<String> held;
+        synchronized (this) {
+            held = Set.copyOf(transcriptsAbsent(Set.of(), summaries).keySet());
+        }
+        stopHeldKeys = held;
+        stopUnsavedCount = held.size();
         stopWritten.set(0);
         stopAlreadyInFile.set(0);
         Runnable hook = afterStopCount;
@@ -1041,6 +1063,7 @@ public final class MemoryStore {
 
     void endStopCount() {
         stopUnsavedCount = -1;
+        stopHeldKeys = null;
         stopWritten.set(-1);
         stopAlreadyInFile.set(-1);
     }
@@ -1050,14 +1073,37 @@ public final class MemoryStore {
         return countForWarning(summaries);
     }
 
-    /** Characters stop has written to the file so far. Zero outside stop. */
+    /** Characters stop has written to the file so far, at most the held count. Zero outside stop. */
     int stopWrittenCount() {
-        return Math.max(0, stopWritten.get());
+        int written = Math.max(0, stopWritten.get());
+        int held = stopUnsavedCount;
+        return held >= 0 ? Math.min(written, held) : written;
     }
 
-    /** Characters held in memory that stop found already in the file. Zero outside stop. */
+    /**
+     * Characters held in memory that stop found already in the file. Never more than the held
+     * count minus {@link #stopWrittenCount()}, so the two add up to at most the held count. Zero
+     * outside stop.
+     */
     int stopAlreadyInFileCount() {
-        return Math.max(0, stopAlreadyInFile.get());
+        int already = Math.max(0, stopAlreadyInFile.get());
+        int held = stopUnsavedCount;
+        return held >= 0 ? Math.min(already, Math.max(0, held - stopWrittenCount())) : already;
+    }
+
+    /** How many of {@code keys} were held in memory when stop began. All of them outside stop. */
+    private int heldAtStop(Set<String> keys) {
+        Set<String> held = stopHeldKeys;
+        if (held == null) {
+            return keys.size();
+        }
+        int count = 0;
+        for (String key : keys) {
+            if (held.contains(key)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private void noteStopWritten(int count) {
@@ -1136,7 +1182,7 @@ public final class MemoryStore {
         }
         WriteResult wrote = publishEdits(file, text, edits, logger, summaries, outline.format2, secrets, deadlineNanos);
         if (wrote == WriteResult.PUBLISHED) {
-            noteStopWritten(extra.size());
+            noteStopWritten(heldAtStop(extra.keySet()));
         }
         return switch (wrote) {
             case PUBLISHED -> SpliceResult.PUBLISHED;
@@ -1250,7 +1296,7 @@ public final class MemoryStore {
         }
         WriteResult appended = publishYamlLocked(file, yaml, logger, summaries, deadlineNanos);
         if (appended == WriteResult.PUBLISHED) {
-            noteStopWritten(extra.size());
+            noteStopWritten(heldAtStop(extra.keySet()));
         }
         return switch (appended) {
             case PUBLISHED -> FullAppend.PUBLISHED;
@@ -2448,8 +2494,21 @@ public final class MemoryStore {
         return keys;
     }
 
-    /** Characters with lines or a summary in memory whose key is already in {@code present}. */
+    /**
+     * Characters held in memory whose key is already in {@code present}. During stop only the
+     * characters held when stop began count; otherwise those with lines or a summary in memory.
+     */
     private int transcriptsPresent(Set<String> present, boolean summaries) {
+        Set<String> held = stopHeldKeys;
+        if (held != null) {
+            int count = 0;
+            for (String key : held) {
+                if (present.contains(key)) {
+                    count++;
+                }
+            }
+            return count;
+        }
         int count = 0;
         for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
             if (!present.contains(entry.getKey())) {

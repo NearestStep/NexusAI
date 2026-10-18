@@ -34,6 +34,8 @@ class StopBudgetLogTest {
         MemoryStore.beforeKeyScan = null;
         MemoryStore.abandonActiveLoad = false;
         MemoryStore.refuseSpliceEdits = null;
+        MemoryStore.afterLoadPublish = null;
+        MemoryStore.afterStopCount = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
@@ -139,6 +141,77 @@ class StopBudgetLogTest {
             assertTrue(lines.getFirst().endsWith("2 dialogue characters held in memory: appended 2, already in file 0."),
                     lines.getFirst());
         } finally {
+            release.countDown();
+            join(fixture);
+        }
+    }
+
+    /**
+     * The first load puts the file's characters into memory only after stop has taken its count.
+     * Those characters were not held when stop began, so they are neither appended nor already in
+     * the file for this line, and a character added to memory after that point is not counted either.
+     */
+    @Test
+    void charactersLoadedAfterStopBeganAreNotCounted() throws Exception {
+        assertEquals("1 dialogue character held in memory: appended 1, already in file 0.",
+                stopWhileTheLoadPublishesAfterTheCount("loaded-after-count", true));
+    }
+
+    @Test
+    void emptyMemoryAtStopIgnoresCharactersTheLoadAddsLater() throws Exception {
+        assertEquals("0 dialogue characters held in memory: appended 0, already in file 0.",
+                stopWhileTheLoadPublishesAfterTheCount("empty-at-count", false));
+    }
+
+    /**
+     * The first load puts the file's characters into memory only after stop has taken its count,
+     * and a new character arrives after that point too. None of them were held when stop began, so
+     * they are neither appended nor already in the file for this line. Returns the line's tail.
+     */
+    private static String stopWhileTheLoadPublishesAfterTheCount(String name, boolean heldBeforeStop)
+            throws Exception {
+        Fixture fixture = fixture(name, true);
+        if (heldBeforeStop) {
+            fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        }
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+        MemoryStore.afterLoadPublish = () -> {
+            published.countDown();
+            try {
+                finish.await(15, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        MemoryStore.afterStopCount = () -> {
+            release.countDown();
+            try {
+                assertTrue(published.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            fixture.store.append(fixture.player, "harbor", "user", "after-stop-began", 70L, 8, 8_000, 0L);
+        };
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 50L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            if (heldBeforeStop) {
+                assertTrue(Files.readString(fixture.file).contains("only-in-memory"));
+            }
+            List<String> lines = infos(fixture.records);
+            assertEquals(1, lines.size(), fixture.records.toString());
+            String line = lines.getFirst();
+            int at = line.indexOf(" used. ");
+            assertTrue(at > 0, line);
+            return line.substring(at + " used. ".length());
+        } finally {
+            finish.countDown();
             release.countDown();
             join(fixture);
         }
