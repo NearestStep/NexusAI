@@ -43,7 +43,7 @@ All 20 keys appended on an upgrade from 1.2.x:
 
 - `true` (default, and what is appended) prints the full console banner, the same as 1.3.0.
 - `false` prints no banner. NexusAI logs one line when enable work finishes: `[NexusAI] NexusAI enabled. Ready in N ms`.
-- Any other value logs one warning on startup and on `/nai reload` and uses `true`. The words `full` and `compact` from 1.3.0 development builds are read as `true`, and `off` as `false`.
+- Any other value logs one warning on startup and on `/nai reload` and uses `true`. The words from 1.3.0 development builds are read without a warning: `full` as `true`, and `compact` and `off` as `false` (`compact` asked for less than the full banner, so it gets the one-line output).
 
 ## How to roll back
 

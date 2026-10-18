@@ -899,7 +899,7 @@ class ConfigMigrationTest {
             assertEquals(original, Files.readString(file, StandardCharsets.UTF_8));
             assertTrue(records.isEmpty(), records.stream().map(LogRecord::getMessage).toList().toString());
             PluginConfig config = new PluginConfig(load(original));
-            assertEquals(!value.equals("false") && !value.equals("off"), config.startupBanner(), value);
+            assertEquals(value.equals("true") || value.equals("full"), config.startupBanner(), value);
             assertEquals(null, config.startupBannerWarning());
         }
     }

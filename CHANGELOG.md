@@ -2,7 +2,7 @@
 
 ## [1.3.1] - Unreleased
 
-- `startup-banner` in `config.yml` is back as a boolean. `true` (default) prints the full console banner, as in 1.3.0. `false` prints no banner and logs one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. A value that is not `true` or `false` logs one warning on startup and on `/nai reload` and uses `true`. The words `full` and `compact` from 1.3.0 development builds are read as `true`, and `off` as `false`, without a warning.
+- `startup-banner` in `config.yml` is back as a boolean. `true` (default) prints the full console banner, as in 1.3.0. `false` prints no banner and logs one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. A value that is not `true` or `false` logs one warning on startup and on `/nai reload` and uses `true`. The words from 1.3.0 development builds are read without a warning: `full` as `true`, and `compact` and `off` as `false`.
 - On startup and `/nai reload`, a missing `startup-banner` is appended as `true` from the jar default (one `config.yml.bak`, `config-version` stays 2), so a 1.3.0 config keeps the full banner. An upgrade from 1.2.x appends 20 keys: the 19 listed for 1.3.0 plus `startup-banner`. See `docs/migration-1.3.1.md`.
 
 ## [1.3.0] - 2026-10-17

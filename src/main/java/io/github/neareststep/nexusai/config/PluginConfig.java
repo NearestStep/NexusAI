@@ -277,7 +277,8 @@ public final class PluginConfig {
     /**
      * {@code true} or {@code false}. A missing or blank value is {@code true}. The words
      * {@code full}, {@code compact}, and {@code off} from 1.3.0 development builds are read as
-     * {@code true}, {@code true}, and {@code false}. Anything else is {@code null}.
+     * {@code true}, {@code false}, and {@code false}: {@code compact} asked for less than the full
+     * banner, so it maps to the one-line output. Anything else is {@code null}.
      */
     static Boolean parseStartupBanner(Object raw) {
         if (raw == null) {
@@ -288,8 +289,8 @@ public final class PluginConfig {
         }
         String text = String.valueOf(raw).trim().toLowerCase(Locale.ROOT);
         return switch (text) {
-            case "", "true", "full", "compact" -> Boolean.TRUE;
-            case "false", "off" -> Boolean.FALSE;
+            case "", "true", "full" -> Boolean.TRUE;
+            case "false", "off", "compact" -> Boolean.FALSE;
             default -> null;
         };
     }

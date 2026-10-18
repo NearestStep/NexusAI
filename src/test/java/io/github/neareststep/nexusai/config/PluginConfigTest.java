@@ -493,14 +493,14 @@ class PluginConfigTest {
 
     @Test
     void startupBannerReadsYamlTextAndOldWords() throws Exception {
-        for (String value : List.of("true", "full", "compact", "TRUE")) {
+        for (String value : List.of("true", "full", "TRUE")) {
             YamlConfiguration yaml = new YamlConfiguration();
             yaml.loadFromString("startup-banner: " + value + "\n");
             PluginConfig config = new PluginConfig(yaml);
             assertTrue(config.startupBanner(), value);
             assertNull(config.startupBannerWarning(), value);
         }
-        for (String value : List.of("false", "off", "\"off\"", "False")) {
+        for (String value : List.of("false", "off", "\"off\"", "False", "compact", "COMPACT")) {
             YamlConfiguration yaml = new YamlConfiguration();
             yaml.loadFromString("startup-banner: " + value + "\n");
             PluginConfig config = new PluginConfig(yaml);
