@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -347,6 +348,6 @@ public final class PromptImporter {
             return "";
         }
         String trimmed = requested.trim();
-        return trimmed.length() > 80 ? trimmed.substring(0, 80) : trimmed;
+        return Utf16.head(trimmed, 80);
     }
 }

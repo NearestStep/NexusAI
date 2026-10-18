@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -108,10 +109,11 @@ public final class MemoryStore {
     static volatile Runnable beforeLoaderRewrite;
 
     /**
-     * Runs just before a save or a masking rewrite turns the document into text. Tests throw from
-     * it to stand for a YAML library that rejects the document. A null hook is the production path.
+     * Runs just before a save or a masking rewrite turns a document into text, with that document.
+     * Tests throw from it to stand for a YAML library that rejects the document, or one character
+     * of it. A null hook is the production path.
      */
-    static volatile Runnable beforeDocumentDump;
+    static volatile java.util.function.Consumer<YamlConfiguration> beforeDocumentDump;
 
     /**
      * Runs on the stop thread after the unsaved-character count is taken and before stop waits.
@@ -644,10 +646,13 @@ public final class MemoryStore {
         try {
             body = dumpBody(yaml);
         } catch (RuntimeException e) {
-            if (logger != null) {
-                LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
+            body = replaceLoneSurrogates(yaml) ? dumpOrNull(yaml) : null;
+            if (body == null) {
+                if (logger != null) {
+                    LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
+                }
+                return false;
             }
-            return false;
         }
         if (store != null && store.loaderMustNotPublish) {
             return false;
@@ -829,12 +834,18 @@ public final class MemoryStore {
             try {
                 body = dumpBody(yaml);
             } catch (RuntimeException e) {
-                // Same warning as a write that fails; stop and the periodic save then also name
-                // how many characters were not saved.
-                if (logger != null) {
-                    LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
+                body = replaceLoneSurrogates(yaml) ? dumpOrNull(yaml) : null;
+                if (body == null) {
+                    body = dumpSkippingBrokenCharacters(yaml, logger);
                 }
-                return WriteResult.FAILED;
+                if (body == null) {
+                    // Same warning as a write that fails; stop and the periodic save then also
+                    // name how many characters were not saved.
+                    if (logger != null) {
+                        LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
+                    }
+                    return WriteResult.FAILED;
+                }
             }
             if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
                 return WriteResult.PAST_DEADLINE;
@@ -872,15 +883,134 @@ public final class MemoryStore {
      * Bukkit as before.
      */
     private static String dumpBody(YamlConfiguration yaml) {
-        Runnable hook = beforeDocumentDump;
+        java.util.function.Consumer<YamlConfiguration> hook = beforeDocumentDump;
         if (hook != null) {
-            hook.run();
+            hook.accept(yaml);
         }
         if (containsForcedQuote(yaml)) {
             return dumpDocument(configurationMap(yaml));
         }
         allowLongSimpleKeys(yaml);
         return yaml.saveToString();
+    }
+
+    private static String dumpOrNull(YamlConfiguration yaml) {
+        try {
+            return dumpBody(yaml);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Replaces lone surrogates in every string of {@code yaml} with U+FFFD. Memory never holds
+     * one ({@link TurnMemory.Line}), but a file can: YAML reads an escaped {@code \ud800}. Runs only
+     * after a dump failed, so a normal save does not walk the document twice.
+     *
+     * @return true when something was replaced
+     */
+    private static boolean replaceLoneSurrogates(ConfigurationSection section) {
+        boolean changed = false;
+        for (String key : section.getKeys(false)) {
+            Object value = section.get(key);
+            if (value instanceof ConfigurationSection child) {
+                changed |= replaceLoneSurrogates(child);
+                continue;
+            }
+            Object clean = withoutLoneSurrogates(value);
+            if (clean != value) {
+                section.set(key, clean);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /** {@code value} itself when it holds no lone surrogate, otherwise a cleaned copy. */
+    private static Object withoutLoneSurrogates(Object value) {
+        if (value instanceof String text) {
+            return Utf16.replaceLoneSurrogates(text);
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = null;
+            for (int i = 0; i < list.size(); i++) {
+                Object one = list.get(i);
+                Object clean = withoutLoneSurrogates(one);
+                if (clean != one && copy == null) {
+                    copy = new ArrayList<>(list);
+                }
+                if (copy != null) {
+                    copy.set(i, clean);
+                }
+            }
+            return copy == null ? value : copy;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> copy = null;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                Object clean = withoutLoneSurrogates(entry.getValue());
+                if (clean != entry.getValue() && copy == null) {
+                    copy = new LinkedHashMap<>(map);
+                }
+                if (copy != null) {
+                    copy.put(entry.getKey(), clean);
+                }
+            }
+            return copy == null ? value : copy;
+        }
+        return value;
+    }
+
+    /**
+     * After the whole document failed to dump: tries each character on its own, leaves out the
+     * ones that fail, and dumps the rest. One warning gives the count and the cause; it holds no
+     * dialogue text. Null when no single character is to blame or the rest still fails.
+     */
+    private String dumpSkippingBrokenCharacters(YamlConfiguration yaml, Logger logger) {
+        ConfigurationSection entries = yaml.getConfigurationSection("entries");
+        if (entries == null) {
+            return null;
+        }
+        List<String> skipped = new ArrayList<>();
+        RuntimeException cause = null;
+        for (String player : entries.getKeys(false)) {
+            ConfigurationSection characters = entries.getConfigurationSection(player);
+            if (characters == null) {
+                continue;
+            }
+            for (String id : characters.getKeys(false)) {
+                YamlConfiguration one = new YamlConfiguration();
+                Map<String, Object> character = new LinkedHashMap<>();
+                character.put(id, plainValue(characters.get(id)));
+                Map<String, Object> byPlayer = new LinkedHashMap<>();
+                byPlayer.put(player, character);
+                one.set("entries", byPlayer);
+                try {
+                    dumpBody(one);
+                } catch (RuntimeException e) {
+                    characters.set(id, null);
+                    skipped.add(player + "/" + id);
+                    if (cause == null) {
+                        cause = e;
+                    }
+                }
+            }
+        }
+        if (skipped.isEmpty()) {
+            return null;
+        }
+        String body = dumpOrNull(yaml);
+        if (body == null) {
+            return null;
+        }
+        if (logger != null) {
+            logger.warning(LogRedaction.summaryWithCause("Left " + skipped.size() + " dialogue "
+                    + (skipped.size() == 1 ? "character" : "characters")
+                    + " out of dialogue-memory.yml because YAML could not write them; the other characters were saved",
+                    cause, secrets()));
+            logger.fine("Dialogue characters left out of dialogue-memory.yml: " + String.join(", ", skipped));
+        }
+        return body;
     }
 
     /**
@@ -1919,6 +2049,16 @@ public final class MemoryStore {
      * document instead of dropping the other characters.
      */
     private static String characterBlock(
+            String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
+        try {
+            return characterBlockOrNull(characterId, transcript, summaries, indent, nl);
+        } catch (RuntimeException e) {
+            // A block YAML cannot write is refused like one that does not round-trip.
+            return null;
+        }
+    }
+
+    private static String characterBlockOrNull(
             String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
         if (yamlKey(characterId) != null && !transcriptNeedsQuote(transcript)) {
             String classic = classicCharacterBlock(characterId, transcript, summaries, indent, nl);

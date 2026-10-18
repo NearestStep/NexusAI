@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.api.KnowledgeSelect;
 import io.github.neareststep.nexusai.api.NexusAIApi;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
+import io.github.neareststep.nexusai.text.Utf16;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -308,6 +309,6 @@ public final class ConsoleBanner {
         if (value.length() <= budget) {
             return value;
         }
-        return value.substring(0, budget - 1) + "…";
+        return Utf16.head(value, budget - 1) + "…";
     }
 }

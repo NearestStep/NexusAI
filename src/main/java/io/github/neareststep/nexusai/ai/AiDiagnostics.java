@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.time.Duration;
 import java.util.List;
@@ -99,7 +100,7 @@ public final class AiDiagnostics {
         if (detail == null || detail.isBlank()) {
             return lead;
         }
-        String trimmed = detail.length() > 300 ? detail.substring(0, 300) + "..." : detail;
+        String trimmed = detail.length() > 300 ? Utf16.head(detail, 300) + "..." : detail;
         return lead + " " + trimmed;
     }
 }

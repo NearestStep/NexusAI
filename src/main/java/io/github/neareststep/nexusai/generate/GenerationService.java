@@ -49,6 +49,7 @@ import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
 import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.ApiStatus;
@@ -1446,7 +1447,7 @@ public final class GenerationService {
         if (raw == null) {
             return "";
         }
-        return raw.length() <= 64 ? raw : raw.substring(0, 64);
+        return Utf16.head(raw, 64);
     }
 
     private boolean acceptCachedJson(

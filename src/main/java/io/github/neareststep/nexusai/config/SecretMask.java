@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
@@ -143,7 +145,7 @@ public final class SecretMask {
         if (trimmed.length() <= SUFFIX_LENGTH) {
             return "****";
         }
-        return "****" + trimmed.substring(trimmed.length() - SUFFIX_LENGTH);
+        return "****" + Utf16.tail(trimmed, SUFFIX_LENGTH);
     }
 
     /**

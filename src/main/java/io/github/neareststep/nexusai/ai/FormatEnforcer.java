@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
 import io.github.neareststep.nexusai.config.FormatPreset;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -79,8 +80,13 @@ public final class FormatEnforcer {
             while (rest.length() > width) {
                 int space = rest.lastIndexOf(' ', width);
                 if (space <= 0) {
-                    wrapped.add(rest.substring(0, width));
-                    rest = rest.substring(width).stripLeading();
+                    // Keep a surrogate pair on one line; a width of 1 then takes the whole pair.
+                    int cut = Utf16.boundaryBefore(rest, width);
+                    if (cut == 0) {
+                        cut = Utf16.boundaryAfter(rest, width);
+                    }
+                    wrapped.add(rest.substring(0, cut));
+                    rest = rest.substring(cut).stripLeading();
                 } else {
                     wrapped.add(rest.substring(0, space));
                     rest = rest.substring(space + 1).stripLeading();
@@ -109,7 +115,7 @@ public final class FormatEnforcer {
             return text;
         }
         int space = text.lastIndexOf(' ', maxChars);
-        int cut = space > 0 ? space : maxChars;
+        int cut = space > 0 ? space : Utf16.boundaryBefore(text, maxChars);
         return text.substring(0, cut).stripTrailing();
     }
 

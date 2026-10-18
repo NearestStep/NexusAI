@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.text.Utf16;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -463,7 +464,7 @@ public final class MessageService {
         Matcher location = YAML_LOCATION.matcher(flat);
         String where = location.find() ? location.group() : "";
         if (flat.length() > 220) {
-            flat = flat.substring(0, 217).strip() + "...";
+            flat = Utf16.head(flat, 217).strip() + "...";
         }
         if (!where.isEmpty() && !flat.contains(where)) {
             flat = flat + " " + where;

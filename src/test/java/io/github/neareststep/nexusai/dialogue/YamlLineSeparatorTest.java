@@ -208,7 +208,7 @@ class YamlLineSeparatorTest {
         DialogueMemoryPersistence files = persistence(store, file, logger(records));
         files.loadedAtStartup();
         AtomicBoolean fail = new AtomicBoolean(true);
-        MemoryStore.beforeDocumentDump = () -> {
+        MemoryStore.beforeDocumentDump = document -> {
             if (fail.get()) {
                 throw new IllegalStateException("dump rejected for the test");
             }
@@ -244,7 +244,7 @@ class YamlLineSeparatorTest {
         store.append(player, "harbor", "user", "hello", NOW, 64, 1_000_000, 0L);
         DialogueMemoryPersistence files = persistence(store, file, logger(records));
         files.loadedAtStartup();
-        MemoryStore.beforeDocumentDump = () -> {
+        MemoryStore.beforeDocumentDump = document -> {
             throw new IllegalStateException("dump rejected for the test");
         };
         files.shutdown();
@@ -289,7 +289,7 @@ class YamlLineSeparatorTest {
                         text: "Key %s First\\Lsecond"
                 """.formatted(player, key), StandardCharsets.UTF_8);
         byte[] before = Files.readAllBytes(file);
-        MemoryStore.beforeDocumentDump = () -> {
+        MemoryStore.beforeDocumentDump = document -> {
             throw new IllegalStateException("dump rejected for the test");
         };
         List<LogRecord> records = new ArrayList<>();
