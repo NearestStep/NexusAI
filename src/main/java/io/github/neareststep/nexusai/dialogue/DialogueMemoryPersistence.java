@@ -277,7 +277,8 @@ final class DialogueMemoryPersistence {
         long kib = (Math.max(0L, fileBytes) + 1023L) / 1024L;
         return "Stop ran during the first dialogue memory load and used the stop budget: "
                 + budgetMillis + " ms for a " + kib + " KiB dialogue-memory.yml, " + usedMillis + " ms used. "
-                + held + " dialogue characters held in memory: appended " + appended
+                + held + (held == 1 ? " dialogue character" : " dialogue characters")
+                + " held in memory: appended " + appended
                 + ", already in file " + alreadyInFile + ".";
     }
 

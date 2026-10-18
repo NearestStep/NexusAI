@@ -117,6 +117,14 @@ public final class MemoryStore {
     static volatile boolean failNextPublish;
 
     /**
+     * Asked once per stop splice after the characters already in the file are counted. Returning
+     * true makes the splice behave as if the file layout could not be edited in place, which is the
+     * {@code null} result of {@code editsAbsent}. Tests use it to reach the full-document save. A
+     * null hook is the production path.
+     */
+    static volatile java.util.function.BooleanSupplier refuseSpliceEdits;
+
+    /**
      * Set when stop gives up on a load that is still reading. The load returns without
      * replacing the file and without logging a second failure.
      */
@@ -697,7 +705,7 @@ public final class MemoryStore {
                 return StopSave.NOT_WRITTEN;
             }
             if (matchesDisk(file, summaries)) {
-                noteStopAlreadyInFile(countForWarning(summaries));
+                noteStopAlreadyInFile(Math.max(0, countForWarning(summaries) - stopWrittenCount()));
                 return StopSave.SKIPPED;
             }
             long snapshot = changes.get();
@@ -707,6 +715,10 @@ public final class MemoryStore {
                 noteSaved(file, snapshot, summaries);
             }
             if (wrote == WriteResult.PUBLISHED) {
+                // The whole document was written, so every held character counts as appended.
+                // An earlier splice pass may have counted some as already in the file; drop that
+                // count so appended plus already in file never exceeds the held count.
+                stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : 0);
                 noteStopWritten(countForWarning(summaries));
             }
             return switch (wrote) {
@@ -1115,7 +1127,10 @@ public final class MemoryStore {
         if (extra.isEmpty()) {
             return SpliceResult.NOTHING;
         }
-        List<TextEdit> edits = editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
+        java.util.function.BooleanSupplier refuse = refuseSpliceEdits;
+        List<TextEdit> edits = refuse != null && refuse.getAsBoolean()
+                ? null
+                : editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
         if (edits == null) {
             return SpliceResult.FAILED;
         }

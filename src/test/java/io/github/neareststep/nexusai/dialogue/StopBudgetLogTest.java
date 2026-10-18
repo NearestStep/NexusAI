@@ -33,6 +33,7 @@ class StopBudgetLogTest {
         MemoryStore.pauseDuringLoad = null;
         MemoryStore.beforeKeyScan = null;
         MemoryStore.abandonActiveLoad = false;
+        MemoryStore.refuseSpliceEdits = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
@@ -46,9 +47,11 @@ class StopBudgetLogTest {
                 DialogueMemoryPersistence.budgetStopLine(5_012L, 96L * 1024L, 640L, 3, 1, 4));
         assertEquals("Stop ran during the first dialogue memory load and used the stop budget: "
                         + "5000 ms for a 1 KiB dialogue-memory.yml, 0 ms used. "
-                        + "1 dialogue characters held in memory: appended 0, already in file 0.",
+                        + "1 dialogue character held in memory: appended 0, already in file 0.",
                 DialogueMemoryPersistence.budgetStopLine(5_000L, 1L, 0L, 0, 0, 1));
-        assertTrue(DialogueMemoryPersistence.budgetStopLine(5_000L, 0L, 0L, 0, 0, 0).contains(" 0 KiB "));
+        String empty = DialogueMemoryPersistence.budgetStopLine(5_000L, 0L, 0L, 0, 0, 0);
+        assertTrue(empty.contains(" 0 KiB "), empty);
+        assertTrue(empty.endsWith(" 0 dialogue characters held in memory: appended 0, already in file 0."), empty);
     }
 
     @Test
@@ -94,11 +97,47 @@ class StopBudgetLogTest {
             assertEquals(new String(before, StandardCharsets.UTF_8), Files.readString(fixture.file));
             List<String> lines = infos(fixture.records);
             assertEquals(1, lines.size(), fixture.records.toString());
-            assertTrue(lines.getFirst().endsWith("1 dialogue characters held in memory: appended 0, already in file 1."),
+            assertTrue(lines.getFirst().endsWith("1 dialogue character held in memory: appended 0, already in file 1."),
                     lines.getFirst());
             assertEquals(0, fixture.records.stream()
                     .filter(r -> r.getLevel() == Level.WARNING && r.getMessage().startsWith("Did not save "))
                     .count(), fixture.records.toString());
+        } finally {
+            release.countDown();
+            join(fixture);
+        }
+    }
+
+    /**
+     * The splice counts one character as already in the file, then cannot edit the file in place.
+     * Stop waits for the load and writes the whole document, so both characters are appended and
+     * the already-in-file count from the splice must not be added on top.
+     */
+    @Test
+    void fullDocumentSaveAfterARefusedSpliceKeepsTheCountsWithinTheHeldCount() throws Exception {
+        Fixture fixture = fixture("refused-splice", true);
+        fixture.store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+        java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+        MemoryStore.refuseSpliceEdits = () -> {
+            refused.incrementAndGet();
+            release.countDown();
+            return true;
+        };
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertEquals(1, refused.get(), fixture.records.toString());
+            String written = Files.readString(fixture.file);
+            assertTrue(written.contains("only-in-memory"), written);
+            List<String> lines = infos(fixture.records);
+            assertEquals(1, lines.size(), fixture.records.toString());
+            assertTrue(lines.getFirst().endsWith("2 dialogue characters held in memory: appended 2, already in file 0."),
+                    lines.getFirst());
         } finally {
             release.countDown();
             join(fixture);
@@ -130,7 +169,7 @@ class StopBudgetLogTest {
             List<String> lines = infos(fixture.records);
             assertEquals(1, lines.size(), fixture.records.toString());
             assertTrue(lines.getFirst().contains("used the stop budget: 200 ms for a "), lines.getFirst());
-            assertTrue(lines.getFirst().endsWith("1 dialogue characters held in memory: appended 0, already in file 0."),
+            assertTrue(lines.getFirst().endsWith("1 dialogue character held in memory: appended 0, already in file 0."),
                     lines.getFirst());
             assertEquals(1, fixture.records.stream()
                     .filter(r -> r.getLevel() == Level.WARNING && r.getMessage().startsWith("Did not save 1 "))
