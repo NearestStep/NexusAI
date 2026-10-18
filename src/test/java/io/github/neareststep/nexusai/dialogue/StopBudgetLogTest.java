@@ -36,6 +36,7 @@ class StopBudgetLogTest {
         MemoryStore.refuseSpliceEdits = null;
         MemoryStore.afterLoadPublish = null;
         MemoryStore.afterStopCount = null;
+        MemoryStore.beforeReplace = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
@@ -161,6 +162,146 @@ class StopBudgetLogTest {
     void emptyMemoryAtStopIgnoresCharactersTheLoadAddsLater() throws Exception {
         assertEquals("0 dialogue characters held in memory: appended 0, already in file 0.",
                 stopWhileTheLoadPublishesAfterTheCount("empty-at-count", false));
+    }
+
+    /**
+     * Two characters are held when stop begins: blacksmith is already in the file, innkeeper is
+     * not. After the count, the load puts blacksmith and miller from the file into memory, and a
+     * new character, harbor, arrives. Only innkeeper is appended and only blacksmith is already in
+     * the file. Counting harbor as appended (no snapshot filter where appended characters are
+     * counted) gives "appended 2, already in file 0".
+     */
+    @Test
+    void lateCharactersInAndOutOfTheFileDoNotChangeAppendedOrAlreadyInFile() throws Exception {
+        assertEquals("2 dialogue characters held in memory: appended 1, already in file 1.",
+                stopWithLateCharacters("late-in-and-out", false));
+    }
+
+    /**
+     * The same stop, but the splice crosses the budget before it can replace the file, so nothing
+     * is appended. Only blacksmith is already in the file. Counting miller, which the load put into
+     * memory after the count, (no snapshot filter where already-in-file characters are counted)
+     * gives "already in file 2"; the cap at held minus appended does not hide that.
+     */
+    @Test
+    void lateFileCharacterIsNotAlreadyInFileWhenNothingIsAppended() throws Exception {
+        assertEquals("2 dialogue characters held in memory: appended 0, already in file 1.",
+                stopWithLateCharacters("late-past-budget", true));
+    }
+
+    private static String stopWithLateCharacters(String name, boolean crossBudget) throws Exception {
+        Fixture fixture = fixture(name, true);
+        Files.writeString(fixture.file, """
+                entries:
+                  %s:
+                    blacksmith:
+                      updated: 50
+                      lines:
+                      - role: user
+                        text: kept-from-disk
+                    miller:
+                      updated: 50
+                      lines:
+                      - role: user
+                        text: miller-from-disk
+                """.formatted(fixture.player), StandardCharsets.UTF_8);
+        byte[] before = Files.readAllBytes(fixture.file);
+        fixture.store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+        MemoryStore.afterLoadPublish = () -> {
+            published.countDown();
+            try {
+                finish.await(15, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        MemoryStore.afterStopCount = () -> {
+            release.countDown();
+            try {
+                assertTrue(published.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            fixture.store.append(fixture.player, "harbor", "user", "after-stop-began", 70L, 8, 8_000, 0L);
+        };
+        if (crossBudget) {
+            DialogueMemoryPersistence.shutdownAppendBudgetMillis = 300L;
+            MemoryStore.beforeReplace = () -> {
+                try {
+                    Thread.sleep(700L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            };
+        }
+        DialogueMemoryPersistence.shutdownLoadGraceMillis = 50L;
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            String written = Files.readString(fixture.file);
+            if (crossBudget) {
+                assertEquals(new String(before, StandardCharsets.UTF_8), written);
+            } else {
+                assertTrue(written.contains("only-in-memory"), written);
+                assertTrue(written.contains("miller-from-disk"), written);
+            }
+            List<String> lines = infos(fixture.records);
+            assertEquals(1, lines.size(), fixture.records.toString());
+            String line = lines.getFirst();
+            int at = line.indexOf(" used. ");
+            assertTrue(at > 0, line);
+            return line.substring(at + " used. ".length());
+        } finally {
+            finish.countDown();
+            release.countDown();
+            join(fixture);
+        }
+    }
+
+    /**
+     * The getters cap what the log line shows: appended at the held count, and already in file at
+     * the held count minus appended. Raw counts above the held count are set directly.
+     */
+    @Test
+    void stopCountsAreCappedAtTheHeldCount() throws Exception {
+        MemoryStore store = new MemoryStore();
+        UUID player = UUID.randomUUID();
+        store.append(player, "blacksmith", "user", "one", 70L, 8, 8_000, 0L);
+        store.append(player, "innkeeper", "user", "two", 70L, 8, 8_000, 0L);
+        java.lang.reflect.Field writtenField = MemoryStore.class.getDeclaredField("stopWritten");
+        java.lang.reflect.Field alreadyField = MemoryStore.class.getDeclaredField("stopAlreadyInFile");
+        writtenField.setAccessible(true);
+        alreadyField.setAccessible(true);
+        java.util.concurrent.atomic.AtomicInteger written =
+                (java.util.concurrent.atomic.AtomicInteger) writtenField.get(store);
+        java.util.concurrent.atomic.AtomicInteger already =
+                (java.util.concurrent.atomic.AtomicInteger) alreadyField.get(store);
+        store.beginStopCount(false);
+        try {
+            assertEquals(2, store.stopHeldCount(false));
+            written.set(5);
+            already.set(7);
+            assertEquals(2, store.stopWrittenCount());
+            assertEquals(0, store.stopAlreadyInFileCount());
+            written.set(1);
+            assertEquals(1, store.stopWrittenCount());
+            assertEquals(1, store.stopAlreadyInFileCount());
+            written.set(0);
+            already.set(3);
+            assertEquals(0, store.stopWrittenCount());
+            assertEquals(2, store.stopAlreadyInFileCount());
+        } finally {
+            store.endStopCount();
+        }
+        assertEquals(0, store.stopWrittenCount());
+        assertEquals(0, store.stopAlreadyInFileCount());
     }
 
     /**
