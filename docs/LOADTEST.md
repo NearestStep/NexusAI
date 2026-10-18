@@ -49,7 +49,7 @@ naiload <scenario> <rate> <seconds> <viewers>
 
 The report is `plugins/NexusAI-LoadDriver/report.json`. The harness copies it to `load-out/report-<scenario>.json` and writes `load-out/report.json` plus `load-out/jfr-summary.txt`.
 
-CI (`.github/workflows/build.yml`, job `load`) runs `S1,S1-keywords,S2,S2-probe,S3,S6,S-pool` on Paper 1.20.6 (Java 21) and 26.2 (Java 25), `timeout-minutes: 30`. S2-over stays local. Artifacts: `report.json`, `mock-requests.jsonl`, `jfr-summary.txt`. A pull request runs build and smoke, not this job. The load job still runs only on `workflow_dispatch` or a `v*` tag.
+CI (`.github/workflows/build.yml`, job `load`) runs `S1,S1-keywords,S2,S2-probe,S3,S6,S-pool` on Paper 1.20.6 (Java 21) and 26.2 (Java 25), `timeout-minutes: 30`. S2-over stays local. Artifacts: `report.json`, `mock-requests.jsonl`, `jfr-summary.txt`. In `NearestStep/NexusAI` a pull request runs build and smoke, not this job. The load job still runs only on `workflow_dispatch` or a `v*` tag. In any other copy of the repository (a fork or the development copy) CI saves Actions minutes: a push runs no job, a pull request runs build and unit tests only and a newer commit cancels the older run, and the Paper/Folia smoke matrix runs on `workflow_dispatch` or on the next push to a pull request labeled `full-ci`.
 
 ## What is measured
 

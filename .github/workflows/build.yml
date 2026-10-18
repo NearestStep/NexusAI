@@ -5,8 +5,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The public repository NearestStep/NexusAI runs everything on every push and pull request.
+# Any other copy (the private development repository) saves Actions minutes:
+# - a push runs nothing, the pull request run covers it;
+# - a pull request runs build and unit tests only, and a newer commit cancels the older run;
+# - the Paper/Folia smoke matrix runs on workflow_dispatch or on a pull request labeled full-ci
+#   (the label is read on the next push to the pull request);
+# - the load job keeps its own rule: workflow_dispatch or a v* tag.
+concurrency:
+  group: ${{ github.repository == 'NearestStep/NexusAI' && format('ci-{0}', github.run_id) || format('ci-{0}-{1}', github.event_name, github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ github.repository != 'NearestStep/NexusAI' }}
+
 jobs:
   build:
+    if: github.repository == 'NearestStep/NexusAI' || github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +50,7 @@ jobs:
   smoke:
     name: Paper ${{ matrix.mc }} (Java ${{ matrix.java }})
     needs: build
+    if: github.repository == 'NearestStep/NexusAI' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -78,6 +91,7 @@ jobs:
   folia-smoke:
     name: Folia ${{ matrix.mc }} (Java ${{ matrix.java }})
     needs: build
+    if: github.repository == 'NearestStep/NexusAI' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
