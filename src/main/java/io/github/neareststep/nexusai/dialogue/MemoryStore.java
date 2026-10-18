@@ -108,6 +108,12 @@ public final class MemoryStore {
     static volatile Runnable beforeLoaderRewrite;
 
     /**
+     * Runs just before a save or a masking rewrite turns the document into text. Tests throw from
+     * it to stand for a YAML library that rejects the document. A null hook is the production path.
+     */
+    static volatile Runnable beforeDocumentDump;
+
+    /**
      * Runs on the stop thread after the unsaved-character count is taken and before stop waits.
      * Tests add characters here. A null hook is the production path.
      */
@@ -634,8 +640,15 @@ public final class MemoryStore {
         if (store != null && store.loaderMustNotPublish) {
             return false;
         }
-        allowLongSimpleKeys(yaml);
-        String body = yaml.saveToString();
+        String body;
+        try {
+            body = dumpBody(yaml);
+        } catch (RuntimeException e) {
+            if (logger != null) {
+                LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
+            }
+            return false;
+        }
         if (store != null && store.loaderMustNotPublish) {
             return false;
         }
@@ -813,11 +826,15 @@ public final class MemoryStore {
                 }
             }
             String body;
-            if (containsForcedQuote(yaml)) {
-                body = dumpDocument(configurationMap(yaml));
-            } else {
-                allowLongSimpleKeys(yaml);
-                body = yaml.saveToString();
+            try {
+                body = dumpBody(yaml);
+            } catch (RuntimeException e) {
+                // Same warning as a write that fails; stop and the periodic save then also name
+                // how many characters were not saved.
+                if (logger != null) {
+                    LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
+                }
+                return WriteResult.FAILED;
             }
             if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
                 return WriteResult.PAST_DEADLINE;
@@ -847,6 +864,23 @@ public final class MemoryStore {
             }
             return WriteResult.FAILED;
         }
+    }
+
+    /**
+     * The text of {@code yaml}. A document with a string that has to be escaped (line separators
+     * and other controls) goes through {@link #dumpDocument(Map)}; any other document is written by
+     * Bukkit as before.
+     */
+    private static String dumpBody(YamlConfiguration yaml) {
+        Runnable hook = beforeDocumentDump;
+        if (hook != null) {
+            hook.run();
+        }
+        if (containsForcedQuote(yaml)) {
+            return dumpDocument(configurationMap(yaml));
+        }
+        allowLongSimpleKeys(yaml);
+        return yaml.saveToString();
     }
 
     /**
@@ -2011,7 +2045,9 @@ public final class MemoryStore {
                     } else if (value.indexOf('\n') >= 0) {
                         style = DumperOptions.ScalarStyle.LITERAL;
                     } else {
-                        style = null;
+                        // PLAIN is a request: the emitter quotes the value when a plain scalar
+                        // would not read back as the same string. SnakeYAML 2.6 rejects a null style.
+                        style = DumperOptions.ScalarStyle.PLAIN;
                     }
                     return representScalar(Tag.STR, value, style);
                 });

@@ -527,6 +527,9 @@ public final class DialogueEngine {
         if (text == null) {
             return;
         }
+        if ("assistant".equals(role)) {
+            text = normalizeLineBreaks(text);
+        }
         DialogueSettings settings = request.settings();
         memory.append(
                 request.playerId(),
@@ -539,6 +542,17 @@ public final class DialogueEngine {
                 settings.memoryExpiryMillis(),
                 settings.summaryEnabled()
         );
+    }
+
+    /**
+     * Model replies and greetings keep {@code \n} as their only line break in memory: {@code \r\n}
+     * and a lone {@code \r} become {@code \n}.
+     */
+    static String normalizeLineBreaks(String text) {
+        if (text.indexOf('\r') < 0) {
+            return text;
+        }
+        return text.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     /**

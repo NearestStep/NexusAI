@@ -1,6 +1,6 @@
 package io.github.neareststep.nexusai.dialogue;
 
-import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.config.LogRedaction;
 
 import java.io.File;
 import java.util.List;
@@ -396,11 +396,11 @@ final class DialogueMemoryPersistence {
         return values == null ? List.of() : List.copyOf(values);
     }
 
+    /**
+     * A save that threw. It is a warning, like a write that fails, so a save that keeps failing is
+     * not silent. The message is masked and holds no dialogue text.
+     */
     private void logSkipped(Throwable thrown) {
-        if (logger == null) {
-            return;
-        }
-        logger.fine("Skipped dialogue memory save: "
-                + SecretMask.redactUrl(String.valueOf(thrown.getMessage()), secretList()));
+        LogRedaction.warning(logger, "Skipped dialogue memory save", thrown, secretList());
     }
 }

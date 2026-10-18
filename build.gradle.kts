@@ -133,6 +133,29 @@ tasks {
         options.release.set(21)
     }
 
+    // Bukkit's YAML comes from the server: SnakeYAML 2.2 on Paper 1.20.6 to 1.21.x and Folia,
+    // 2.6 on Paper 26.2. These runs repeat the unit tests on each, so a dump that one of them
+    // rejects fails check.
+    for ((suffix, snakeYaml) in listOf("22" to "2.2", "26" to "2.6")) {
+        val runtime = configurations.testRuntimeClasspath.get().copyRecursive().apply {
+            resolutionStrategy.force("org.yaml:snakeyaml:$snakeYaml")
+        }
+        val run = register<Test>("testSnakeYaml$suffix") {
+            group = "verification"
+            description = "Unit tests with SnakeYAML $snakeYaml."
+            testClassesDirs = sourceSets.test.get().output.classesDirs
+            classpath = sourceSets.test.get().output + sourceSets.main.get().output + runtime
+            useJUnitPlatform()
+            systemProperty("nexusai.test.snakeyaml", snakeYaml)
+            minHeapSize = System.getenv("NEXUS_TEST_MIN_HEAP") ?: "512m"
+            maxHeapSize = System.getenv("NEXUS_TEST_MAX_HEAP") ?: "1g"
+            shouldRunAfter(test)
+        }
+        check {
+            dependsOn(run)
+        }
+    }
+
     register<Test>("loadtestTest") {
         group = "verification"
         description = "Self-check for the Paper load driver."

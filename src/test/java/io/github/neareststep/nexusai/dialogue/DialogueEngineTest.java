@@ -248,6 +248,24 @@ class DialogueEngineTest {
     }
 
     @Test
+    void carriageReturnsInAModelReplyAreStoredAsNewlines() {
+        List<String> remembered = new ArrayList<>();
+        DialogueEngine engine = engine(reply -> {
+            for (DialogueProtocol.MemoryLine line : reply.messages()) {
+                if ("assistant".equals(line.role())) {
+                    remembered.add(line.text());
+                }
+            }
+            return DialogueEngine.ModelReply.text("First\r\nsecond\rthird\u2028fourth");
+        });
+        engine.talk(request("one", false, List.of(), settings(), 1_000L, node -> true));
+        engine.talk(request("two", false, List.of(), settings(), 10_000L, node -> true));
+        assertEquals(List.of("First\nsecond\nthird\u2028fourth"), remembered);
+        assertEquals("plain", DialogueEngine.normalizeLineBreaks("plain"));
+        assertEquals("a\n\nb\n", DialogueEngine.normalizeLineBreaks("a\r\n\rb\r"));
+    }
+
+    @Test
     void messageCooldownAndDailyConversationCap() {
         DialogueEngine engine = engine(reply -> DialogueEngine.ModelReply.text("ok"));
         DialogueSettings settings = new DialogueSettings(
