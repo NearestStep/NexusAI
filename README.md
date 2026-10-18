@@ -61,7 +61,7 @@ Without a key the plugin still loads. Remote providers log a warning and do **no
 | Section | Parameters |
 |---------|------------|
 | `locale` | Command language (`en`, `ru`, `de`, …). Missing keys fall back to English |
-| `startup-banner` | `true` (default) prints the full console banner on enable. `false` prints one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. Any other value logs a warning and uses `true`. A missing key is appended as `true` |
+| `startup-banner` | `true` (default) prints the full console banner on enable. `false` prints one line instead: `[NexusAI] NexusAI enabled. Ready in N ms`. The words from 1.3.0 development builds are read without a warning: `full` as `true` (full banner), and `compact` and `off` as `false` (no banner, the one line only). Any other value logs one warning on startup and on `/nai reload` and uses `true`, so the full banner is shown. A missing key is appended as `true` |
 | `config-version` | Schema version. Missing means 0.6.0. config.yml is version 2. The plugin migrates forward and writes `<file>.bak` first. Missing default keys are appended only after the same backup |
 | `api` | `provider`, `model`, `base-url` (empty = provider default), `key` (legacy), `system-prompt`, `temperature` (negative = omit), `max-tokens` (default **256**; `0` or a negative value omits the field), `strip-markdown`, `max-answer-chars`, `max-answer-lines`, `reasoning-effort`, `connect-timeout`, `read-timeout` |
 | `providers` | Named endpoints. Each has `type` (`openai-compatible` or `gemini`), `url`, and `api-key` (string or list). `${ENV_VAR}` and `${ENV:VAR}` are replaced in `url` and `api-key`. Optional `api-key-file` is not written into an existing config |
