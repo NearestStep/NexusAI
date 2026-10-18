@@ -6,15 +6,16 @@ Replace the previous jar with `NexusAI-1.3.1.jar` on Paper or Purpur 1.20.6 thro
 
 On startup and on `/nai reload`, when `plugins/NexusAI/config.yml` is valid YAML, missing keys are copied from the jar default. The log line is `Added missing config keys: …`. The same start writes **one** backup: `config.yml.bak`, or `config.yml.bak.<timestamp>` when that backup already exists. `config-version` stays **2**. A value you already set is not replaced, and comments you wrote stay.
 
-From 1.3.0 one key is appended:
+From 1.3.0 two keys are appended:
 
 | Key | Value written |
 |-----|----------------|
 | `startup-banner` | `true` |
+| `context.log-timeouts` | `true` |
 
-From 1.2.x straight to 1.3.1, 20 keys are appended in that one start: the 19 keys from [Migration to 1.3.0](migration-1.3.0.md) and `startup-banner`.
+From 1.2.x straight to 1.3.1, 21 keys are appended in that one start: the 19 keys from [Migration to 1.3.0](migration-1.3.0.md), `startup-banner`, and `context.log-timeouts`.
 
-All 20 keys appended on an upgrade from 1.2.x:
+All 21 keys appended on an upgrade from 1.2.x:
 
 | Key | Value written |
 |-----|----------------|
@@ -38,6 +39,7 @@ All 20 keys appended on an upgrade from 1.2.x:
 | `plugin-api.response-validation.max-retries` | `1` |
 | `plugin-api.response-validation.deliver-on-region` | `false` |
 | `startup-banner` | `true` |
+| `context.log-timeouts` | `true` |
 
 ## startup-banner
 
@@ -49,4 +51,4 @@ All 20 keys appended on an upgrade from 1.2.x:
 
 1. Stop the server.
 2. Remove the 1.3.1 jar and put the 1.3.0 jar back in `plugins/`.
-3. Leave `config.yml` in place. 1.3.0 ignores `startup-banner` and always prints the full banner. To drop the appended key from the file, restore the `config.yml.bak` written by the 1.3.1 start (the log line `Backed up config.yml to …` names it).
+3. Leave `config.yml` in place. 1.3.0 ignores `startup-banner` and `context.log-timeouts` and always prints the full banner. To drop the appended keys from the file, restore the `config.yml.bak` written by the 1.3.1 start (the log line `Backed up config.yml to …` names it).
