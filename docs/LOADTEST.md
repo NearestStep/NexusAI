@@ -39,6 +39,20 @@ python3 .github/scripts/paper-load.py \
 
 Useful flags: `--mock-latency-ms` (default 300), `--baseline-seconds` (60), `--load-seconds` (120), `--pool-seconds` (3), `--skip-jfr`. A FAIL is retried once. Two FAILs fail the process. `not-run` does not.
 
+### Downloads and cache
+
+The Paper (or Folia) jar is checked against the sha256 that the Paper API publishes for that build. The vanilla server jar that paperclip needs (`META-INF/download-context` in the Paper jar, for example `mojang_26.2.jar`) is fetched by the harness with its sha256 and placed in `server/cache/` before the first boot, so paperclip does not download it and cannot fail the boot on a truncated file. Libraries ship inside the paperclip jar. A short read or a hash mismatch deletes the file and downloads again, up to 3 attempts. Verified files are cached by hash under `$NEXUSAI_SMOKE_CACHE/sha256/` (default: `nexusai-smoke-cache` in the system temp directory). A cached file that no longer matches its hash is removed and fetched again. A file placed in the cache directory under its own name (for example `mojang_26.2.jar`) is used when its hash matches, which lets an offline host run without the download. The same code serves `paper-smoke.py` and `paper-load.py`.
+
+### Test host stalls
+
+A scenario that ran on a stalled test host is reported as `invalid`, not as `pass` or `fail`. The driver times every window with `System.nanoTime()`, so a wall clock step cannot cut a window short. During the load window it records three values in `report.json` under `hostStall`:
+
+- `maxTickGapMillis`: the longest time between two heartbeats minus the tick time Paper reported inside it. A slow tick is the server; a gap with no tick work is the host.
+- `clockDriftMillis`: how far the wall clock and the monotonic clock moved apart.
+- `windowMillis` against `expectedWindowMillis`: how far the window ran past its length.
+
+Any value above the threshold marks the scenario invalid, the driver logs `SCENARIO_INVALID <scenario> test host stall: ...`, and the harness also checks its own wall and monotonic clocks over the scenario. The threshold is `--stall-ms` (default 5000, env `LOAD_STALL_MS`), passed to the driver as `-Dnexusai.load.stallMillis`; `0` turns the check off. An invalid scenario is retried once like a FAIL. Exit code: 1 when any scenario fails, otherwise 3 when any scenario is invalid, otherwise 0. Results from invalid scenarios should be rerun, not compared.
+
 The mock is the smoke endpoint. A load run asks it to sleep, append bodies to `mock-requests.jsonl`, and speak HTTP/1.1. The smoke default stays an instant HTTP/1.0 `pong`. The canary key is `sk-canary-load-7f3a9c2e1b`. Logs show `****2e1b`.
 
 RCON command, four arguments:

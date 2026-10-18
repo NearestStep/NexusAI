@@ -58,6 +58,11 @@ def main() -> int:
     parser.add_argument("--out", default="load-out")
     parser.add_argument("--timeout", type=int, default=420, help="seconds to wait for Done")
     parser.add_argument("--skip-jfr", action="store_true")
+    parser.add_argument(
+        "--stall-ms", type=int, default=int(os.environ.get("LOAD_STALL_MS", "5000")),
+        help="a tick gap, wall/monotonic clock drift, or window overrun above this marks a scenario invalid "
+             "(test host stall) instead of pass or fail; 0 turns the check off",
+    )
     args = parser.parse_args()
     if args.self_check:
         return self_check()
@@ -104,6 +109,7 @@ def run(args, scenarios: list[str]) -> int:
     print(f"server directory {work}")
 
     paper = smoke.download_paper(args.version, work / "paper.jar")
+    smoke.seed_paperclip(work / "paper.jar", work)
     smoke.download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
     shutil.copy2(plugin, work / "plugins" / plugin.name)
     shutil.copy2(driver, work / "plugins" / driver.name)
@@ -134,7 +140,7 @@ def run(args, scenarios: list[str]) -> int:
     jfc.write_text(JFC, encoding="utf-8")
 
     log_chunks: list[str] = []
-    process = boot_process(work)
+    process = boot_process(work, args.stall_ms)
     reader = threading.Thread(target=read_log, args=(process.stdout, log_chunks), daemon=True)
     reader.start()
     bots = None
@@ -189,7 +195,12 @@ def run(args, scenarios: list[str]) -> int:
 
         write_summary(out, args, paper, results, log_chunks)
         failed = [item for item in results if item["status"] == "fail"]
-        return 1 if failed else 0
+        invalid = [item for item in results if item["status"] == "invalid"]
+        if invalid:
+            print("INVALID (test host stall): " + ", ".join(item["scenario"] for item in invalid))
+        if failed:
+            return 1
+        return 3 if invalid else 0
     finally:
         stop_bots(bots)
         try:
@@ -220,6 +231,7 @@ def execute_scenario(
     for attempt in (1, 2):
         before = len(log_chunks)
         started = time.time()
+        started_mono = time.monotonic()
         smoke.rcon(
             "127.0.0.1",
             rcon_port,
@@ -238,6 +250,7 @@ def execute_scenario(
                 jfr_note = str(error)
         wait_marker(process, log_chunks, before, f"SCENARIO_END {scenario}", seconds_for(args, scenario) + 90)
         ended = time.time()
+        ended_mono = time.monotonic()
         report_path = work / "plugins" / "NexusAI-LoadDriver" / "report.json"
         if not report_path.is_file():
             raise RuntimeError(f"{scenario} did not write report.json")
@@ -279,6 +292,10 @@ def execute_scenario(
             "mock_latency_ms": args.mock_latency_ms,
             "token_usage": read_token_usage(work),
         })
+        stall = host_stall_reasons(report, ended - started, ended_mono - started_mono, args.stall_ms)
+        if stall:
+            # A stalled host says nothing about the plugin; keep the scenario out of pass and fail.
+            judged = {"status": "invalid", "reasons": stall + [f"judged as {judged['status']}"]}
         last = {
             "scenario": scenario,
             "attempt": attempt,
@@ -292,10 +309,10 @@ def execute_scenario(
             "jfrPercent": percent(jfr_nexus, jfr_server),
             "botMessages": bot_messages,
         }
-        if judged["status"] != "fail" or attempt == 2:
+        if judged["status"] not in {"fail", "invalid"} or attempt == 2:
             shutil.copy2(saved, out / f"report-{scenario}.json")
             return last
-        print(f"{scenario} attempt {attempt} failed ({'; '.join(judged['reasons'])}); retrying once")
+        print(f"{scenario} attempt {attempt} {judged['status']} ({'; '.join(judged['reasons'])}); retrying once")
     return last
 
 
@@ -345,6 +362,25 @@ def read_jfr(path: Path, summary: Path) -> tuple[int, int]:
         encoding="utf-8",
     )
     return server, nexus
+
+
+def host_stall_reasons(report: dict, wall_seconds: float, mono_seconds: float, stall_ms: int) -> list[str]:
+    """Reasons a scenario ran on a stalled test host, from the driver report and this process's clocks.
+
+    The driver reports the largest tick gap not covered by tick work, its own wall/monotonic drift,
+    and how far the load window overran. This process adds the drift it saw between its wall and
+    monotonic clocks over the same scenario. Empty when stall_ms is 0 or nothing exceeds it.
+    """
+    if stall_ms <= 0:
+        return []
+    reasons = []
+    stall = (report or {}).get("hostStall") or {}
+    if stall.get("invalid"):
+        reasons.extend(f"test host stall: {item}" for item in stall.get("reasons") or ["reported by the driver"])
+    drift_ms = abs(wall_seconds - mono_seconds) * 1000.0
+    if drift_ms > stall_ms:
+        reasons.append(f"test host stall: harness wall and monotonic clocks drifted {drift_ms:.0f} ms > {stall_ms} ms")
+    return reasons
 
 
 def judge(scenario: str, report: dict, ctx: dict) -> dict:
@@ -894,11 +930,12 @@ def find_driver(directory: Path) -> Path:
     return jars[0]
 
 
-def boot_process(work: Path) -> subprocess.Popen:
+def boot_process(work: Path, stall_ms: int = 5000) -> subprocess.Popen:
     return subprocess.Popen(
         [
             "java",
             "-Djava.awt.headless=true",
+            f"-Dnexusai.load.stallMillis={max(0, stall_ms)}",
             "-Dterminal.jline=false",
             "-Dterminal.ansi=false",
             "-Xms1G",
@@ -942,8 +979,8 @@ def nexusai_enabled(text: str) -> bool:
 
 
 def wait_for_done(process, chunks: list[str], timeout: int) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited early with code {process.returncode}")
         text = "".join(chunks)
@@ -956,8 +993,8 @@ def wait_for_done(process, chunks: list[str], timeout: int) -> None:
 
 
 def wait_marker(process, chunks: list[str], start: int, token: str, timeout: int) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited while waiting for {token}")
         if any(token in line for line in chunks[start:]):
@@ -1142,9 +1179,9 @@ def start_bots(args, server_port: int, work: Path, out: Path):
 
 
 def wait_for_players(smoke, rcon_port: int, expected: int, chunks, process) -> None:
-    deadline = time.time() + 90
+    deadline = time.monotonic() + 90
     last_list = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError("server exited while bots were joining")
         try:
@@ -1489,6 +1526,16 @@ def self_check() -> int:
     early["quotaExhaustedOffsetMillis"] = 10000
     if judge("S6", early, s6_ctx)["status"] != "fail":
         raise SystemExit("S6 should fail when the cap is hit outside the middle of the window")
+    if host_stall_reasons({"hostStall": {"invalid": False}}, 120.2, 120.0, 5000):
+        raise SystemExit("a clean scenario was marked as a host stall")
+    flagged = host_stall_reasons({"hostStall": {"invalid": True, "reasons": ["tick gap 48653 ms"]}}, 170.0, 169.9, 5000)
+    if len(flagged) != 1 or "tick gap" not in flagged[0]:
+        raise SystemExit(f"driver host stall was not reported: {flagged}")
+    drift = host_stall_reasons({}, 418.0, 132.0, 5000)
+    if len(drift) != 1 or "drifted" not in drift[0]:
+        raise SystemExit(f"harness clock drift was not reported: {drift}")
+    if host_stall_reasons({"hostStall": {"invalid": True}}, 418.0, 132.0, 0):
+        raise SystemExit("--stall-ms 0 should turn the host stall check off")
     print("SELF-CHECK OK")
     return 0
 

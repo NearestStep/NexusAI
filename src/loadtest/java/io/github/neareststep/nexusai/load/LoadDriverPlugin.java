@@ -358,10 +358,22 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
      */
     void onTick(double tickMillis) {
         Run current = run;
-        if (current == null || current.phase != Phase.LOAD || !current.measuring) {
+        if (current == null || current.phase != Phase.LOAD) {
+            return;
+        }
+        current.stall.tick(tickMillis);
+        if (!current.measuring) {
             return;
         }
         current.mspt.add(tickMillis);
+    }
+
+    /**
+     * Scenario timing runs on the monotonic clock, so a wall clock step on the test host cannot
+     * cut a window short or stretch it. Wall time is kept only for values reported as epoch time.
+     */
+    private static long monoMillis() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     private void heartbeat() {
@@ -369,7 +381,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         if (current == null || current.phase == Phase.DONE) {
             return;
         }
-        long now = System.currentTimeMillis();
+        long now = monoMillis();
         try {
             if (current.phase == Phase.WARM) {
                 warm(current, now);
@@ -378,10 +390,12 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             if (current.phase == Phase.LOAD) {
                 long elapsed = now - current.startedAt;
                 if (elapsed >= current.loadMillis) {
+                    current.stall.end(System.nanoTime(), System.currentTimeMillis(), current.loadMillis);
                     current.phase = Phase.DRAIN;
                     current.measuring = false;
                     current.drainStartedAt = now;
                 } else {
+                    current.stall.beat(System.nanoTime(), System.currentTimeMillis());
                     boolean measure = elapsed >= current.warmupMillis;
                     if (measure && !current.threadsSeen) {
                         // One tick of bookkeeping stays outside the MSPT window.
@@ -547,10 +561,10 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             current.workerRejected = snap.workerRejected();
             current.httpRejected = snap.httpRejected();
             if (current.series.size() < 48 && (current.series.isEmpty()
-                    || System.currentTimeMillis() - current.lastSeries >= 5_000L)) {
-                current.lastSeries = System.currentTimeMillis();
+                    || monoMillis() - current.lastSeries >= 5_000L)) {
+                current.lastSeries = monoMillis();
                 Map<String, Object> point = new LinkedHashMap<>();
-                point.put("t", (System.currentTimeMillis() - current.startedAt) / 1000L);
+                point.put("t", (monoMillis() - current.startedAt) / 1000L);
                 point.put("queued", snap.workerQueued());
                 point.put("inFlight", snap.inFlight());
                 point.put("waiting", snap.httpWaiting());
@@ -613,7 +627,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         current.settled = settled;
         current.drainActualMillis = current.drainStartedAt == 0L
                 ? 0L
-                : Math.max(0L, System.currentTimeMillis() - current.drainStartedAt);
+                : Math.max(0L, monoMillis() - current.drainStartedAt);
         samplePool(current, false);
         current.reported = true;
         if (heartbeat != null) {
@@ -625,6 +639,10 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             writeReport(current);
         } catch (IOException ex) {
             getLogger().severe("Could not write report.json: " + ex.getMessage());
+        }
+        if (current.stall.invalid()) {
+            getLogger().warning("SCENARIO_INVALID " + current.scenario + " test host stall: "
+                    + String.join("; ", current.stall.reasons()));
         }
         getLogger().info("SCENARIO_END " + current.scenario);
         if (run == current) {
@@ -724,6 +742,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         root.put("context", context);
         root.put("errors", current.errors);
         root.put("series", current.series);
+        root.put("hostStall", current.stall.toMap());
 
         String json = JsonMaps.object(root);
         Path path = new File(getDataFolder(), "report.json").toPath();
@@ -857,9 +876,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         current.tokensSpent = spent;
         current.quotaLimit = limit;
         if (limit > 0L && spent >= limit && current.quotaExhaustedEpochMillis == 0L) {
-            long now = System.currentTimeMillis();
-            current.quotaExhaustedEpochMillis = now;
-            current.quotaExhaustedOffsetMillis = Math.max(0L, now - current.startedAt);
+            current.quotaExhaustedEpochMillis = System.currentTimeMillis();
+            current.quotaExhaustedOffsetMillis = Math.max(0L, monoMillis() - current.startedAt);
         } else if (current.quotaExhaustedEpochMillis == 0L) {
             noteInFlight(current, current.httpOpen.get());
         }
@@ -939,7 +957,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         private final long loadMillis;
         private final long warmupMillis;
         private final long drainMillis;
-        private final long warmStartedAt = System.currentTimeMillis();
+        private final long warmStartedAt = monoMillis();
+        private final HostStallDetector stall = new HostStallDetector(
+                HostStallDetector.thresholdFromProperty(System.getProperty(HostStallDetector.PROPERTY)));
         private final int fastAtStart = providers.fast.calls.get();
         private final int slowAtStart = providers.slow.calls.get();
         private final int boomAtStart = providers.boom.calls.get();
