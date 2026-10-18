@@ -37,8 +37,10 @@ jobs:
         run: python3 .github/scripts/paper-load.py --self-check
       - name: Smoke-script self-check
         run: python3 .github/scripts/paper-smoke.py --self-check
+      # testSnakeYaml26 repeats the unit tests with SnakeYAML 2.6, the version Paper 26.2 ships;
+      # test runs them with 2.2 from paper-api 1.20.6.
       - name: Test and build the shaded jar
-        run: chmod +x ./gradlew && ./gradlew test shadowJar loadDriverJar eventsProbeJar --no-daemon
+        run: chmod +x ./gradlew && ./gradlew test testSnakeYaml26 shadowJar loadDriverJar eventsProbeJar --no-daemon
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: success()
         with:
