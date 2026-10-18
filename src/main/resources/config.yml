@@ -384,7 +384,8 @@ dialogue:
   # Drop a saved transcript after this many hours without a new line. 0 keeps it.
   memory-expiry-hours: 168
   # One INFO line when the server stops while the first load of dialogue-memory.yml is still
-  # running: the stop budget, the time used, and how many characters were written. false turns it off.
+  # running: the stop budget, the time used, and how many characters were appended or were already
+  # in the file. false turns it off.
   log-stop-budget: true
   # End a session after this many seconds without a player line. 0 disables the timer.
   session-timeout-seconds: 120

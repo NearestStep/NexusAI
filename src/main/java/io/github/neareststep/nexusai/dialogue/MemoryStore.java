@@ -173,6 +173,8 @@ public final class MemoryStore {
     private volatile int stopUnsavedCount = -1;
     /** Characters stop wrote to the file since {@link #beginStopCount}, or -1 outside stop. */
     private final AtomicInteger stopWritten = new AtomicInteger(-1);
+    /** Characters held in memory that stop found already in the file, or -1 outside stop. */
+    private final AtomicInteger stopAlreadyInFile = new AtomicInteger(-1);
 
     @FunctionalInterface
     interface CorruptMove {
@@ -695,6 +697,7 @@ public final class MemoryStore {
                 return StopSave.NOT_WRITTEN;
             }
             if (matchesDisk(file, summaries)) {
+                noteStopAlreadyInFile(countForWarning(summaries));
                 return StopSave.SKIPPED;
             }
             long snapshot = changes.get();
@@ -1017,6 +1020,7 @@ public final class MemoryStore {
     void beginStopCount(boolean summaries) {
         stopUnsavedCount = unsavedCharacterCount(summaries);
         stopWritten.set(0);
+        stopAlreadyInFile.set(0);
         Runnable hook = afterStopCount;
         if (hook != null) {
             hook.run();
@@ -1026,6 +1030,7 @@ public final class MemoryStore {
     void endStopCount() {
         stopUnsavedCount = -1;
         stopWritten.set(-1);
+        stopAlreadyInFile.set(-1);
     }
 
     /** Characters held in memory when stop began. */
@@ -1038,8 +1043,18 @@ public final class MemoryStore {
         return Math.max(0, stopWritten.get());
     }
 
+    /** Characters held in memory that stop found already in the file. Zero outside stop. */
+    int stopAlreadyInFileCount() {
+        return Math.max(0, stopAlreadyInFile.get());
+    }
+
     private void noteStopWritten(int count) {
         stopWritten.getAndUpdate(seen -> seen < 0 ? seen : seen + Math.max(0, count));
+    }
+
+    /** A later pass over the same file sees at least the characters an earlier pass saw. */
+    private void noteStopAlreadyInFile(int count) {
+        stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : Math.max(seen, count));
     }
 
     private int countForWarning(boolean summaries) {
@@ -1095,6 +1110,7 @@ public final class MemoryStore {
         Map<String, StoredTranscript> extra;
         synchronized (this) {
             extra = transcriptsAbsent(outline.characterKeys, summaries);
+            noteStopAlreadyInFile(transcriptsPresent(outline.characterKeys, summaries));
         }
         if (extra.isEmpty()) {
             return SpliceResult.NOTHING;
@@ -1206,6 +1222,7 @@ public final class MemoryStore {
         Map<String, StoredTranscript> extra;
         synchronized (this) {
             extra = transcriptsAbsent(present, summaries);
+            noteStopAlreadyInFile(transcriptsPresent(present, summaries));
         }
         if (extra.isEmpty()) {
             return FullAppend.NOTHING;
@@ -2414,6 +2431,22 @@ public final class MemoryStore {
             }
         }
         return keys;
+    }
+
+    /** Characters with lines or a summary in memory whose key is already in {@code present}. */
+    private int transcriptsPresent(Set<String> present, boolean summaries) {
+        int count = 0;
+        for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
+            if (!present.contains(entry.getKey())) {
+                continue;
+            }
+            TurnMemory memory = entry.getValue();
+            String summary = summaries ? memory.summary() : "";
+            if (!memory.view().isEmpty() || (summary != null && !summary.isBlank())) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private Map<String, StoredTranscript> transcriptsAbsent(Set<String> present, boolean summaries) {

@@ -236,7 +236,8 @@ final class DialogueMemoryPersistence {
                     }
                 } finally {
                     logBudgetStop(budgetMillis, bytes, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
-                            memory.stopWrittenCount(), memory.stopHeldCount(summaries));
+                            memory.stopWrittenCount(), memory.stopAlreadyInFileCount(),
+                            memory.stopHeldCount(summaries));
                 }
                 return;
             }
@@ -258,19 +259,26 @@ final class DialogueMemoryPersistence {
      * running. A normal stop never reaches this. {@code dialogue.log-stop-budget: false} turns it off.
      * Runs on the thread that calls stop, after the budget work, so it adds no wait of its own.
      */
-    private void logBudgetStop(long budgetMillis, long fileBytes, long usedMillis, int written, int held) {
+    private void logBudgetStop(
+            long budgetMillis, long fileBytes, long usedMillis, int appended, int alreadyInFile, int held) {
         DialogueSettings current = settings.get();
         if (logger == null || (current != null && !current.logStopBudget())) {
             return;
         }
-        logger.info(budgetStopLine(budgetMillis, fileBytes, usedMillis, written, held));
+        logger.info(budgetStopLine(budgetMillis, fileBytes, usedMillis, appended, alreadyInFile, held));
     }
 
-    static String budgetStopLine(long budgetMillis, long fileBytes, long usedMillis, int written, int held) {
+    /**
+     * {@code appended} counts characters stop wrote to the file. {@code alreadyInFile} counts
+     * characters held in memory that the file already had, so they needed no write and are not lost.
+     */
+    static String budgetStopLine(
+            long budgetMillis, long fileBytes, long usedMillis, int appended, int alreadyInFile, int held) {
         long kib = (Math.max(0L, fileBytes) + 1023L) / 1024L;
         return "Stop ran during the first dialogue memory load and used the stop budget: "
                 + budgetMillis + " ms for a " + kib + " KiB dialogue-memory.yml, " + usedMillis + " ms used. "
-                + "Wrote " + written + " of " + held + " dialogue characters held in memory.";
+                + held + " dialogue characters held in memory: appended " + appended
+                + ", already in file " + alreadyInFile + ".";
     }
 
     /**

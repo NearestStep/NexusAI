@@ -42,13 +42,13 @@ class StopBudgetLogTest {
     void lineText() {
         assertEquals("Stop ran during the first dialogue memory load and used the stop budget: "
                         + "5012 ms for a 96 KiB dialogue-memory.yml, 640 ms used. "
-                        + "Wrote 3 of 4 dialogue characters held in memory.",
-                DialogueMemoryPersistence.budgetStopLine(5_012L, 96L * 1024L, 640L, 3, 4));
+                        + "4 dialogue characters held in memory: appended 3, already in file 1.",
+                DialogueMemoryPersistence.budgetStopLine(5_012L, 96L * 1024L, 640L, 3, 1, 4));
         assertEquals("Stop ran during the first dialogue memory load and used the stop budget: "
                         + "5000 ms for a 1 KiB dialogue-memory.yml, 0 ms used. "
-                        + "Wrote 0 of 1 dialogue characters held in memory.",
-                DialogueMemoryPersistence.budgetStopLine(5_000L, 1L, 0L, 0, 1));
-        assertTrue(DialogueMemoryPersistence.budgetStopLine(5_000L, 0L, 0L, 0, 0).contains(" 0 KiB "));
+                        + "1 dialogue characters held in memory: appended 0, already in file 0.",
+                DialogueMemoryPersistence.budgetStopLine(5_000L, 1L, 0L, 0, 0, 1));
+        assertTrue(DialogueMemoryPersistence.budgetStopLine(5_000L, 0L, 0L, 0, 0, 0).contains(" 0 KiB "));
     }
 
     @Test
@@ -72,7 +72,33 @@ class StopBudgetLogTest {
             assertTrue(line.startsWith(PREFIX + " and used the stop budget: " + budget + " ms for a "
                     + ((bytes + 1023) / 1024) + " KiB dialogue-memory.yml, "), line);
             assertTrue(line.matches(".*, \\d+ ms used\\. .*"), line);
-            assertTrue(line.endsWith("Wrote 1 of 2 dialogue characters held in memory."), line);
+            assertTrue(line.endsWith("2 dialogue characters held in memory: appended 1, already in file 1."), line);
+        } finally {
+            release.countDown();
+            join(fixture);
+        }
+    }
+
+    @Test
+    void characterAlreadyInTheFileIsReportedAsAlreadyInFileNotAsLost() throws Exception {
+        Fixture fixture = fixture("already", true);
+        fixture.store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        byte[] before = Files.readAllBytes(fixture.file);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertEquals(new String(before, StandardCharsets.UTF_8), Files.readString(fixture.file));
+            List<String> lines = infos(fixture.records);
+            assertEquals(1, lines.size(), fixture.records.toString());
+            assertTrue(lines.getFirst().endsWith("1 dialogue characters held in memory: appended 0, already in file 1."),
+                    lines.getFirst());
+            assertEquals(0, fixture.records.stream()
+                    .filter(r -> r.getLevel() == Level.WARNING && r.getMessage().startsWith("Did not save "))
+                    .count(), fixture.records.toString());
         } finally {
             release.countDown();
             join(fixture);
@@ -104,7 +130,8 @@ class StopBudgetLogTest {
             List<String> lines = infos(fixture.records);
             assertEquals(1, lines.size(), fixture.records.toString());
             assertTrue(lines.getFirst().contains("used the stop budget: 200 ms for a "), lines.getFirst());
-            assertTrue(lines.getFirst().endsWith("Wrote 0 of 1 dialogue characters held in memory."), lines.getFirst());
+            assertTrue(lines.getFirst().endsWith("1 dialogue characters held in memory: appended 0, already in file 0."),
+                    lines.getFirst());
             assertEquals(1, fixture.records.stream()
                     .filter(r -> r.getLevel() == Level.WARNING && r.getMessage().startsWith("Did not save 1 "))
                     .count(), fixture.records.toString());
