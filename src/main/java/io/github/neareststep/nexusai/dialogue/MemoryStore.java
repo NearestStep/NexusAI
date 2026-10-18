@@ -140,6 +140,12 @@ public final class MemoryStore {
     static volatile java.util.function.BooleanSupplier refuseSpliceEdits;
 
     /**
+     * Runs with the character id before a stop splice builds that character's block. Tests throw
+     * from it to stand for a block YAML cannot write. A null hook is the production path.
+     */
+    static volatile java.util.function.Consumer<String> beforeCharacterBlock;
+
+    /**
      * Set when stop gives up on a load that is still reading. The load returns without
      * replacing the file and without logging a second failure.
      */
@@ -744,17 +750,19 @@ public final class MemoryStore {
                 return StopSave.SKIPPED;
             }
             long snapshot = changes.get();
+            Set<String> skipped = new HashSet<>();
             WriteResult wrote = publishYaml(
-                    file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+                    file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos, skipped);
             if (wrote == WriteResult.PUBLISHED) {
                 noteSaved(file, snapshot, summaries);
             }
             if (wrote == WriteResult.PUBLISHED) {
-                // The whole document was written, so every held character counts as appended.
+                // The whole document was written, so every held character counts as appended,
+                // except one YAML could not write: it was left out and is not in the file either.
                 // An earlier splice pass may have counted some as already in the file; drop that
                 // count so appended plus already in file never exceeds the held count.
                 stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : 0);
-                noteStopWritten(countForWarning(summaries));
+                noteStopWritten(countForWarning(summaries) - heldAtStop(skipped));
             }
             return switch (wrote) {
                 case PUBLISHED -> StopSave.SAVED;
@@ -772,7 +780,7 @@ public final class MemoryStore {
             return;
         }
         long snapshot = changes.get();
-        if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos) == WriteResult.PUBLISHED) {
+        if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos, null) == WriteResult.PUBLISHED) {
             noteSaved(file, snapshot, summaries);
         }
     }
@@ -800,6 +808,9 @@ public final class MemoryStore {
     /**
      * Writes {@code yaml} via a temp file and {@code publish}. A backup failure is logged and does
      * not also log a save failure. The temporary file is removed when the rename does not happen.
+     *
+     * @param skipped when not null, receives the keys ({@code player + '\0' + character}) of the
+     *                characters left out because YAML could not write them
      */
     private WriteResult publishYaml(
             File file,
@@ -807,7 +818,8 @@ public final class MemoryStore {
             Logger logger,
             boolean summaries,
             Publish publish,
-            long deadlineNanos
+            long deadlineNanos,
+            Set<String> skipped
     ) {
         if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
             return WriteResult.PAST_DEADLINE;
@@ -836,7 +848,7 @@ public final class MemoryStore {
             } catch (RuntimeException e) {
                 body = replaceLoneSurrogates(yaml) ? dumpOrNull(yaml) : null;
                 if (body == null) {
-                    body = dumpSkippingBrokenCharacters(yaml, logger);
+                    body = dumpSkippingBrokenCharacters(yaml, logger, skipped);
                 }
                 if (body == null) {
                     // Same warning as a write that fails; stop and the periodic save then also
@@ -964,14 +976,16 @@ public final class MemoryStore {
     /**
      * After the whole document failed to dump: tries each character on its own, leaves out the
      * ones that fail, and dumps the rest. One warning gives the count and the cause; it holds no
-     * dialogue text. Null when no single character is to blame or the rest still fails.
+     * dialogue text. Null when no single character is to blame or the rest still fails. The keys of
+     * the characters left out go to {@code skippedKeys} when it is not null and the rest was dumped.
      */
-    private String dumpSkippingBrokenCharacters(YamlConfiguration yaml, Logger logger) {
+    private String dumpSkippingBrokenCharacters(YamlConfiguration yaml, Logger logger, Set<String> skippedKeys) {
         ConfigurationSection entries = yaml.getConfigurationSection("entries");
         if (entries == null) {
             return null;
         }
         List<String> skipped = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
         RuntimeException cause = null;
         for (String player : entries.getKeys(false)) {
             ConfigurationSection characters = entries.getConfigurationSection(player);
@@ -990,6 +1004,7 @@ public final class MemoryStore {
                 } catch (RuntimeException e) {
                     characters.set(id, null);
                     skipped.add(player + "/" + id);
+                    keys.add(player + "\u0000" + id);
                     if (cause == null) {
                         cause = e;
                     }
@@ -1002,6 +1017,9 @@ public final class MemoryStore {
         String body = dumpOrNull(yaml);
         if (body == null) {
             return null;
+        }
+        if (skippedKeys != null) {
+            skippedKeys.addAll(keys);
         }
         if (logger != null) {
             logger.warning(LogRedaction.summaryWithCause("Left " + skipped.size() + " dialogue "
@@ -1257,7 +1275,10 @@ public final class MemoryStore {
 
     /** How many of {@code keys} were held in memory when stop began. All of them outside stop. */
     private int heldAtStop(Set<String> keys) {
-        Set<String> held = stopHeldKeys;
+        return heldAtStop(keys, stopHeldKeys);
+    }
+
+    private static int heldAtStop(Set<String> keys, Set<String> held) {
         if (held == null) {
             return keys.size();
         }
@@ -1458,9 +1479,21 @@ public final class MemoryStore {
         for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
             writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
         }
-        WriteResult appended = publishYamlLocked(file, yaml, logger, summaries, deadlineNanos);
+        Set<String> skipped = new HashSet<>();
+        WriteResult appended = publishYamlLocked(file, yaml, logger, summaries, deadlineNanos, skipped);
         if (appended == WriteResult.PUBLISHED) {
-            noteStopWritten(heldAtStop(extra.keySet()));
+            Set<String> written = extra.keySet();
+            if (!skipped.isEmpty()) {
+                // Characters YAML could not write were left out of the file: not appended, and
+                // one that was already in the file is not there any more.
+                written = new HashSet<>(written);
+                written.removeAll(skipped);
+                Set<String> kept = new HashSet<>(present);
+                kept.removeAll(skipped);
+                int inFile = heldAtStop(kept, stopHeldKeys);
+                stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : Math.min(seen, inFile));
+            }
+            noteStopWritten(heldAtStop(written));
         }
         return switch (appended) {
             case PUBLISHED -> FullAppend.PUBLISHED;
@@ -1507,7 +1540,7 @@ public final class MemoryStore {
     }
 
     private WriteResult publishYamlLocked(
-            File file, YamlConfiguration yaml, Logger logger, boolean summaries, long deadlineNanos) {
+            File file, YamlConfiguration yaml, Logger logger, boolean summaries, long deadlineNanos, Set<String> skipped) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
                 return WriteResult.FAILED;
@@ -1516,7 +1549,8 @@ public final class MemoryStore {
                 return WriteResult.PUBLISHED;
             }
             loaderMustNotPublish = true;
-            WriteResult published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+            WriteResult published = publishYaml(
+                    file, yaml, logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos, skipped);
             if (published != WriteResult.PUBLISHED) {
                 loaderMustNotPublish = false;
             }
@@ -2060,6 +2094,10 @@ public final class MemoryStore {
 
     private static String characterBlockOrNull(
             String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
+        java.util.function.Consumer<String> hook = beforeCharacterBlock;
+        if (hook != null) {
+            hook.accept(characterId);
+        }
         if (yamlKey(characterId) != null && !transcriptNeedsQuote(transcript)) {
             String classic = classicCharacterBlock(characterId, transcript, summaries, indent, nl);
             if (blockRoundTrips(characterId, transcript, summaries, classic)) {

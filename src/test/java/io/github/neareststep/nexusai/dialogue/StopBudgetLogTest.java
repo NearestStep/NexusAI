@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -37,6 +38,8 @@ class StopBudgetLogTest {
         MemoryStore.afterLoadPublish = null;
         MemoryStore.afterStopCount = null;
         MemoryStore.beforeReplace = null;
+        MemoryStore.beforeCharacterBlock = null;
+        MemoryStore.beforeDocumentDump = null;
         DialogueMemoryPersistence.loaderThreads = DialogueMemoryPersistence.DEFAULT_LOADER_THREADS;
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 1_000L;
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 5_000L;
@@ -442,6 +445,152 @@ class StopBudgetLogTest {
         assertTrue(DialogueSettings.defaults().logStopBudget());
         yaml.loadFromString("dialogue:\n  log-stop-budget: false\n");
         assertFalse(DialogueSettings.read(yaml).logStopBudget());
+    }
+
+    /**
+     * The stop splice cannot build innkeeper's block (the hook throws, as YAML would for a value it
+     * cannot write). The splice is refused instead of failing stop, stop waits for the load, and
+     * the full save writes both characters with no warning.
+     */
+    @Test
+    void spliceBlockThatCannotBeWrittenFallsBackToTheFullSave() throws Exception {
+        Fixture fixture = fixture("bad-block", true);
+        fixture.store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+        fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+        AtomicInteger rejected = new AtomicInteger();
+        MemoryStore.beforeCharacterBlock = id -> {
+            if ("innkeeper".equals(id)) {
+                rejected.incrementAndGet();
+                release.countDown();
+                throw new IllegalStateException("block rejected for the test");
+            }
+        };
+        int fullBefore = MemoryStore.fullDocumentAppends.get();
+        try {
+            fixture.files.onReload();
+            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            fixture.files.shutdown();
+            assertTrue(rejected.get() > 0, fixture.records.toString());
+            String written = Files.readString(fixture.file);
+            assertTrue(written.contains("only-in-memory"), written);
+            assertTrue(written.contains("kept-from-disk"), written);
+            assertEquals(fullBefore, MemoryStore.fullDocumentAppends.get(), "stop must not read the file a second time");
+            assertEquals(List.of(), warnings(fixture.records));
+            List<String> lines = infos(fixture.records);
+            assertEquals(1, lines.size(), fixture.records.toString());
+            assertTrue(lines.getFirst().endsWith("2 dialogue characters held in memory: appended 2, already in file 0."),
+                    lines.getFirst());
+        } finally {
+            release.countDown();
+            join(fixture);
+        }
+    }
+
+    /**
+     * Stop writes the whole document, and YAML cannot write one held character (the hook rejects
+     * any document that holds it), so that character is left out. It is not counted as appended,
+     * and not as already in the file, since the new file does not have it.
+     */
+    @Test
+    void characterLeftOutOfTheFullSaveAtStopIsNotCountedAsAppended() throws Exception {
+        for (String broken : List.of("innkeeper", "blacksmith")) {
+            Fixture fixture = fixture("left-out-" + broken, true);
+            fixture.store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+            fixture.store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+            long bytes = Files.size(fixture.file);
+            CountDownLatch inside = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
+            MemoryStore.refuseSpliceEdits = () -> {
+                release.countDown();
+                return true;
+            };
+            MemoryStore.beforeDocumentDump = document -> {
+                if (LoneSurrogateTest.holdsKey(document.get("entries"), broken)) {
+                    throw new IllegalStateException("rejected for the test");
+                }
+            };
+            try {
+                fixture.files.onReload();
+                assertTrue(inside.await(5, TimeUnit.SECONDS));
+                fixture.files.shutdown();
+                String written = Files.readString(fixture.file);
+                assertFalse(written.contains(broken + ":"), written);
+                assertTrue(written.contains("innkeeper".equals(broken) ? "kept-from-disk" : "only-in-memory"), written);
+                assertEquals(List.of("Left 1 dialogue character out of dialogue-memory.yml because YAML could not "
+                        + "write them; the other characters were saved (IllegalStateException: rejected for the test)"),
+                        warnings(fixture.records));
+                List<String> lines = infos(fixture.records);
+                assertEquals(1, lines.size(), fixture.records.toString());
+                String line = lines.getFirst();
+                String used = line.replaceFirst("^.* dialogue-memory\\.yml, (\\d+) ms used\\. .*$", "$1");
+                assertEquals(DialogueMemoryPersistence.budgetStopLine(DialogueMemoryPersistence.appendBudgetMillis(bytes),
+                        bytes, Long.parseLong(used), 1, 0, 2), line);
+                assertEquals("Stop ran during the first dialogue memory load and used the stop budget: "
+                        + DialogueMemoryPersistence.appendBudgetMillis(bytes) + " ms for a 1 KiB dialogue-memory.yml, "
+                        + used + " ms used. 2 dialogue characters held in memory: appended 1, already in file 0.", line);
+            } finally {
+                release.countDown();
+                join(fixture);
+                MemoryStore.beforeDocumentDump = null;
+                MemoryStore.refuseSpliceEdits = null;
+                MemoryStore.pauseDuringLoad = null;
+            }
+        }
+    }
+
+    /**
+     * The full-document merge (no load running) leaves out a character YAML cannot write. The stop
+     * counts drop it: a character only in memory is not appended, and one that was in the file is
+     * no longer already in the file.
+     */
+    @Test
+    void characterLeftOutOfTheFullDocumentMergeIsNotCounted() throws Exception {
+        for (String broken : List.of("innkeeper", "blacksmith")) {
+            Fixture fixture = fixture("merge-" + broken, true);
+            MemoryStore store = fixture.store;
+            store.append(fixture.player, "blacksmith", "user", "said-while-off", 70L, 8, 8_000, 0L);
+            store.append(fixture.player, "innkeeper", "user", "only-in-memory", 70L, 8, 8_000, 0L);
+            MemoryStore.refuseSpliceEdits = () -> true;
+            MemoryStore.beforeDocumentDump = document -> {
+                if (LoneSurrogateTest.holdsKey(document.get("entries"), broken)) {
+                    throw new IllegalStateException("rejected for the test");
+                }
+            };
+            store.beginStopCount(false);
+            try {
+                assertTrue(store.appendCharactersAbsentFromFile(fixture.file.toFile(), Logger.getAnonymousLogger(), false, List.of()));
+                MemoryStore.beforeDocumentDump = null;
+                String written = Files.readString(fixture.file);
+                assertFalse(written.contains(broken + ":"), written);
+                assertEquals(2, store.stopHeldCount(false));
+                if ("innkeeper".equals(broken)) {
+                    assertTrue(written.contains("kept-from-disk"), written);
+                    assertEquals(0, store.stopWrittenCount(), "appended");
+                    assertEquals(1, store.stopAlreadyInFileCount(), "already in file");
+                } else {
+                    assertTrue(written.contains("only-in-memory"), written);
+                    assertEquals(1, store.stopWrittenCount(), "appended");
+                    assertEquals(0, store.stopAlreadyInFileCount(), "already in file");
+                }
+            } finally {
+                store.endStopCount();
+                MemoryStore.beforeDocumentDump = null;
+                MemoryStore.refuseSpliceEdits = null;
+            }
+        }
+    }
+
+    private static List<String> warnings(List<LogRecord> records) {
+        synchronized (records) {
+            return records.stream()
+                    .filter(r -> r.getLevel() == Level.WARNING)
+                    .map(LogRecord::getMessage)
+                    .toList();
+        }
     }
 
     private static List<String> infos(List<LogRecord> records) {
