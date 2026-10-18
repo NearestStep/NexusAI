@@ -1,0 +1,90 @@
+name: Release
+
+# Runs only in the public repository NearestStep/NexusAI. Any other copy skips the job.
+# A v* tag builds the shaded jar from a clean checkout with JDK 25 and attaches it, with its
+# sha256 file, to a draft GitHub release. A person publishes the draft after the owner approves.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    if: github.repository == 'NearestStep/NexusAI'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Test and build the shaded jar
+        run: chmod +x ./gradlew && ./gradlew clean test shadowJar --no-daemon --no-build-cache
+      - name: Check the tag against the project version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(./gradlew -q properties --no-daemon | sed -n 's/^version: //p')"
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match project version ${version}"
+            exit 1
+          fi
+          jar="build/libs/NexusAI-${version}.jar"
+          if [ ! -f "${jar}" ]; then
+            echo "::error::${jar} was not built"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "jar=${jar}" >> "$GITHUB_OUTPUT"
+      - name: Write the sha256 file
+        env:
+          JAR: ${{ steps.version.outputs.jar }}
+        run: |
+          cd "$(dirname "${JAR}")"
+          name="$(basename "${JAR}")"
+          sha256sum "${name}" > "${name}.sha256"
+          sha256sum -c "${name}.sha256"
+          cat "${name}.sha256"
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="${VERSION}" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "See CHANGELOG.md." > release-notes.md
+          fi
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          JAR: ${{ steps.version.outputs.jar }}
+        run: |
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            if [ "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::Release ${TAG} is already published; assets are not replaced"
+              exit 1
+            fi
+            gh release upload "${TAG}" "${JAR}" "${JAR}.sha256" --clobber
+          else
+            gh release create "${TAG}" "${JAR}" "${JAR}.sha256" \
+              --draft --verify-tag --title "NexusAI ${VERSION}" --notes-file release-notes.md
+          fi

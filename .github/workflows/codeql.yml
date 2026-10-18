@@ -1,0 +1,43 @@
+name: CodeQL
+
+# Runs only in the public repository NearestStep/NexusAI. Any other copy skips the job.
+
+on:
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Java
+    if: github.repository == 'NearestStep/NexusAI'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+      - name: Compile main and test sources
+        run: chmod +x ./gradlew && ./gradlew clean classes testClasses --no-daemon --no-build-cache
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:java-kotlin
