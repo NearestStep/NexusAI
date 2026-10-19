@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.load;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -136,29 +137,42 @@ class HostStallDetectorTest {
         assertEquals(List.of("window ran 6001 ms, expected 1000 ms"), overrunOver.reasons());
     }
 
-    /** Heartbeats and ticks as LoadDriverPlugin feeds them: every 50 ms, 1 ms ticks, one optional hole. */
-    private static HostStallDetector loadWindow(long holeMillis) {
+    /**
+     * Heartbeats and ticks the way LoadDriverPlugin feeds them: every 50 ms, 1 ms ticks, 2 s of
+     * warm-up, one optional hole. Measured ticks land in {@code samples}.
+     */
+    private static HostStallDetector loadWindow(long holeMillis, List<Double> samples) {
         HostStallDetector detector = new HostStallDetector(5_000L);
+        detector.start(0L, 1_000_000L);
         long elapsed = 0L;
         long wall = 1_000_000L;
-        boolean ended = false;
-        while (!ended) {
-            assertTrue(detector.loadTick(1.0d, elapsed >= 2_000L) == (elapsed >= 2_000L));
-            ended = detector.loadHeartbeat(elapsed, 30_000L, elapsed * MS, wall + elapsed);
+        HostStallDetector.LoadStep step = HostStallDetector.LoadStep.WARMUP;
+        while (step != HostStallDetector.LoadStep.END) {
+            detector.loadTick(1.0d, samples::add);
+            step = detector.loadStep(elapsed, 30_000L, 2_000L, elapsed * MS, wall + elapsed);
+            if (step == HostStallDetector.LoadStep.MEASURE && !detector.measuring()) {
+                detector.startMeasuring();
+            }
+            assertEquals(elapsed >= 30_000L ? HostStallDetector.LoadStep.END
+                    : elapsed >= 2_000L ? HostStallDetector.LoadStep.MEASURE : HostStallDetector.LoadStep.WARMUP, step);
             elapsed += elapsed == 10_000L ? holeMillis : 50L;
         }
+        assertFalse(detector.measuring(), "measuring did not stop at the end of the window");
         return detector;
     }
 
     @Test
     void loadHeartbeatsFindAHoleAndEndTheWindow() {
-        HostStallDetector clean = loadWindow(50L);
+        List<Double> samples = new ArrayList<>();
+        HostStallDetector clean = loadWindow(50L, samples);
         assertFalse(clean.invalid(), clean.reasons().toString());
         assertTrue((long) clean.toMap().get("maxTickGapMillis") < 100L, clean.toMap().toString());
         assertEquals(30_000L, clean.toMap().get("windowMillis"));
         assertEquals(30_000L, clean.toMap().get("expectedWindowMillis"));
+        // Ticks from 2050 ms (after the heartbeat that started measuring) through 30000 ms.
+        assertEquals(560, samples.size());
 
-        HostStallDetector holed = loadWindow(10_000L);
+        HostStallDetector holed = loadWindow(10_000L, new ArrayList<>());
         assertTrue(holed.invalid());
         long gap = (long) holed.toMap().get("maxTickGapMillis");
         assertTrue(gap >= 9_990L && gap <= 10_000L, holed.toMap().toString());
@@ -167,11 +181,16 @@ class HostStallDetectorTest {
     @Test
     void longWarmupTickIsTickWorkNotAStall() {
         HostStallDetector detector = new HostStallDetector(5_000L);
-        assertFalse(detector.loadHeartbeat(0L, 120_000L, 0L, 0L));
-        assertFalse(detector.loadTick(6_000.0d, false));
-        assertFalse(detector.loadHeartbeat(6_050L, 120_000L, 6_050L * MS, 6_050L));
+        detector.start(0L, 0L);
+        List<Double> samples = new ArrayList<>();
+        assertEquals(HostStallDetector.LoadStep.WARMUP, detector.loadStep(0L, 120_000L, 10_000L, 0L, 0L));
+        detector.loadTick(6_000.0d, samples::add);
+        assertEquals(HostStallDetector.LoadStep.WARMUP, detector.loadStep(6_050L, 120_000L, 10_000L, 6_050L * MS, 6_050L));
         assertFalse(detector.invalid(), detector.reasons().toString());
-        assertTrue(detector.loadTick(1.0d, true));
+        assertEquals(List.of(), samples, "a warm-up tick went into the MSPT samples");
+        detector.startMeasuring();
+        detector.loadTick(1.0d, samples::add);
+        assertEquals(List.of(1.0d), samples);
     }
 
     @Test
@@ -180,11 +199,16 @@ class HostStallDetectorTest {
         valid.start(0L, 0L);
         valid.beat(50L * MS, 50L);
         assertNull(valid.invalidLine("S1"));
+        List<String> warned = new ArrayList<>();
+        valid.warnIfInvalid("S1", warned::add);
+        assertEquals(List.of(), warned);
 
         HostStallDetector stalled = new HostStallDetector(5_000L);
         stalled.start(0L, 0L);
         stalled.beat(10_013L * MS, 10_013L);
-        assertEquals("SCENARIO_INVALID S1 test host stall: tick gap 10013 ms not covered by tick work > 5000 ms",
-                stalled.invalidLine("S1"));
+        String line = "SCENARIO_INVALID S1 test host stall: tick gap 10013 ms not covered by tick work > 5000 ms";
+        assertEquals(line, stalled.invalidLine("S1"));
+        stalled.warnIfInvalid("S1", warned::add);
+        assertEquals(List.of(line), warned);
     }
 }

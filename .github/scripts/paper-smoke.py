@@ -211,7 +211,12 @@ def fill_sha256(download_info: dict) -> str | None:
     return None
 
 
-DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_ATTEMPTS = 5
+
+
+def retry_pause(attempt: int) -> int:
+    """Seconds to wait after a failed attempt: 2, 4, 8, 16, then 30 at most."""
+    return min(30, 2 ** max(1, attempt))
 
 
 def cache_dir() -> Path:
@@ -293,7 +298,7 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
             partial.unlink(missing_ok=True)
         print(f"download {url} failed: {problem}", file=sys.stderr)
         if attempt < attempts:
-            _sleep(min(10, 2 * attempt))
+            _sleep(retry_pause(attempt))
     raise RuntimeError(f"download failed after {attempts} attempts: {url}: {problem}")
 
 
@@ -357,8 +362,18 @@ _sleep = time.sleep
 def install_papi(plugins: Path) -> None:
     """PlaceholderAPI 2.12.3, checked against its pinned sha256, with a config that stays offline."""
     jar = plugins / PAPI_NAME
+    remove_legacy_url_entry(PAPI_URL)
     download(PAPI_URL, jar, sha256=PAPI_SHA256, name=PAPI_NAME)
     write_papi_config(plugins / "PlaceholderAPI" / "config.yml", jar)
+
+
+def remove_legacy_url_entry(url: str) -> None:
+    """Deletes the URL-keyed cache entry an older harness kept for a file that is now pinned."""
+    entry = cache_dir() / hashlib.sha256(url.encode("utf-8")).hexdigest()
+    for stale in (entry, _sidecar(entry)):
+        if stale.is_file():
+            stale.unlink()
+            print(f"cache: removed old entry {stale.name} for {url}")
 
 
 def write_papi_config(path: Path, jar: Path) -> None:
@@ -450,7 +465,7 @@ def fetch_listing(url: str, attempts: int = LISTING_ATTEMPTS):
             problem = f"{type(error).__name__}: {error}"
             print(f"listing {url} failed: {problem}", file=sys.stderr)
         if attempt < attempts:
-            _sleep(min(10, 2 * attempt))
+            _sleep(retry_pause(attempt))
     if saved.is_file():
         try:
             payload = json.loads(saved.read_text(encoding="utf-8"))
@@ -2263,8 +2278,13 @@ def _download_cache_self_check() -> None:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(jar_bytes)
 
+            legacy = root / "cache" / hashlib.sha256(PAPI_URL.encode("utf-8")).hexdigest()
+            legacy.write_bytes(b"z" * 500)
+            legacy.with_name(legacy.name + ".sha256").write_text("0" * 64 + "\n", encoding="utf-8")
             download = fake_download
             install_papi(root / "server" / "plugins")
+            _need(not legacy.exists() and not legacy.with_name(legacy.name + ".sha256").exists(),
+                  "old URL-keyed PlaceholderAPI entry was kept")
             download = real_download
             _need(asked == [(PAPI_URL, PAPI_SHA256, PAPI_NAME)], f"PlaceholderAPI download was not pinned: {asked}")
             config = (root / "server" / "plugins" / "PlaceholderAPI" / "config.yml").read_text(encoding="utf-8")
@@ -2300,6 +2320,19 @@ def _download_cache_self_check() -> None:
                 _need("could not list builds" in str(error), f"wrong failure for an unknown build list: {error}")
             else:
                 raise RuntimeError("an unknown build list was returned without the API")
+
+            # Five attempts with growing pauses, and still a clear failure at the end.
+            pauses = []
+            _sleep = pauses.append
+            missing = (root / "gone.jar").as_uri()
+            try:
+                download(missing, root / "out" / "gone.jar")
+            except RuntimeError as error:
+                _need("after 5 attempts" in str(error), f"wrong failure after retries: {error}")
+            else:
+                raise RuntimeError("a missing download was accepted")
+            _need(pauses == [2, 4, 8, 16], f"download pauses were {pauses}, expected [2, 4, 8, 16]")
+            _need(not (root / "out" / "gone.jar").exists(), "a failed download left a file")
         finally:
             _fetch_to, _fetch_text, _sleep, download = real_fetch, real_text, real_sleep, real_download
             if saved_env is None:

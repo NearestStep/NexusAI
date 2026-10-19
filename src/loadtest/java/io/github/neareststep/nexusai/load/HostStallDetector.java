@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
 
 /**
  * Tells a stalled test host apart from a slow plugin during one load window.
@@ -23,6 +25,7 @@ final class HostStallDetector {
 
     private final long thresholdMillis;
     private boolean started;
+    private boolean measuring;
     private long startMono;
     private long startWall;
     private long lastBeatMono;
@@ -87,26 +90,49 @@ final class HostStallDetector {
         expectedMillis = expectedWindowMillis;
     }
 
-    /**
-     * A finished tick in the LOAD phase, warm-up included, so a long warm-up tick is counted as
-     * tick work and not as a host stall. Returns true when the tick belongs in the MSPT samples.
-     */
-    boolean loadTick(double tickMillis, boolean measuring) {
-        tick(tickMillis);
+    /** What one LOAD heartbeat means for the plugin. */
+    enum LoadStep {
+        /** The window reached its length and is closed; drain starts. */
+        END,
+        /** Still in warm-up: no MSPT samples yet. */
+        WARMUP,
+        /** Past warm-up: the plugin may start or keep measuring. */
+        MEASURE
+    }
+
+    /** True while LOAD ticks go into the MSPT samples. */
+    boolean measuring() {
         return measuring;
+    }
+
+    /** Called once by the plugin when it starts the measured part of the window. */
+    void startMeasuring() {
+        measuring = true;
+    }
+
+    /**
+     * A finished tick in the LOAD phase. Warm-up ticks count as tick work too, so a long warm-up
+     * tick is not taken for a host stall; only ticks while measuring go to {@code measured}.
+     */
+    void loadTick(double tickMillis, DoubleConsumer measured) {
+        tick(tickMillis);
+        if (measuring) {
+            measured.accept(tickMillis);
+        }
     }
 
     /**
      * One heartbeat in the LOAD phase. Once {@code elapsedMillis} reaches {@code loadMillis} the
-     * window ends and this returns true; before that it records the heartbeat and returns false.
+     * window ends, measuring stops, and this returns END; before that it records the heartbeat.
      */
-    boolean loadHeartbeat(long elapsedMillis, long loadMillis, long monoNanos, long wallMillis) {
+    LoadStep loadStep(long elapsedMillis, long loadMillis, long warmupMillis, long monoNanos, long wallMillis) {
         if (elapsedMillis >= loadMillis) {
             end(monoNanos, wallMillis, loadMillis);
-            return true;
+            measuring = false;
+            return LoadStep.END;
         }
         beat(monoNanos, wallMillis);
-        return false;
+        return elapsedMillis >= warmupMillis ? LoadStep.MEASURE : LoadStep.WARMUP;
     }
 
     /** The {@code SCENARIO_INVALID} log line for an invalid window, or null when it is valid. */
@@ -116,6 +142,14 @@ final class HostStallDetector {
             return null;
         }
         return "SCENARIO_INVALID " + scenario + " test host stall: " + String.join("; ", reasons);
+    }
+
+    /** Hands the {@code SCENARIO_INVALID} line to {@code warn} when the window is invalid. */
+    void warnIfInvalid(String scenario, Consumer<String> warn) {
+        String line = invalidLine(scenario);
+        if (line != null) {
+            warn.accept(line);
+        }
     }
 
     private long drift(long monoNanos, long wallMillis) {

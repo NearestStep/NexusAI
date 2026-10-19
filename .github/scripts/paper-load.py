@@ -185,17 +185,15 @@ def run(args, scenarios: list[str]) -> int:
             outcome = execute_scenario(
                 smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
                 requests_path, baseline_mean, bot_note, bots is not None,
+                recover=lambda: recover_after_stall(smoke, rcon_port, log_chunks, process),
             )
             results.append(outcome)
             if scenario == "baseline" and outcome.get("report"):
                 baseline_mean = outcome["report"]["mspt"]["mean"]
-            print(format_result(outcome))
+            say(format_result(outcome))
 
         write_summary(out, args, paper, results, log_chunks)
-        invalid = [item for item in results if item["status"] == "invalid"]
-        if invalid:
-            print("INVALID (test host stall): " + ", ".join(item["scenario"] for item in invalid))
-        return exit_code(item["status"] for item in results)
+        return finish_run(results)
     finally:
         stop_bots(bots)
         try:
@@ -213,8 +211,9 @@ def run(args, scenarios: list[str]) -> int:
 
 def execute_scenario(
     smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
-    requests_path, baseline_mean, bot_note, bots_up,
+    requests_path, baseline_mean, bot_note, bots_up, recover=None, measure=None,
 ) -> dict:
+    """Runs one scenario with one retry. measure replaces the real attempt in the self-check."""
     if scenario in {"S4", "S5", "S-world"} and not bots_up:
         return {
             "scenario": scenario,
@@ -307,16 +306,74 @@ def execute_scenario(
         shutil.copy2(saved, out / f"report-{scenario}.json")
         return last
 
-    return retry_once(scenario, attempt_once)
+    return retry_once(scenario, measure or attempt_once, recover)
 
 
-def retry_once(scenario: str, attempt_once) -> dict:
-    """Runs attempt 1, and attempt 2 only when attempt 1 failed or ran on a stalled test host."""
+def retry_once(scenario: str, attempt_once, recover=None) -> dict:
+    """Runs attempt 1, and attempt 2 only when attempt 1 failed or ran on a stalled test host.
+
+    After a stall, recover() has to bring the server back first: it returns "" when the server
+    is ready, or the reason it is not. A server that does not recover keeps the scenario
+    invalid instead of judging a second attempt that still carries the stall.
+    """
     last = attempt_once(1)
     if last["status"] in RETRY_STATUSES:
-        print(f"{scenario} attempt 1 {last['status']} ({'; '.join(last['reasons'])}); retrying once")
+        say(f"{scenario} attempt 1 {last['status']} ({'; '.join(last['reasons'])}); retrying once")
+        if last["status"] == "invalid" and recover is not None:
+            problem = recover()
+            if problem:
+                say(f"{scenario} not retried: {problem}")
+                return {**last, "reasons": last["reasons"] + [f"not retried: {problem}"]}
         last = attempt_once(2)
     return last
+
+
+TPS_READY = 19.8
+TPS_LINE = re.compile(r"TPS from last 1m, 5m, 15m:\s*\*?([0-9]+(?:\.[0-9]+)?)")
+
+
+def parse_tps(text: str) -> float | None:
+    """The 1-minute TPS from Paper's tps command, or None when the text has none."""
+    match = TPS_LINE.search(text or "")
+    return float(match.group(1)) if match else None
+
+
+def wait_for_tps(read_tps, timeout_s: float = 150.0, poll_s: float = 5.0,
+                 clock=time.monotonic, sleep=time.sleep) -> tuple[bool, float | None]:
+    """Polls until the 1-minute TPS is at least TPS_READY. Returns (ready, last value read)."""
+    deadline = clock() + timeout_s
+    last = None
+    while True:
+        try:
+            last = read_tps()
+        except Exception:
+            last = None
+        if last is not None and last >= TPS_READY:
+            return True, last
+        if clock() >= deadline:
+            return False, last
+        sleep(poll_s)
+
+
+def recover_after_stall(smoke, rcon_port: int, log_chunks: list[str], process) -> str:
+    """Before the retry of an invalid attempt: /nai reload drops the provider pause and backoff
+    the stall left behind, then the 1-minute TPS must climb back to TPS_READY, so the retry is
+    not judged on the stall. Returns "" when ready, otherwise why not."""
+    reload_plugin(smoke, rcon_port, log_chunks, process)
+    ready, tps = wait_for_tps(
+        lambda: parse_tps(smoke.strip_colors(smoke.rcon("127.0.0.1", rcon_port, "loadtest", "tps"))))
+    if ready:
+        say(f"server ready for the retry: /nai reload done, TPS {tps}")
+        return ""
+    return f"TPS {tps} did not reach {TPS_READY} within 150 s after the stall"
+
+
+def finish_run(results: list[dict]) -> int:
+    """Prints the invalid scenarios and returns the exit code for the run."""
+    invalid = [item for item in results if item["status"] == "invalid"]
+    if invalid:
+        say("INVALID (test host stall): " + ", ".join(item["scenario"] for item in invalid))
+    return exit_code(item["status"] for item in results)
 
 
 def exit_code(statuses) -> int:
@@ -969,10 +1026,23 @@ def boot_process(work: Path, stall_ms: int = 5000) -> subprocess.Popen:
     )
 
 
+OUTPUT_LOCK = threading.Lock()
+
+
+def say(text: str) -> None:
+    """One harness line, written in one piece so a server console line cannot land inside it."""
+    with OUTPUT_LOCK:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+
+
 def read_log(pipe, chunks: list[str]) -> None:
     for line in pipe:
         chunks.append(line)
-        sys.stdout.write(line)
+        with OUTPUT_LOCK:
+            if not line.endswith("\n"):
+                line += "\n"
+            sys.stdout.write(line)
         sys.stdout.flush()
 
 
@@ -1595,6 +1665,131 @@ def stall_self_check() -> None:
         command = java_command(stall_ms)
         if command.count(wanted) != 1 or command.index(wanted) > command.index("-jar"):
             raise SystemExit(f"server command for --stall-ms {stall_ms} lacks {wanted}: {command}")
+    # Every plan again, with the recovery step that runs before the retry of an invalid attempt.
+    for plan, ready, wanted_calls, wanted_status, wanted_recovers in (
+        (["invalid", "pass"], "", [1, 2], "pass", 1),
+        (["invalid", "pass"], "TPS 4.0 did not reach 19.8", [1], "invalid", 1),
+        (["fail", "pass"], "", [1, 2], "pass", 0),
+        (["pass"], "", [1], "pass", 0),
+    ):
+        events = []
+
+        def attempt(number: int, plan=plan, events=events) -> dict:
+            events.append(number)
+            return {"status": plan[number - 1], "reasons": ["self-check"]}
+
+        def recover(ready=ready, events=events) -> str:
+            events.append("recover")
+            return ready
+
+        result = retry_once("S1", attempt, recover)
+        calls = [item for item in events if item != "recover"]
+        if calls != wanted_calls or result["status"] != wanted_status or events.count("recover") != wanted_recovers:
+            raise SystemExit(f"retry with recovery for {plan}: {events}, status {result['status']}")
+        if wanted_recovers and len(calls) == 2 and events.index("recover") > events.index(2):
+            raise SystemExit(f"recovery ran after the retry: {events}")
+        if not ready == "" and not any("not retried" in reason for reason in result["reasons"]):
+            raise SystemExit(f"a server that did not recover gave no reason: {result['reasons']}")
+
+    # The case from a real run: a stall leaves the 1-minute TPS low and the provider paused, so a
+    # retry right away fails on TPS. With the recovery step the retry starts on a clean server.
+    def scenario_after_stall(with_recovery: bool) -> dict:
+        server = {"tps_1m": 1.93, "provider_paused": True}
+
+        def attempt(number: int) -> dict:
+            if number == 1:
+                return {"status": "invalid", "reasons": ["tick gap 109068 ms not covered by tick work > 5000 ms"]}
+            dirty = server["tps_1m"] < TPS_READY or server["provider_paused"]
+            return {"status": "fail" if dirty else "pass", "reasons": ["TPS 1.93 < 19.8"] if dirty else []}
+
+        readings = iter([1.93, 12.0, 19.9])
+
+        def recover() -> str:
+            server["provider_paused"] = False
+            ready, tps = wait_for_tps(lambda: next(readings), clock=lambda: 0.0, sleep=lambda seconds: None)
+            server["tps_1m"] = tps
+            return "" if ready else "not ready"
+
+        return execute_scenario(None, None, "S2-probe", None, [], 0, None, None, None, None, None, "", True,
+                                recover=recover if with_recovery else None, measure=attempt)
+
+    if scenario_after_stall(True)["status"] != "pass":
+        raise SystemExit("a retry after a stall was judged on the stall")
+    if scenario_after_stall(False)["status"] != "fail":
+        raise SystemExit("self-check model of the stall is wrong")
+    for text, wanted in (
+        ("TPS from last 1m, 5m, 15m: *20.0, 19.98, 19.9", 20.0),
+        ("TPS from last 1m, 5m, 15m: 1.93, 15.2, 18.0", 1.93),
+        ("Unknown command", None),
+    ):
+        if parse_tps(text) != wanted:
+            raise SystemExit(f"parse_tps({text!r}) is {parse_tps(text)}, expected {wanted}")
+    now = [0.0]
+    values = iter([5.0, None, 19.79, 19.8])
+    slept = []
+    ready = wait_for_tps(lambda: next(values), timeout_s=60, poll_s=5,
+                         clock=lambda: now[0], sleep=lambda seconds: (slept.append(seconds), now.__setitem__(0, now[0] + seconds)))
+    if ready != (True, 19.8) or slept != [5, 5, 5]:
+        raise SystemExit(f"wait_for_tps gave {ready} after {slept}")
+    now[0] = 0.0
+    slept.clear()
+
+    def broken() -> float:
+        raise OSError("rcon closed")
+
+    ready = wait_for_tps(broken, timeout_s=10, poll_s=5,
+                         clock=lambda: now[0], sleep=lambda seconds: (slept.append(seconds), now.__setitem__(0, now[0] + seconds)))
+    if ready != (False, None) or slept != [5, 5]:
+        raise SystemExit(f"wait_for_tps with a broken read gave {ready} after {slept}")
+    if execute_scenario(None, None, "S4", None, [], 0, None, None, None, None, None, "no bots", False,
+                        measure=lambda number: {"status": "pass", "reasons": []})["status"] != "not-run":
+        raise SystemExit("S4 without bots was run")
+
+    # finish_run gives the exit code of the whole run.
+    for statuses, wanted in ((["pass", "invalid"], 3), (["pass", "fail", "invalid"], 1), (["pass"], 0)):
+        got = finish_run([{"scenario": f"S{index}", "status": status} for index, status in enumerate(statuses)])
+        if got != wanted:
+            raise SystemExit(f"finish_run for {statuses} is {got}, expected {wanted}")
+
+    # boot_process starts the server with the stall property.
+    started = []
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            started.append(command)
+
+    real_popen = subprocess.Popen
+    subprocess.Popen = FakePopen
+    try:
+        boot_process(Path("."), 4321)
+    finally:
+        subprocess.Popen = real_popen
+    if len(started) != 1 or started[0].count("-Dnexusai.load.stallMillis=4321") != 1:
+        raise SystemExit(f"boot_process did not pass --stall-ms to the server: {started}")
+
+    # A harness line is one write, and a console line without a newline gets one.
+    class Recorder:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, text):
+            self.writes.append(text)
+
+        def flush(self):
+            pass
+
+    recorder = Recorder()
+    real_stdout = sys.stdout
+    sys.stdout = recorder
+    try:
+        say("baseline pass mspt_mean=1.0 reasons=[]")
+        read_log(iter(["[21:18:59 INFO]: Thread RCON Client shutting down"]), [])
+        say("S1 pass")
+    finally:
+        sys.stdout = real_stdout
+    if recorder.writes != ["baseline pass mspt_mean=1.0 reasons=[]\n",
+                           "[21:18:59 INFO]: Thread RCON Client shutting down\n", "S1 pass\n"]:
+        raise SystemExit(f"harness lines were split or joined: {recorder.writes}")
     detector = Path(__file__).resolve().parents[2] / "src" / "loadtest" / "java" / "io" / "github" / "neareststep" / "nexusai" / "load" / "HostStallDetector.java"
     if detector.is_file():
         match = re.search(r'PROPERTY = "([^"]+)"', detector.read_text(encoding="utf-8"))

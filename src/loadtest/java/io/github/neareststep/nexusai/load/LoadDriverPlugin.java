@@ -361,9 +361,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         if (current == null || current.phase != Phase.LOAD) {
             return;
         }
-        if (current.stall.loadTick(tickMillis, current.measuring)) {
-            current.mspt.add(tickMillis);
-        }
+        current.stall.loadTick(tickMillis, current.mspt::add);
     }
 
     /**
@@ -387,19 +385,20 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             }
             if (current.phase == Phase.LOAD) {
                 long elapsed = now - current.startedAt;
-                if (current.stall.loadHeartbeat(elapsed, current.loadMillis, System.nanoTime(), System.currentTimeMillis())) {
+                HostStallDetector.LoadStep step = current.stall.loadStep(
+                        elapsed, current.loadMillis, current.warmupMillis, System.nanoTime(), System.currentTimeMillis());
+                if (step == HostStallDetector.LoadStep.END) {
                     current.phase = Phase.DRAIN;
-                    current.measuring = false;
                     current.drainStartedAt = now;
                 } else {
-                    boolean measure = elapsed >= current.warmupMillis;
+                    boolean measure = step == HostStallDetector.LoadStep.MEASURE;
                     if (measure && !current.threadsSeen) {
                         // One tick of bookkeeping stays outside the MSPT window.
                         sampleThreads(current);
                         return;
                     }
-                    if (measure && !current.measuring) {
-                        current.measuring = true;
+                    if (measure && !current.stall.measuring()) {
+                        current.stall.startMeasuring();
                         getLogger().info("SCENARIO_MEASURE " + current.scenario);
                     }
                     if (now - current.lastAux >= 1000L) {
@@ -636,10 +635,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         } catch (IOException ex) {
             getLogger().severe("Could not write report.json: " + ex.getMessage());
         }
-        String invalid = current.stall.invalidLine(current.scenario);
-        if (invalid != null) {
-            getLogger().warning(invalid);
-        }
+        current.stall.warnIfInvalid(current.scenario, getLogger()::warning);
         getLogger().info("SCENARIO_END " + current.scenario);
         if (run == current) {
             run = null;
@@ -983,7 +979,6 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         private boolean skipped;
         private boolean settled;
         private boolean reported;
-        private boolean measuring;
         private boolean threadsSeen;
         private boolean tpsSeen;
         private String error = "";
