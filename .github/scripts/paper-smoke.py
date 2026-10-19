@@ -1966,6 +1966,18 @@ def _download_self_check() -> None:
             _fetch_to = flaky
             download(url, root / "out" / "c.jar", sha256=digest, attempts=2)
             _need(len(calls) == 2 and (root / "out" / "c.jar").read_bytes() == payload, "mismatch was not retried")
+            calls.clear()
+
+            def short(fetch_url: str, target: Path):
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    target.write_bytes(payload[:2000])
+                    return len(payload)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = short
+            download(url, root / "out" / "f.jar", attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "f.jar").read_bytes() == payload, "short read was not retried")
             _fetch_to = real_fetch
             entry.unlink()
             try:
