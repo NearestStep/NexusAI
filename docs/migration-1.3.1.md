@@ -1,6 +1,6 @@
 # Migration to 1.3.1
 
-Replace the previous jar with `NexusAI-1.3.1.jar` on Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+ (Java 25 for Paper/Folia 26.x). Stop the server, swap the jar, start it. You do not edit `config-version`.
+Replace the previous jar with `NexusAI-1.3.1.jar` on Paper or Purpur 1.20.6 through 26.2, or Folia 1.21.8, 1.21.11, 26.1.2, or 26.2, Java 21+ (Java 25 for every 26.x server: Paper, Purpur, and Folia). Stop the server, swap the jar, start it. You do not edit `config-version`.
 
 ## What is written for you
 
@@ -51,8 +51,8 @@ All 22 keys appended on an upgrade from 1.2.x:
 
 ## context.log-timeouts
 
-- `true` (default, and what is appended): a context provider call that overruns its limit logs one INFO line, `Context provider '<id>' timed out after <N> ms and was skipped.` Per provider there is at most one line per `limits.error-log-cooldown-seconds` (30); the next line adds `<K> more timeouts since the last notice.` The line is written on the `nexusai-scheduler` thread, never on the main thread or a region thread.
-- `false`: no line for a single timeout. The timeout still counts toward `context.suspend-after-timeouts`, the `Context provider '<id>' suspended until ...` warning is still logged, and `/nai status` still shows the timeout count.
+- `true` (default, and what is appended): a context provider call that overruns its limit logs one INFO line, `Context provider '<id>' timed out after <N> ms and was skipped.` Per provider there is at most one line per `limits.error-log-cooldown-seconds` (30); the next line adds `<K> more timeouts since the last notice.` (`1 more timeout` for one). The line is written on the `nexusai-scheduler` thread, never on the main thread or a region thread.
+- `false`: no line for a single timeout. The timeout still counts toward `context.suspend-after-timeouts`, the `Context provider '<id>' suspended until ...` warning is still logged, and `/nai status` still counts the failed call (the field labelled `timeouts` counts timeouts and exceptions).
 - After `/nai reload`, `<K>` is counted again from zero. Details: [Context provider timeouts](limitations.md#context-provider-timeouts).
 
 ## dialogue.log-stop-budget
