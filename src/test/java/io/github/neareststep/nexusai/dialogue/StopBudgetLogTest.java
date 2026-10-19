@@ -521,7 +521,7 @@ class StopBudgetLogTest {
                 assertFalse(written.contains(broken + ":"), written);
                 assertTrue(written.contains("innkeeper".equals(broken) ? "kept-from-disk" : "only-in-memory"), written);
                 assertEquals(List.of("Left 1 dialogue character out of dialogue-memory.yml because YAML could not "
-                        + "write them; the other characters were saved (IllegalStateException: rejected for the test)"),
+                        + "write it; the other characters were saved (IllegalStateException: rejected for the test)"),
                         warnings(fixture.records));
                 List<String> lines = infos(fixture.records);
                 assertEquals(1, lines.size(), fixture.records.toString());

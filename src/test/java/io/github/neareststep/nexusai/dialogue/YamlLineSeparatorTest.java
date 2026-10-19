@@ -219,7 +219,7 @@ class YamlLineSeparatorTest {
         List<String> warned = messages(warnings(records));
         assertEquals(2, warned.size(), warned.toString());
         assertEquals("Failed to save dialogue-memory.yml (IllegalStateException: dump rejected for the test)", warned.get(0));
-        assertTrue(warned.get(1).startsWith("Did not save 1 dialogue characters"), warned.toString());
+        assertTrue(warned.get(1).startsWith("Did not save 1 dialogue character because "), warned.toString());
 
         fail.set(false);
         files.save();
@@ -252,7 +252,7 @@ class YamlLineSeparatorTest {
         List<String> warned = messages(warnings(records));
         assertTrue(warned.contains("Failed to save dialogue-memory.yml (IllegalStateException: dump rejected for the test)"),
                 warned.toString());
-        assertTrue(warned.stream().anyMatch(line -> line.startsWith("Did not save 2 dialogue characters")), warned.toString());
+        assertTrue(warned.stream().anyMatch(line -> line.startsWith("Did not save 2 dialogue characters because ")), warned.toString());
     }
 
     /** A save that throws past the store is a warning, not a FINE line. */

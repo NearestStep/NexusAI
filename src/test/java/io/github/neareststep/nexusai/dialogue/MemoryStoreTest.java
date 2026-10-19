@@ -390,8 +390,25 @@ class MemoryStoreTest {
         assertEquals("keep-bak\n", Files.readString(bak, StandardCharsets.UTF_8));
         assertEquals("keep-notes\n", Files.readString(other, StandardCharsets.UTF_8));
         assertArrayEquals(before, Files.readAllBytes(file));
-        assertTrue(logged.stream().anyMatch(line -> line.contains("Removed 2 stale")));
+        assertTrue(logged.contains("Removed 2 stale dialogue-memory.yml temp files left after saves were interrupted."),
+                logged.toString());
         assertTrue(logged.stream().noneMatch(line -> line.contains("qa-ring-kA-0002y")));
+    }
+
+    @Test
+    void oneStaleTempFileIsReportedInTheSingular() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-stale-one");
+        Path file = dir.resolve("dialogue-memory.yml");
+        Files.writeString(file, "entries: {}\n", StandardCharsets.UTF_8);
+        Path stale = dir.resolve("dialogue-memory.yml." + UUID.randomUUID() + ".tmp");
+        Files.writeString(stale, "partial", StandardCharsets.UTF_8);
+        List<String> logged = new ArrayList<>();
+
+        new MemoryStore().load(file.toFile(), 60L, 10_000L, capturingLogger("stale-one", logged), List.of());
+
+        assertFalse(Files.exists(stale));
+        assertTrue(logged.contains("Removed 1 stale dialogue-memory.yml temp file left after a save was interrupted."),
+                logged.toString());
     }
 
     @Test

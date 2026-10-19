@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -185,15 +186,35 @@ class LoneSurrogateTest {
      */
     @Test
     void oneCharacterThatCannotBeWrittenDoesNotBlockTheOthers() throws Exception {
+        charactersThatCannotBeWrittenDoNotBlockTheOthers(false,
+                "Left 1 dialogue character out of dialogue-memory.yml because YAML could not write it; "
+                        + "the other characters were saved (IllegalStateException: rejected for the test)",
+                "Dialogue character left out of dialogue-memory.yml: ", "broken");
+    }
+
+    /** Two characters YAML cannot write: the same warning in the plural, and both are left out. */
+    @Test
+    void twoCharactersThatCannotBeWrittenDoNotBlockTheOthers() throws Exception {
+        charactersThatCannotBeWrittenDoNotBlockTheOthers(true,
+                "Left 2 dialogue characters out of dialogue-memory.yml because YAML could not write them; "
+                        + "the other characters were saved (IllegalStateException: rejected for the test)",
+                "Dialogue characters left out of dialogue-memory.yml: ", "broken", "cracked");
+    }
+
+    private static void charactersThatCannotBeWrittenDoNotBlockTheOthers(
+            boolean two, String warning, String detailPrefix, String... leftOut) throws Exception {
         for (boolean stop : new boolean[] {false, true}) {
             Path file = tempFile("lone-broken");
             UUID player = UUID.randomUUID();
             MemoryStore store = new MemoryStore();
             store.append(player, "smith", "user", "hello", NOW, 8, 8_000, 0L);
             store.append(player, "broken", "assistant", "private words", NOW, 8, 8_000, 0L);
+            if (two) {
+                store.append(player, "cracked", "assistant", "more private words", NOW, 8, 8_000, 0L);
+            }
             store.append(player, "harbor", "user", "new character", NOW, 8, 8_000, 0L);
             MemoryStore.beforeDocumentDump = document -> {
-                if (holdsKey(document.get("entries"), "broken")) {
+                if (holdsKey(document.get("entries"), "broken") || holdsKey(document.get("entries"), "cracked")) {
                     throw new IllegalStateException("rejected for the test");
                 }
             };
@@ -209,12 +230,20 @@ class LoneSurrogateTest {
             assertTrue(Files.isRegularFile(file), "dialogue-memory.yml was not written: " + messages(records));
             String saved = Files.readString(file, StandardCharsets.UTF_8);
             assertFalse(saved.contains("broken"), saved);
+            assertFalse(saved.contains("cracked"), saved);
             MemoryStore loaded = load(file, new ArrayList<>());
             assertEquals("hello", text(loaded, player, "smith"));
             assertEquals("new character", text(loaded, player, "harbor"));
-            assertEquals(List.of("Left 1 dialogue character out of dialogue-memory.yml because YAML could not write them; "
-                    + "the other characters were saved (IllegalStateException: rejected for the test)"),
-                    messages(warnings(records)));
+            assertEquals(List.of(warning), messages(warnings(records)));
+            List<String> details = records.stream()
+                    .filter(r -> r.getLevel() == Level.FINE && r.getMessage().contains(" left out of "))
+                    .map(LogRecord::getMessage)
+                    .toList();
+            assertEquals(1, details.size(), details.toString());
+            assertTrue(details.getFirst().startsWith(detailPrefix), details.getFirst());
+            // The order follows memory, which is not sorted.
+            assertEquals(Arrays.stream(leftOut).map(id -> player + "/" + id).sorted().toList(),
+                    Arrays.stream(details.getFirst().substring(detailPrefix.length()).split(", ")).sorted().toList());
             assertTrue(messages(records).stream().noneMatch(line -> line.contains("private words")), messages(records).toString());
         }
     }

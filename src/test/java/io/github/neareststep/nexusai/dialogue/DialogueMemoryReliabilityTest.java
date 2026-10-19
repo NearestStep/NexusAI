@@ -737,7 +737,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    "Did not save 1 dialogue character because it did not finish within the stop budget.",
                     notes.get(0));
             assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
             assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
@@ -776,7 +776,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because the key scan failed.",
+                    "Did not save 1 dialogue character because the key scan failed.",
                     notes.get(0));
             assertEquals(0, warnings(fixture.records, PAUSED).size(), fixture.records.toString());
             assertEquals(1, fixture.records.stream().filter(record -> record.getLevel() == Level.WARNING).count(),
@@ -1060,7 +1060,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    "Did not save 1 dialogue character because it did not finish within the stop budget.",
                     notes.get(0));
             Thread pending = fixture.files.diskLoader();
             release.countDown();
@@ -1140,7 +1140,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because it did not finish within the stop budget.",
+                    "Did not save 1 dialogue character because it did not finish within the stop budget.",
                     notes.get(0));
         } finally {
             DialogueMemoryPersistence.shutdownLoadGraceMillis = previousGrace;
@@ -1178,7 +1178,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because dialogue-memory.yml could not be written.",
+                    "Did not save 1 dialogue character because dialogue-memory.yml could not be written.",
                     notes.get(0));
             assertEquals(0, warnings(fixture.records, "stop budget").size(), fixture.records.toString());
             assertEquals(0, warnings(fixture.records, "could not be read").size(), fixture.records.toString());
@@ -1218,7 +1218,7 @@ class DialogueMemoryReliabilityTest {
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
             assertEquals(
-                    "Did not save 1 dialogue characters because the key scan failed.",
+                    "Did not save 1 dialogue character because the key scan failed.",
                     notes.get(0));
             assertEquals(0, warnings(fixture.records, "stop budget").size(), fixture.records.toString());
             long limit = DialogueMemoryPersistence.shutdownLoadGraceMillis + 1_500L;

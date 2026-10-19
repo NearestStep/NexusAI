@@ -1022,11 +1022,9 @@ public final class MemoryStore {
             skippedKeys.addAll(keys);
         }
         if (logger != null) {
-            logger.warning(LogRedaction.summaryWithCause("Left " + skipped.size() + " dialogue "
-                    + (skipped.size() == 1 ? "character" : "characters")
-                    + " out of dialogue-memory.yml because YAML could not write them; the other characters were saved",
-                    cause, secrets()));
-            logger.fine("Dialogue characters left out of dialogue-memory.yml: " + String.join(", ", skipped));
+            logger.warning(LogRedaction.summaryWithCause(leftOutText(skipped.size()), cause, secrets()));
+            logger.fine((skipped.size() == 1 ? "Dialogue character" : "Dialogue characters")
+                    + " left out of dialogue-memory.yml: " + String.join(", ", skipped));
         }
         return body;
     }
@@ -1966,7 +1964,18 @@ public final class MemoryStore {
         if (logger == null || count <= 0 || reason == null) {
             return;
         }
-        logger.warning("Did not save " + count + " dialogue characters because " + reason.text + ".");
+        logger.warning("Did not save " + dialogueCharacters(count) + " because " + reason.text + ".");
+    }
+
+    /** {@code "1 dialogue character"} or {@code "<count> dialogue characters"}, for log lines. */
+    static String dialogueCharacters(int count) {
+        return count + (count == 1 ? " dialogue character" : " dialogue characters");
+    }
+
+    /** The warning text, without the cause, for characters left out of a save. */
+    static String leftOutText(int count) {
+        return "Left " + dialogueCharacters(count) + " out of dialogue-memory.yml because YAML could not write "
+                + (count == 1 ? "it" : "them") + "; the other characters were saved";
     }
 
     /**
@@ -3144,9 +3153,14 @@ public final class MemoryStore {
             }
         }
         if (removed > 0 && logger != null) {
-            logger.info("Removed " + removed
-                    + " stale dialogue-memory.yml temp file(s) left after a save was interrupted.");
+            logger.info(removedTempsText(removed));
         }
+    }
+
+    static String removedTempsText(int removed) {
+        return removed == 1
+                ? "Removed 1 stale dialogue-memory.yml temp file left after a save was interrupted."
+                : "Removed " + removed + " stale dialogue-memory.yml temp files left after saves were interrupted.";
     }
 
     private static String key(UUID player, String characterId) {
