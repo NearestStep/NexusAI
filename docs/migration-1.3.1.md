@@ -49,6 +49,17 @@ All 22 keys appended on an upgrade from 1.2.x:
 - `false` prints no banner. NexusAI logs one line when enable work finishes: `[NexusAI] NexusAI enabled. Ready in N ms`.
 - Any other value logs one warning on startup and on `/nai reload` and uses `true`. The words from 1.3.0 development builds are read without a warning: `full` as `true`, and `compact` and `off` as `false` (`compact` asked for less than the full banner, so it gets the one-line output).
 
+## context.log-timeouts
+
+- `true` (default, and what is appended): a context provider call that overruns its limit logs one INFO line, `Context provider '<id>' timed out after <N> ms and was skipped.` Per provider there is at most one line per `limits.error-log-cooldown-seconds` (30); the next line adds `<K> more timeouts since the last notice.` The line is written on the `nexusai-scheduler` thread, never on the main thread or a region thread.
+- `false`: no line for a single timeout. The timeout still counts toward `context.suspend-after-timeouts`, the `Context provider '<id>' suspended until ...` warning is still logged, and `/nai status` still shows the timeout count.
+- After `/nai reload`, `<K>` is counted again from zero. Details: [Context provider timeouts](limitations.md#context-provider-timeouts).
+
+## dialogue.log-stop-budget
+
+- `true` (default, and what is appended): when the server stops while the first off-to-on load of `dialogue-memory.yml` is still running, stop logs one INFO line that starts with `Stop ran during the first dialogue memory load and used the stop budget:`. A normal stop does not log it.
+- `false` turns the line off. The `Did not save ...` warning is not affected. Details: [When is `dialogue-memory.yml` written](faq.md#when-is-dialogue-memoryyml-written-and-what-happens-to-expired-transcripts).
+
 ## How to roll back
 
 1. Stop the server.

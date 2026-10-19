@@ -46,6 +46,10 @@ Each `NexusContextProvider` runs on `nexusai-context-N` (2 threads, queue of 256
 
 A provider that is still running at its limit is interrupted and only its value is dropped. The other providers that finished are kept, and the request to the model goes ahead. A value that arrives after the limit is discarded and is not cached. When the whole collect reaches `total-timeout-millis`, the block is built from the providers that have finished.
 
+A call that overruns its provider limit logs one INFO line: `Context provider '<id>' timed out after <N> ms and was skipped.` `<N>` is the limit that applied, `min(timeout(), context.max-provider-timeout-millis)`. Per provider there is at most one line per `limits.error-log-cooldown-seconds` (30). Timeouts inside that window are counted, and the next line adds `<K> more timeouts since the last notice.` (`1 more timeout` for one). The line is written on the `nexusai-scheduler` thread, never on the main thread or a region thread. A provider that never started because both threads were busy logs no line. `context.log-timeouts: false` turns the line off; the timeout still counts toward the pause below and is still shown in `/nai status`.
+
+After `/nai reload`, `<K>` is counted again from zero: timeouts that were counted but not yet reported are not reported, and the next timeout logs a line right away, even inside the old cooldown window. Reload also clears the pause and the timeout counts in `/nai status`.
+
 After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is paused for `context.suspend-seconds` (60) and the log shows `Context provider '<id>' suspended until ...`. An exception is logged as a warning, at most once per `limits.error-log-cooldown-seconds` per provider. `/nai status` lists each provider with its timeout count and state. A provider that never started because both threads were busy is skipped for that request and does not count against it.
 
 ## Validate before you act
