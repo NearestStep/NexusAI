@@ -7,6 +7,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HostStallDetectorTest {
@@ -101,5 +102,89 @@ class HostStallDetectorTest {
         detector.end(10_000L * MS, 0L, 1_000L);
         assertFalse(detector.invalid());
         assertEquals(-1L, detector.toMap().get("windowMillis"));
+    }
+
+    @Test
+    void valuesExactlyAtTheThresholdAreValid() {
+        HostStallDetector gapAt = new HostStallDetector(5_000L);
+        gapAt.start(0L, 0L);
+        gapAt.beat(5_000L * MS, 5_000L);
+        assertFalse(gapAt.invalid(), gapAt.reasons().toString());
+        HostStallDetector gapOver = new HostStallDetector(5_000L);
+        gapOver.start(0L, 0L);
+        gapOver.beat(5_001L * MS, 5_001L);
+        assertTrue(gapOver.reasons().get(0).startsWith("tick gap 5001 ms"), gapOver.reasons().toString());
+
+        HostStallDetector driftAt = new HostStallDetector(5_000L);
+        driftAt.start(0L, 0L);
+        driftAt.beat(50L * MS, 5_050L);
+        assertFalse(driftAt.invalid(), driftAt.reasons().toString());
+        HostStallDetector driftOver = new HostStallDetector(5_000L);
+        driftOver.start(0L, 0L);
+        driftOver.beat(50L * MS, 5_051L);
+        assertEquals(List.of("wall and monotonic clocks drifted 5001 ms > 5000 ms"), driftOver.reasons());
+
+        HostStallDetector overrunAt = new HostStallDetector(5_000L);
+        overrunAt.start(0L, 0L);
+        overrunAt.tick(6_000.0d);
+        overrunAt.end(6_000L * MS, 6_000L, 1_000L);
+        assertFalse(overrunAt.invalid(), overrunAt.reasons().toString());
+        HostStallDetector overrunOver = new HostStallDetector(5_000L);
+        overrunOver.start(0L, 0L);
+        overrunOver.tick(6_001.0d);
+        overrunOver.end(6_001L * MS, 6_001L, 1_000L);
+        assertEquals(List.of("window ran 6001 ms, expected 1000 ms"), overrunOver.reasons());
+    }
+
+    /** Heartbeats and ticks as LoadDriverPlugin feeds them: every 50 ms, 1 ms ticks, one optional hole. */
+    private static HostStallDetector loadWindow(long holeMillis) {
+        HostStallDetector detector = new HostStallDetector(5_000L);
+        long elapsed = 0L;
+        long wall = 1_000_000L;
+        boolean ended = false;
+        while (!ended) {
+            assertTrue(detector.loadTick(1.0d, elapsed >= 2_000L) == (elapsed >= 2_000L));
+            ended = detector.loadHeartbeat(elapsed, 30_000L, elapsed * MS, wall + elapsed);
+            elapsed += elapsed == 10_000L ? holeMillis : 50L;
+        }
+        return detector;
+    }
+
+    @Test
+    void loadHeartbeatsFindAHoleAndEndTheWindow() {
+        HostStallDetector clean = loadWindow(50L);
+        assertFalse(clean.invalid(), clean.reasons().toString());
+        assertTrue((long) clean.toMap().get("maxTickGapMillis") < 100L, clean.toMap().toString());
+        assertEquals(30_000L, clean.toMap().get("windowMillis"));
+        assertEquals(30_000L, clean.toMap().get("expectedWindowMillis"));
+
+        HostStallDetector holed = loadWindow(10_000L);
+        assertTrue(holed.invalid());
+        long gap = (long) holed.toMap().get("maxTickGapMillis");
+        assertTrue(gap >= 9_990L && gap <= 10_000L, holed.toMap().toString());
+    }
+
+    @Test
+    void longWarmupTickIsTickWorkNotAStall() {
+        HostStallDetector detector = new HostStallDetector(5_000L);
+        assertFalse(detector.loadHeartbeat(0L, 120_000L, 0L, 0L));
+        assertFalse(detector.loadTick(6_000.0d, false));
+        assertFalse(detector.loadHeartbeat(6_050L, 120_000L, 6_050L * MS, 6_050L));
+        assertFalse(detector.invalid(), detector.reasons().toString());
+        assertTrue(detector.loadTick(1.0d, true));
+    }
+
+    @Test
+    void invalidWindowGivesTheLogLine() {
+        HostStallDetector valid = new HostStallDetector(5_000L);
+        valid.start(0L, 0L);
+        valid.beat(50L * MS, 50L);
+        assertNull(valid.invalidLine("S1"));
+
+        HostStallDetector stalled = new HostStallDetector(5_000L);
+        stalled.start(0L, 0L);
+        stalled.beat(10_013L * MS, 10_013L);
+        assertEquals("SCENARIO_INVALID S1 test host stall: tick gap 10013 ms not covered by tick work > 5000 ms",
+                stalled.invalidLine("S1"));
     }
 }

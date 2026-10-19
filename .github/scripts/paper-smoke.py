@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
 import zipfile
@@ -39,6 +41,9 @@ PAPI_URL = (
     "https://github.com/PlaceholderAPI/PlaceholderAPI/releases/download/"
     "2.12.3/PlaceholderAPI-2.12.3.jar"
 )
+PAPI_NAME = "PlaceholderAPI-2.12.3.jar"
+# sha256 of PlaceholderAPI-2.12.3.jar, the digest GitHub publishes for that release asset.
+PAPI_SHA256 = "fde03259f5af6938f3c33eeb4d814000a1adabf1d2304ce14970be81f609a437"
 FILL = "https://fill.papermc.io/v3/projects/paper/versions/{version}/builds"
 FILL_PROJECT = "https://fill.papermc.io/v3/projects/{project}/versions/{version}/builds"
 USER_AGENT = "NexusAI-smoke/1.0"
@@ -114,7 +119,7 @@ def main() -> int:
     try:
         paper = download_paper(args.version, work / "paper.jar")
         seed_paperclip(work / "paper.jar", work)
-        download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
+        install_papi(work / "plugins")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         check_api = False
         if args.driver_dir.strip():
@@ -183,7 +188,7 @@ def class_major(jar: Path, entry: str) -> int:
 
 
 def download_paper(version: str, destination: Path) -> dict:
-    payload = json.loads(fetch(FILL.format(version=version)))
+    payload = fetch_listing(FILL.format(version=version))
     builds = payload["builds"] if isinstance(payload, dict) else payload
     stable = [build for build in builds if build.get("channel") == "STABLE"]
     if not stable:
@@ -230,11 +235,16 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
     With sha256 the cache entry is cache/sha256/<hash>, a cached or downloaded file is checked
     against it, and a mismatch deletes the file and downloads again, up to attempts times.
     A file dropped in the cache under its own name (for example cache/mojang_26.2.jar) is used
-    when its hash matches. Without sha256 the entry is keyed by the URL and a download shorter
-    than its Content-Length is rejected.
+    when its hash matches. Without sha256 the entry is keyed by the URL, its sha256 is saved
+    beside it in <entry>.sha256, and an entry without that file or with a different hash is
+    deleted and downloaded again. A .jar without sha256 must also open as a zip archive whose
+    entries pass their CRC check. A download shorter than its Content-Length is rejected. A
+    transport error (OSError, or an http.client error such as IncompleteRead) is retried, and
+    the partial file is always removed.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     root = cache_dir()
+    check_zip = not sha256 and destination.name.endswith(".jar")
     if sha256:
         sha256 = sha256.lower()
         cache = root / "sha256" / sha256
@@ -252,7 +262,7 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
     if sha256 and _cached_ok(cache, sha256):
         shutil.copy2(cache, destination)
         return
-    if not sha256 and cache.is_file() and cache.stat().st_size >= 1000:
+    if not sha256 and _cached_by_url_ok(cache, check_zip):
         shutil.copy2(cache, destination)
         return
     problem = ""
@@ -262,22 +272,28 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
             print(f"download {url}" + (f" (attempt {attempt})" if attempt > 1 else ""))
             expected_length = _fetch_to(url, partial)
             size = partial.stat().st_size
+            digest = file_sha256(partial)
             if expected_length is not None and size != expected_length:
                 problem = f"got {size} of {expected_length} bytes"
-            elif sha256 and file_sha256(partial) != sha256:
+            elif sha256 and digest != sha256:
                 problem = f"sha256 mismatch (expected {sha256})"
             elif not sha256 and size < 1000:
                 problem = f"only {size} bytes"
+            elif check_zip and not _zip_ok(partial):
+                problem = "not a valid jar (zip check failed)"
             else:
                 os.replace(partial, cache)
+                if not sha256:
+                    _sidecar(cache).write_text(digest + "\n", encoding="utf-8")
                 shutil.copy2(cache, destination)
                 return
-        except OSError as error:
-            problem = str(error)
-        partial.unlink(missing_ok=True)
+        except (OSError, http.client.HTTPException) as error:
+            problem = f"{type(error).__name__}: {error}"
+        finally:
+            partial.unlink(missing_ok=True)
         print(f"download {url} failed: {problem}", file=sys.stderr)
         if attempt < attempts:
-            time.sleep(min(10, 2 * attempt))
+            _sleep(min(10, 2 * attempt))
     raise RuntimeError(f"download failed after {attempts} attempts: {url}: {problem}")
 
 
@@ -291,12 +307,85 @@ def _cached_ok(cache: Path, sha256: str) -> bool:
     return False
 
 
+def _sidecar(cache: Path) -> Path:
+    return cache.with_name(cache.name + ".sha256")
+
+
+def _cached_by_url_ok(cache: Path, check_zip: bool) -> bool:
+    """A URL-keyed entry is used only when it matches the sha256 saved beside it (and opens as a jar)."""
+    side = _sidecar(cache)
+    if not cache.is_file():
+        side.unlink(missing_ok=True)
+        return False
+    try:
+        expected = side.read_text(encoding="utf-8").strip() if side.is_file() else ""
+    except OSError:
+        expected = ""
+    if not expected:
+        reason = "has no saved sha256"
+    elif file_sha256(cache) != expected:
+        reason = "does not match its saved sha256"
+    elif check_zip and not _zip_ok(cache):
+        reason = "is not a valid jar"
+    else:
+        return True
+    print(f"cache: {cache.name} {reason}, removed")
+    cache.unlink(missing_ok=True)
+    side.unlink(missing_ok=True)
+    return False
+
+
+def _zip_ok(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return archive.testzip() is None
+    except Exception:
+        return False
+
+
 def _fetch_to(url: str, target: Path) -> int | None:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as handle:
         length = response.headers.get("Content-Length")
         shutil.copyfileobj(response, handle)
     return int(length) if length and length.isdigit() else None
+
+
+_sleep = time.sleep
+
+
+def install_papi(plugins: Path) -> None:
+    """PlaceholderAPI 2.12.3, checked against its pinned sha256, with a config that stays offline."""
+    jar = plugins / PAPI_NAME
+    download(PAPI_URL, jar, sha256=PAPI_SHA256, name=PAPI_NAME)
+    write_papi_config(plugins / "PlaceholderAPI" / "config.yml", jar)
+
+
+def write_papi_config(path: Path, jar: Path) -> None:
+    """PlaceholderAPI's default config with the expansion cloud and the update check turned off.
+
+    Both reach the network on startup. A failed expansion cloud download logs a stack trace
+    (Failed to download expansion information) that the smoke log check counts as an error.
+    """
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            text = archive.read("config.yml").decode("utf-8")
+    except Exception:
+        text = ""
+    lines = []
+    seen = set()
+    for line in text.splitlines():
+        key = line.split(":", 1)[0]
+        if key in ("cloud_enabled", "check_updates"):
+            lines.append(f"{key}: false")
+            seen.add(key)
+        else:
+            lines.append(line)
+    for key in ("check_updates", "cloud_enabled"):
+        if key not in seen:
+            lines.append(f"{key}: false")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def read_download_context(jar: Path) -> list[tuple[str, str, str]]:
@@ -334,6 +423,43 @@ def fetch(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
+
+
+_fetch_text = fetch
+LISTING_ATTEMPTS = 3
+
+
+def fetch_listing(url: str, attempts: int = LISTING_ATTEMPTS):
+    """A Paper API build list, with retries.
+
+    A good answer is saved under cache/api/. When the API cannot be reached after the retries,
+    the last saved answer for that URL is used, so a host with a warm cache can boot offline.
+    """
+    saved = cache_dir() / "api" / (hashlib.sha256(url.encode("utf-8")).hexdigest() + ".json")
+    problem = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            text = _fetch_text(url)
+            payload = json.loads(text)
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            temporary = saved.with_name(saved.name + ".part")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, saved)
+            return payload
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            problem = f"{type(error).__name__}: {error}"
+            print(f"listing {url} failed: {problem}", file=sys.stderr)
+        if attempt < attempts:
+            _sleep(min(10, 2 * attempt))
+    if saved.is_file():
+        try:
+            payload = json.loads(saved.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        if payload is not None:
+            print(f"cache: using the saved build list for {url}")
+            return payload
+    raise RuntimeError(f"could not list builds after {attempts} attempts: {url}: {problem}")
 
 
 def free_port() -> int:
@@ -1233,7 +1359,7 @@ def run_folia(args) -> int:
     try:
         chosen = download_folia(args.version, work / "folia.jar")
         seed_paperclip(work / "folia.jar", work)
-        download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
+        install_papi(work / "plugins")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         if mode == "full":
             install_folia_probe(args.driver_dir, work / "plugins")
@@ -1257,7 +1383,7 @@ def run_folia(args) -> int:
 def download_folia(version: str, destination: Path) -> dict:
     url = FILL_PROJECT.format(project="folia", version=version)
     try:
-        payload = json.loads(fetch(url))
+        payload = fetch_listing(url)
     except Exception as error:
         raise RuntimeError(f"could not list Folia builds for {version}: {error}") from error
     builds = payload["builds"] if isinstance(payload, dict) else payload
@@ -1924,6 +2050,7 @@ def _smoke_self_check() -> None:
             archive.writestr("plugin.yml", "name: NexusAI\nfolia-supported: false\n")
         _need(not read_folia_supported(jar_path), "jar flag was not false")
     _download_self_check()
+    _download_cache_self_check()
 
 
 def _download_self_check() -> None:
@@ -1968,16 +2095,35 @@ def _download_self_check() -> None:
             _need(len(calls) == 2 and (root / "out" / "c.jar").read_bytes() == payload, "mismatch was not retried")
             calls.clear()
 
+            jar_bytes = _self_check_jar()
+            jar_source = root / "plain.jar"
+            jar_source.write_bytes(jar_bytes)
+
             def short(fetch_url: str, target: Path):
                 calls.append(fetch_url)
                 if len(calls) == 1:
-                    target.write_bytes(payload[:2000])
-                    return len(payload)
+                    target.write_bytes(jar_bytes[:2000])
+                    return len(jar_bytes)
                 return real_fetch(fetch_url, target)
 
             _fetch_to = short
-            download(url, root / "out" / "f.jar", attempts=2)
-            _need(len(calls) == 2 and (root / "out" / "f.jar").read_bytes() == payload, "short read was not retried")
+            download(jar_source.as_uri(), root / "out" / "f.jar", attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "f.jar").read_bytes() == jar_bytes, "short read was not retried")
+            # A file that is not a jar has only its length to go by.
+            blob = root / "plain.bin"
+            blob.write_bytes(payload)
+            calls.clear()
+
+            def short_blob(fetch_url: str, target: Path):
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    target.write_bytes(payload[:-100])
+                    return len(payload)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = short_blob
+            download(blob.as_uri(), root / "out" / "g.bin", attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "g.bin").read_bytes() == payload, "short read of a non-jar was not retried")
             _fetch_to = real_fetch
             entry.unlink()
             try:
@@ -1993,6 +2139,169 @@ def _download_self_check() -> None:
             _need((root / "out" / "e.jar").read_bytes() == payload, "pre-placed file not used")
         finally:
             _fetch_to = real_fetch
+            if saved_env is None:
+                os.environ.pop("NEXUSAI_SMOKE_CACHE", None)
+            else:
+                os.environ["NEXUSAI_SMOKE_CACHE"] = saved_env
+
+
+def _self_check_jar() -> bytes:
+    """A small but real jar (zip) of a few KiB, for the URL-keyed cache checks."""
+    import io
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("plugin.yml", "name: Check\nversion: 1\nmain: a.B\n")
+        archive.writestr("config.yml", "check_updates: true\ncloud_enabled: true\ncloud_sorting: \"name\"\n")
+        archive.writestr("data.bin", os.urandom(4096))
+    return buffer.getvalue()
+
+
+def _download_cache_self_check() -> None:
+    """URL-keyed entries, transport errors, the pinned PlaceholderAPI, and the saved build list."""
+    global _fetch_to, _fetch_text, _sleep, download
+    saved_env = os.environ.get("NEXUSAI_SMOKE_CACHE")
+    real_fetch, real_text, real_sleep, real_download = _fetch_to, _fetch_text, _sleep, download
+    _sleep = lambda seconds: None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.environ["NEXUSAI_SMOKE_CACHE"] = str(root / "cache")
+        try:
+            jar_bytes = _self_check_jar()
+            source = root / "papi.jar"
+            source.write_bytes(jar_bytes)
+            url = source.as_uri()
+            entry = root / "cache" / hashlib.sha256(url.encode("utf-8")).hexdigest()
+            side = entry.with_name(entry.name + ".sha256")
+
+            download(url, root / "out" / "1.jar")
+            _need(entry.is_file() and side.read_text(encoding="utf-8").strip() == hashlib.sha256(jar_bytes).hexdigest(),
+                  "URL entry saved without its sha256")
+            fetches = []
+
+            def counting(fetch_url: str, target: Path):
+                fetches.append(fetch_url)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = counting
+            download(url, root / "out" / "2.jar")
+            _need(fetches == [], "a good URL entry was downloaded again")
+            for label, damage in (
+                ("truncated", lambda data: data[: len(data) // 2]),
+                ("flipped", lambda data: data[:100] + bytes([data[100] ^ 0xFF]) + data[101:]),
+            ):
+                entry.write_bytes(damage(jar_bytes))
+                fetches.clear()
+                download(url, root / "out" / f"{label}.jar")
+                _need(len(fetches) == 1, f"{label} URL entry was used without a download")
+                _need((root / "out" / f"{label}.jar").read_bytes() == jar_bytes, f"{label} URL entry was used")
+            # A valid jar that does not match the saved sha256 (a swapped entry) is not used.
+            entry.write_bytes(_self_check_jar())
+            fetches.clear()
+            download(url, root / "out" / "swapped.jar")
+            _need(len(fetches) == 1 and (root / "out" / "swapped.jar").read_bytes() == jar_bytes,
+                  "URL entry with a different sha256 was used")
+            side.unlink()
+            fetches.clear()
+            download(url, root / "out" / "nosidecar.jar")
+            _need(len(fetches) == 1 and side.is_file(), "URL entry without a saved sha256 was used")
+            # A same-size entry with a matching sidecar that is not a valid jar is not used either.
+            broken = b"x" * len(jar_bytes)
+            entry.write_bytes(broken)
+            side.write_text(hashlib.sha256(broken).hexdigest() + "\n", encoding="utf-8")
+            fetches.clear()
+            download(url, root / "out" / "notzip.jar")
+            _need(len(fetches) == 1 and (root / "out" / "notzip.jar").read_bytes() == jar_bytes,
+                  "URL entry that is not a jar was used")
+            bad = root / "bad.jar"
+            bad.write_bytes(b"y" * 5000)
+            try:
+                download(bad.as_uri(), root / "out" / "bad.jar", attempts=2)
+            except RuntimeError as error:
+                _need("zip check failed" in str(error), f"wrong failure for a non-jar download: {error}")
+            else:
+                raise RuntimeError("a download that is not a jar was accepted")
+
+            # Transport errors that are not OSError are retried, and no .part file is left.
+            errors = [http.client.IncompleteRead(b"partial"), http.client.BadStatusLine("XYZ garbage")]
+            fetches.clear()
+
+            def broken_transport(fetch_url: str, target: Path):
+                fetches.append(fetch_url)
+                if errors:
+                    target.write_bytes(b"half")
+                    raise errors.pop(0)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = broken_transport
+            fresh = root / "fresh.jar"
+            fresh.write_bytes(jar_bytes)
+            download(fresh.as_uri(), root / "out" / "fresh.jar", attempts=3)
+            _need(len(fetches) == 3 and (root / "out" / "fresh.jar").read_bytes() == jar_bytes,
+                  f"IncompleteRead or BadStatusLine was not retried ({len(fetches)} calls)")
+            _need(not list((root / "cache").rglob("*.part")), "a .part file was left after a retry")
+
+            def always_broken(fetch_url: str, target: Path):
+                target.write_bytes(b"half")
+                raise http.client.IncompleteRead(b"half")
+
+            _fetch_to = always_broken
+            try:
+                download((root / "never.jar").as_uri(), root / "out" / "never.jar", attempts=2)
+            except RuntimeError as error:
+                _need("IncompleteRead" in str(error), f"wrong failure after transport errors: {error}")
+            else:
+                raise RuntimeError("a download that always broke off was accepted")
+            _need(not list((root / "cache").rglob("*.part")), "a .part file was left after a failed download")
+            _fetch_to = real_fetch
+
+            # PlaceholderAPI is pinned to its sha256 and gets an offline config.
+            _need(re.fullmatch(r"[0-9a-f]{64}", PAPI_SHA256) is not None, "PlaceholderAPI sha256 is not pinned")
+            asked = []
+
+            def fake_download(fetch_url, destination, sha256=None, name=None, attempts=DOWNLOAD_ATTEMPTS):
+                asked.append((fetch_url, sha256, name))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(jar_bytes)
+
+            download = fake_download
+            install_papi(root / "server" / "plugins")
+            download = real_download
+            _need(asked == [(PAPI_URL, PAPI_SHA256, PAPI_NAME)], f"PlaceholderAPI download was not pinned: {asked}")
+            config = (root / "server" / "plugins" / "PlaceholderAPI" / "config.yml").read_text(encoding="utf-8")
+            _need("cloud_enabled: false" in config and "cloud_enabled: true" not in config,
+                  "PlaceholderAPI expansion cloud left on")
+            _need("check_updates: false" in config and "cloud_sorting: \"name\"" in config,
+                  "PlaceholderAPI config lost its other keys")
+
+            # The build list is retried and its last good answer is used when the API is down.
+            listing = root / "builds.json"
+            listing.write_text('{"builds": [{"id": 7, "channel": "STABLE"}]}', encoding="utf-8")
+            calls = []
+
+            def flaky_text(fetch_url: str) -> str:
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    raise http.client.RemoteDisconnected("closed")
+                return real_text(fetch_url)
+
+            _fetch_text = flaky_text
+            first = fetch_listing(listing.as_uri(), attempts=2)
+            _need(len(calls) == 2 and first["builds"][0]["id"] == 7, "build list was not retried")
+
+            def offline_text(fetch_url: str) -> str:
+                raise urllib.error.URLError("[Errno 111] Connection refused")
+
+            _fetch_text = offline_text
+            cached = fetch_listing(listing.as_uri(), attempts=2)
+            _need(cached == first, "saved build list was not used offline")
+            try:
+                fetch_listing((root / "unknown.json").as_uri(), attempts=1)
+            except RuntimeError as error:
+                _need("could not list builds" in str(error), f"wrong failure for an unknown build list: {error}")
+            else:
+                raise RuntimeError("an unknown build list was returned without the API")
+        finally:
+            _fetch_to, _fetch_text, _sleep, download = real_fetch, real_text, real_sleep, real_download
             if saved_env is None:
                 os.environ.pop("NEXUSAI_SMOKE_CACHE", None)
             else:

@@ -26,10 +26,8 @@ from pathlib import Path
 CANARY = "sk-canary-load-7f3a9c2e1b"
 MARKERS = ("§§§ PLAYER INPUT §§§", "§§§ END §§§")
 COOLDOWN_SECONDS = 30
-PAPI_URL = (
-    "https://github.com/PlaceholderAPI/PlaceholderAPI/releases/download/"
-    "2.12.3/PlaceholderAPI-2.12.3.jar"
-)
+STALL_PROPERTY = "nexusai.load.stallMillis"
+RETRY_STATUSES = frozenset({"fail", "invalid"})
 
 
 def load_smoke():
@@ -110,7 +108,7 @@ def run(args, scenarios: list[str]) -> int:
 
     paper = smoke.download_paper(args.version, work / "paper.jar")
     smoke.seed_paperclip(work / "paper.jar", work)
-    smoke.download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
+    smoke.install_papi(work / "plugins")
     shutil.copy2(plugin, work / "plugins" / plugin.name)
     shutil.copy2(driver, work / "plugins" / driver.name)
     write_prompts(work / "plugins" / "NexusAI" / "prompts.yml")
@@ -194,13 +192,10 @@ def run(args, scenarios: list[str]) -> int:
             print(format_result(outcome))
 
         write_summary(out, args, paper, results, log_chunks)
-        failed = [item for item in results if item["status"] == "fail"]
         invalid = [item for item in results if item["status"] == "invalid"]
         if invalid:
             print("INVALID (test host stall): " + ", ".join(item["scenario"] for item in invalid))
-        if failed:
-            return 1
-        return 3 if invalid else 0
+        return exit_code(item["status"] for item in results)
     finally:
         stop_bots(bots)
         try:
@@ -227,8 +222,8 @@ def execute_scenario(
             "reasons": [bot_note or "mode B needs mineflayer bots and a live Paper server"],
             "report": None,
         }
-    last = None
-    for attempt in (1, 2):
+
+    def attempt_once(attempt: int) -> dict:
         before = len(log_chunks)
         started = time.time()
         started_mono = time.monotonic()
@@ -295,7 +290,7 @@ def execute_scenario(
         stall = host_stall_reasons(report, ended - started, ended_mono - started_mono, args.stall_ms)
         if stall:
             # A stalled host says nothing about the plugin; keep the scenario out of pass and fail.
-            judged = {"status": "invalid", "reasons": stall + [f"judged as {judged['status']}"]}
+            judged = {"status": "invalid", "reasons": stall + [f"metrics alone: {judged['status']} (not used)"]}
         last = {
             "scenario": scenario,
             "attempt": attempt,
@@ -309,11 +304,27 @@ def execute_scenario(
             "jfrPercent": percent(jfr_nexus, jfr_server),
             "botMessages": bot_messages,
         }
-        if judged["status"] not in {"fail", "invalid"} or attempt == 2:
-            shutil.copy2(saved, out / f"report-{scenario}.json")
-            return last
-        print(f"{scenario} attempt {attempt} {judged['status']} ({'; '.join(judged['reasons'])}); retrying once")
+        shutil.copy2(saved, out / f"report-{scenario}.json")
+        return last
+
+    return retry_once(scenario, attempt_once)
+
+
+def retry_once(scenario: str, attempt_once) -> dict:
+    """Runs attempt 1, and attempt 2 only when attempt 1 failed or ran on a stalled test host."""
+    last = attempt_once(1)
+    if last["status"] in RETRY_STATUSES:
+        print(f"{scenario} attempt 1 {last['status']} ({'; '.join(last['reasons'])}); retrying once")
+        last = attempt_once(2)
     return last
+
+
+def exit_code(statuses) -> int:
+    """1 when any scenario failed, otherwise 3 when any ran on a stalled test host, otherwise 0."""
+    seen = set(statuses)
+    if "fail" in seen:
+        return 1
+    return 3 if "invalid" in seen else 0
 
 
 def record_jfr(process, log_chunks, before, jfc, destination, load_seconds, scenario: str) -> str:
@@ -930,20 +941,25 @@ def find_driver(directory: Path) -> Path:
     return jars[0]
 
 
+def java_command(stall_ms: int = 5000) -> list[str]:
+    """The server command line. The stall threshold reaches LoadDriver as a system property."""
+    return [
+        "java",
+        "-Djava.awt.headless=true",
+        f"-D{STALL_PROPERTY}={max(0, stall_ms)}",
+        "-Dterminal.jline=false",
+        "-Dterminal.ansi=false",
+        "-Xms1G",
+        "-Xmx2G",
+        "-jar",
+        "paper.jar",
+        "--nogui",
+    ]
+
+
 def boot_process(work: Path, stall_ms: int = 5000) -> subprocess.Popen:
     return subprocess.Popen(
-        [
-            "java",
-            "-Djava.awt.headless=true",
-            f"-Dnexusai.load.stallMillis={max(0, stall_ms)}",
-            "-Dterminal.jline=false",
-            "-Dterminal.ansi=false",
-            "-Xms1G",
-            "-Xmx2G",
-            "-jar",
-            "paper.jar",
-            "--nogui",
-        ],
+        java_command(stall_ms),
         cwd=work,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -1536,8 +1552,54 @@ def self_check() -> int:
         raise SystemExit(f"harness clock drift was not reported: {drift}")
     if host_stall_reasons({"hostStall": {"invalid": True}}, 418.0, 132.0, 0):
         raise SystemExit("--stall-ms 0 should turn the host stall check off")
+    stall_self_check()
     print("SELF-CHECK OK")
     return 0
+
+
+def stall_self_check() -> None:
+    """Exit codes, the retry of fail and invalid, and the stall property passed to the server."""
+    cases = {
+        (): 0,
+        ("pass",): 0,
+        ("pass", "not-run"): 0,
+        ("pass", "invalid"): 3,
+        ("invalid", "invalid"): 3,
+        ("fail", "invalid"): 1,
+        ("invalid", "fail", "pass"): 1,
+        ("fail",): 1,
+    }
+    for statuses, wanted in cases.items():
+        got = exit_code(iter(statuses))
+        if got != wanted:
+            raise SystemExit(f"exit code for {list(statuses)} is {got}, expected {wanted}")
+    for plan, wanted_calls, wanted_status in (
+        (["pass"], 1, "pass"),
+        (["invalid", "pass"], 2, "pass"),
+        (["invalid", "invalid"], 2, "invalid"),
+        (["fail", "pass"], 2, "pass"),
+        (["fail", "invalid"], 2, "invalid"),
+        (["not-run"], 1, "not-run"),
+    ):
+        calls = []
+
+        def attempt(number: int, plan=plan, calls=calls) -> dict:
+            calls.append(number)
+            return {"status": plan[number - 1], "reasons": ["self-check"]}
+
+        result = retry_once("S1", attempt)
+        if calls != list(range(1, wanted_calls + 1)) or result["status"] != wanted_status:
+            raise SystemExit(f"retry for {plan}: attempts {calls}, status {result['status']}")
+    for stall_ms, wanted in ((1234, "-Dnexusai.load.stallMillis=1234"), (0, "-Dnexusai.load.stallMillis=0"),
+                             (-5, "-Dnexusai.load.stallMillis=0")):
+        command = java_command(stall_ms)
+        if command.count(wanted) != 1 or command.index(wanted) > command.index("-jar"):
+            raise SystemExit(f"server command for --stall-ms {stall_ms} lacks {wanted}: {command}")
+    detector = Path(__file__).resolve().parents[2] / "src" / "loadtest" / "java" / "io" / "github" / "neareststep" / "nexusai" / "load" / "HostStallDetector.java"
+    if detector.is_file():
+        match = re.search(r'PROPERTY = "([^"]+)"', detector.read_text(encoding="utf-8"))
+        if match is None or match.group(1) != "nexusai.load.stallMillis":
+            raise SystemExit(f"HostStallDetector.PROPERTY does not match the server command: {match and match.group(1)}")
 
 
 JFC = """<?xml version="1.0" encoding="UTF-8"?>

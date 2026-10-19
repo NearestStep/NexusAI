@@ -87,6 +87,37 @@ final class HostStallDetector {
         expectedMillis = expectedWindowMillis;
     }
 
+    /**
+     * A finished tick in the LOAD phase, warm-up included, so a long warm-up tick is counted as
+     * tick work and not as a host stall. Returns true when the tick belongs in the MSPT samples.
+     */
+    boolean loadTick(double tickMillis, boolean measuring) {
+        tick(tickMillis);
+        return measuring;
+    }
+
+    /**
+     * One heartbeat in the LOAD phase. Once {@code elapsedMillis} reaches {@code loadMillis} the
+     * window ends and this returns true; before that it records the heartbeat and returns false.
+     */
+    boolean loadHeartbeat(long elapsedMillis, long loadMillis, long monoNanos, long wallMillis) {
+        if (elapsedMillis >= loadMillis) {
+            end(monoNanos, wallMillis, loadMillis);
+            return true;
+        }
+        beat(monoNanos, wallMillis);
+        return false;
+    }
+
+    /** The {@code SCENARIO_INVALID} log line for an invalid window, or null when it is valid. */
+    String invalidLine(String scenario) {
+        List<String> reasons = reasons();
+        if (reasons.isEmpty()) {
+            return null;
+        }
+        return "SCENARIO_INVALID " + scenario + " test host stall: " + String.join("; ", reasons);
+    }
+
     private long drift(long monoNanos, long wallMillis) {
         long mono = (monoNanos - startMono) / 1_000_000L;
         long wall = wallMillis - startWall;

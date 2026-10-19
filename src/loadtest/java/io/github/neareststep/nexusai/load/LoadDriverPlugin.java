@@ -361,11 +361,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         if (current == null || current.phase != Phase.LOAD) {
             return;
         }
-        current.stall.tick(tickMillis);
-        if (!current.measuring) {
-            return;
+        if (current.stall.loadTick(tickMillis, current.measuring)) {
+            current.mspt.add(tickMillis);
         }
-        current.mspt.add(tickMillis);
     }
 
     /**
@@ -389,13 +387,11 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             }
             if (current.phase == Phase.LOAD) {
                 long elapsed = now - current.startedAt;
-                if (elapsed >= current.loadMillis) {
-                    current.stall.end(System.nanoTime(), System.currentTimeMillis(), current.loadMillis);
+                if (current.stall.loadHeartbeat(elapsed, current.loadMillis, System.nanoTime(), System.currentTimeMillis())) {
                     current.phase = Phase.DRAIN;
                     current.measuring = false;
                     current.drainStartedAt = now;
                 } else {
-                    current.stall.beat(System.nanoTime(), System.currentTimeMillis());
                     boolean measure = elapsed >= current.warmupMillis;
                     if (measure && !current.threadsSeen) {
                         // One tick of bookkeeping stays outside the MSPT window.
@@ -640,9 +636,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         } catch (IOException ex) {
             getLogger().severe("Could not write report.json: " + ex.getMessage());
         }
-        if (current.stall.invalid()) {
-            getLogger().warning("SCENARIO_INVALID " + current.scenario + " test host stall: "
-                    + String.join("; ", current.stall.reasons()));
+        String invalid = current.stall.invalidLine(current.scenario);
+        if (invalid != null) {
+            getLogger().warning(invalid);
         }
         getLogger().info("SCENARIO_END " + current.scenario);
         if (run == current) {
