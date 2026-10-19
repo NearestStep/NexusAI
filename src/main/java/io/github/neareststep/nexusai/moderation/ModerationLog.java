@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.moderation;
 
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.LogRedaction;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -67,10 +68,11 @@ public final class ModerationLog {
         }
     }
 
+    /** One line per flag. A lone UTF-16 surrogate becomes U+FFFD: UTF-8 cannot encode it and the line would be lost. */
     private static String field(String value) {
         if (value == null || value.isEmpty()) {
             return "";
         }
-        return value.replace('\r', ' ').replace('\n', ' ').replace('|', '/');
+        return Utf16.replaceLoneSurrogates(value.replace('\r', ' ').replace('\n', ' ').replace('|', '/'));
     }
 }

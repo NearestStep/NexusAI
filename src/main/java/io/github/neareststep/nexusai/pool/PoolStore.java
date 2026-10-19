@@ -7,6 +7,7 @@ import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.config.YamlStrings;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -280,8 +281,9 @@ public final class PoolStore {
     }
 
     /**
-     * True when a stored answer would change or disappear under {@link PlayerInput#stripSectionSigns}.
-     * A later save of already-clean text does not take another backup.
+     * True when a stored answer would change or disappear under {@link PlayerInput#stripSectionSigns},
+     * or holds a lone UTF-16 surrogate that the save writes as U+FFFD. A later save of already-clean
+     * text does not take another backup.
      */
     private boolean containsUncleanAnswers(File source) throws IOException, InvalidConfigurationException {
         String raw = Files.readString(source.toPath());
@@ -298,7 +300,7 @@ public final class PoolStore {
                 }
                 String text = String.valueOf(item);
                 String cleaned = PlayerInput.stripSectionSigns(text, allowMarkup).trim();
-                if (!cleaned.equals(text)) {
+                if (!cleaned.equals(text) || Utf16.hasLoneSurrogate(text)) {
                     return true;
                 }
             }

@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.cache;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.text.Utf16;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
@@ -220,6 +221,7 @@ public final class AiCache {
 
     /**
      * One cached reply. {@code providerId} and {@code model} are empty when the writer did not know them.
+     * A lone UTF-16 surrogate in {@code text} is stored as U+FFFD.
      */
     public record CachedAnswer(String text, String providerId, String model, String note) {
         public CachedAnswer(String text, String providerId, String model) {
@@ -227,7 +229,7 @@ public final class AiCache {
         }
 
         public CachedAnswer {
-            text = text == null ? "" : text;
+            text = text == null ? "" : Utf16.replaceLoneSurrogates(text);
             providerId = providerId == null ? "" : providerId;
             model = model == null ? "" : model;
             note = note == null ? "" : note;

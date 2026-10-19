@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import io.github.neareststep.nexusai.config.QueueStrategy;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -811,14 +812,14 @@ public final class ModelQueue {
         yaml.set("config-version", ConfigVersions.CURRENT);
         yaml.set("day", day.toString());
         for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
-            yaml.set("providers." + entry.getKey(), entry.getValue().get());
+            yaml.set("providers." + Utf16.replaceLoneSurrogates(entry.getKey()), entry.getValue().get());
         }
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Slot slot : slots) {
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", slot.storageId());
-            row.put("provider", slot.provider);
-            row.put("model", slot.model);
+            row.put("id", Utf16.replaceLoneSurrogates(slot.storageId()));
+            row.put("provider", Utf16.replaceLoneSurrogates(slot.provider));
+            row.put("model", Utf16.replaceLoneSurrogates(slot.model));
             row.put("requests", slot.requests.get());
             row.put("rejected", slot.rejected.get());
             rows.add(row);
@@ -830,9 +831,9 @@ public final class ModelQueue {
             List<Map<String, Object>> fallbackRows = new ArrayList<>();
             for (Slot slot : fallbackSlots.values()) {
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", slot.storageId());
-                row.put("provider", slot.provider);
-                row.put("model", slot.model);
+                row.put("id", Utf16.replaceLoneSurrogates(slot.storageId()));
+                row.put("provider", Utf16.replaceLoneSurrogates(slot.provider));
+                row.put("model", Utf16.replaceLoneSurrogates(slot.model));
                 row.put("requests", slot.requests.get());
                 row.put("rejected", slot.rejected.get());
                 fallbackRows.add(row);

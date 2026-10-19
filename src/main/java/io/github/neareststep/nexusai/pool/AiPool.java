@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.pool;
 
 import io.github.neareststep.nexusai.ai.PlayerInput;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -90,8 +91,9 @@ public final class AiPool {
         return pools.keySet();
     }
 
+    /** Strips section signs and replaces a lone UTF-16 surrogate with U+FFFD, so pool.yml can always be written. */
     private String cleanText(String answer) {
-        return PlayerInput.stripSectionSigns(answer, allowMarkup).trim();
+        return Utf16.replaceLoneSurrogates(PlayerInput.stripSectionSigns(answer, allowMarkup).trim());
     }
 
     private Optional<String> clean(String raw) {
