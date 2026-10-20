@@ -52,6 +52,8 @@ dependencies {
     "loadtestTestImplementation"("org.junit.jupiter:junit-jupiter")
     "loadtestTestImplementation"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
     "loadtestTestRuntimeOnly"("org.junit.platform:junit-platform-launcher")
+    // LoadDriverPluginWiringTest loads the context providers, which implement the NexusAI API.
+    "loadtestTestRuntimeOnly"(sourceSets.main.get().output)
 }
 
 tasks {

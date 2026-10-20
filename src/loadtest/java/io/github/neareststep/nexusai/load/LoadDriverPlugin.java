@@ -384,13 +384,8 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
                 return;
             }
             if (current.phase == Phase.LOAD) {
-                long elapsed = now - current.startedAt;
-                HostStallDetector.LoadStep step = current.stall.loadStep(
-                        elapsed, current.loadMillis, current.warmupMillis, System.nanoTime(), System.currentTimeMillis());
-                if (step == HostStallDetector.LoadStep.END) {
-                    current.phase = Phase.DRAIN;
-                    current.drainStartedAt = now;
-                } else {
+                HostStallDetector.LoadStep step = loadBeat(current, now);
+                if (step != HostStallDetector.LoadStep.END) {
                     boolean measure = step == HostStallDetector.LoadStep.MEASURE;
                     if (measure && !current.threadsSeen) {
                         // One tick of bookkeeping stays outside the MSPT window.
@@ -422,6 +417,25 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
             noteError(current, thrown);
             finish(current, false);
         }
+    }
+
+    /**
+     * The stall bookkeeping of one LOAD heartbeat: records the beat, and once the window has run
+     * its length moves the scenario to DRAIN. Package-private for the wiring test.
+     */
+    HostStallDetector.LoadStep loadBeat(Run current, long now) {
+        HostStallDetector.LoadStep step = current.stall.loadStep(now - current.startedAt, current.loadMillis,
+                current.warmupMillis, System.nanoTime(), System.currentTimeMillis());
+        if (step == HostStallDetector.LoadStep.END) {
+            current.phase = Phase.DRAIN;
+            current.drainStartedAt = now;
+        }
+        return step;
+    }
+
+    /** Logs {@code SCENARIO_INVALID} for a window on a stalled test host. Package-private for the wiring test. */
+    void reportInvalid(Run current) {
+        current.stall.warnIfInvalid(current.scenario, getLogger()::warning);
     }
 
     private void warm(Run current, long now) {
@@ -635,7 +649,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         } catch (IOException ex) {
             getLogger().severe("Could not write report.json: " + ex.getMessage());
         }
-        current.stall.warnIfInvalid(current.scenario, getLogger()::warning);
+        reportInvalid(current);
         getLogger().info("SCENARIO_END " + current.scenario);
         if (run == current) {
             run = null;
@@ -941,7 +955,7 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
         DONE
     }
 
-    private final class Run {
+    final class Run {
         private final String scenario;
         private final int rate;
         private final int seconds;
