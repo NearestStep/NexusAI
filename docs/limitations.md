@@ -56,7 +56,7 @@ After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the 
 
 ## Known limits with lone surrogates in names
 
-A lone UTF-16 surrogate (half of an emoji) is replaced with U+FFFD in model replies, answers, and the files NexusAI writes. A provider or model name with one can come from a YAML escape such as `\ud83d` that an admin wrote into `config.yml` or `prompts.yml`, or from a plugin that passes such a model name through the API (`GenerationRequest.Builder.model` or `PromptDefinition.Builder.model`), which does not check for lone surrogates. Two limits remain for such a name:
+A lone UTF-16 surrogate (half of an emoji) is replaced with U+FFFD in model replies, answers, and the files NexusAI writes. A provider or model name with one can come from a YAML escape such as `\ud83d` that an admin wrote into `config.yml` or `prompts.yml`, or from a plugin that passes such a model name through the API (`GenerationRequest.Builder.model` or `PromptDefinition.Builder.model`), which does not check for lone surrogates; such a name is sent to the provider as written. `usage.yml` and `token-usage.yml` count API requests under the model-queue entry, so a model name passed through the API is not stored there and the limits below do not apply to it. Two limits remain for a name from `config.yml` or `prompts.yml`:
 
 - The name is sent to the provider as written, and `usage.yml` stores it with U+FFFD. After a restart, a fallback row with that name can appear twice in `usage.yml`, and the requests counted for it can be too low.
 - `token-usage.yml` is written as UTF-8 bytes, so the same name is stored there with `?` instead of U+FFFD, and the key differs from the one in `usage.yml`.
