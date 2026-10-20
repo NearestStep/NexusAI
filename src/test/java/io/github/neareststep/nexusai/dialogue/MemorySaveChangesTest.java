@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.dialogue;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -30,7 +31,14 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Saves of {@code dialogue-memory.yml} write only when memory differs from the file, and do not
  * write back transcripts that expired while the server ran.
  */
+@Timeout(value = 5, unit = TimeUnit.MINUTES)
 class MemorySaveChangesTest {
+    /**
+     * Latches and joins wait longer than the 5 minute test timeout, so a test host pause cannot make a
+     * paused load give up and leave memory unloaded; only the test timeout ends a stuck test.
+     */
+    private static final long LATCH_WAIT_MINUTES = 10L;
+
 
     private static final long HOUR = 3_600_000L;
     private static final long T0 = 1_800_000_000_000L;
@@ -123,7 +131,7 @@ class MemorySaveChangesTest {
             CountDownLatch release = new CountDownLatch(1);
             MemoryStore.pauseDuringLoad = waiting(inside, release);
             during.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             during.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(during.file), "paused, folded=" + folded);
             release.countDown();
@@ -142,7 +150,7 @@ class MemorySaveChangesTest {
             CountDownLatch release2 = new CountDownLatch(1);
             MemoryStore.pauseDuringLoad = waiting(inside2, release2);
             after.files.onReload();
-            assertTrue(inside2.await(5, TimeUnit.SECONDS));
+            assertTrue(inside2.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             Thread releaser = new Thread(() -> {
                 sleep(100);
                 release2.countDown();
@@ -171,7 +179,7 @@ class MemorySaveChangesTest {
         CountDownLatch release = new CountDownLatch(1);
         MemoryStore.pauseDuringLoad = waiting(inside, release);
         fx.files.onReload();
-        assertTrue(inside.await(5, TimeUnit.SECONDS));
+        assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
         Thread releaser = new Thread(() -> {
             sleep(300);
             release.countDown();
@@ -202,7 +210,7 @@ class MemorySaveChangesTest {
         CountDownLatch release = new CountDownLatch(1);
         MemoryStore.pauseDuringLoad = waiting(inside, release);
         fx.files.onReload();
-        assertTrue(inside.await(5, TimeUnit.SECONDS));
+        assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
         Thread releaser = new Thread(() -> {
             sleep(300);
             release.countDown();
@@ -462,7 +470,7 @@ class MemorySaveChangesTest {
         CountDownLatch release = new CountDownLatch(1);
         MemoryStore.pauseDuringLoad = waiting(inside, release);
         fx.files.onReload();
-        assertTrue(inside.await(5, TimeUnit.SECONDS));
+        assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
         fx.files.shutdown();
         release.countDown();
         joinLoader(fx.files);
@@ -550,7 +558,7 @@ class MemorySaveChangesTest {
         return () -> {
             inside.countDown();
             try {
-                release.await(30, TimeUnit.SECONDS);
+                release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -566,7 +574,7 @@ class MemorySaveChangesTest {
     }
 
     private static void awaitFinished(DialogueMemoryPersistence files) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(LATCH_WAIT_MINUTES);
         while (!files.loadFinished()) {
             if (System.nanoTime() > deadline) {
                 fail("loader did not finish");
@@ -578,7 +586,7 @@ class MemorySaveChangesTest {
     private static void joinLoader(DialogueMemoryPersistence files) throws InterruptedException {
         Thread pending = files.diskLoader();
         if (pending != null) {
-            pending.join(15_000L);
+            pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
     }
 

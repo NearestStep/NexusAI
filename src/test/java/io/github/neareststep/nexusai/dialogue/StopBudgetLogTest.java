@@ -3,6 +3,7 @@ package io.github.neareststep.nexusai.dialogue;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -25,7 +26,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** NAI-114: one INFO line when stop runs during the first dialogue memory load. */
+@Timeout(value = 5, unit = TimeUnit.MINUTES)
 class StopBudgetLogTest {
+    /**
+     * Latches and joins wait longer than the 5 minute test timeout, so a test host pause cannot make a
+     * paused load give up and leave memory unloaded; only the test timeout ends a stuck test.
+     */
+    private static final long LATCH_WAIT_MINUTES = 10L;
+
 
     private static final String PREFIX = "Stop ran during the first dialogue memory load";
 
@@ -71,7 +79,7 @@ class StopBudgetLogTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertTrue(Files.readString(fixture.file).contains("only-in-memory"));
             List<String> lines = infos(fixture.records);
@@ -98,7 +106,7 @@ class StopBudgetLogTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertEquals(new String(before, StandardCharsets.UTF_8), Files.readString(fixture.file));
             List<String> lines = infos(fixture.records);
@@ -135,7 +143,7 @@ class StopBudgetLogTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertEquals(1, refused.get(), fixture.records.toString());
             String written = Files.readString(fixture.file);
@@ -219,7 +227,7 @@ class StopBudgetLogTest {
         MemoryStore.afterLoadPublish = () -> {
             published.countDown();
             try {
-                finish.await(15, TimeUnit.SECONDS);
+                finish.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -227,7 +235,7 @@ class StopBudgetLogTest {
         MemoryStore.afterStopCount = () -> {
             release.countDown();
             try {
-                assertTrue(published.await(5, TimeUnit.SECONDS));
+                assertTrue(published.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -246,7 +254,7 @@ class StopBudgetLogTest {
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 50L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             String written = Files.readString(fixture.file);
             if (crossBudget) {
@@ -326,7 +334,7 @@ class StopBudgetLogTest {
         MemoryStore.afterLoadPublish = () -> {
             published.countDown();
             try {
-                finish.await(15, TimeUnit.SECONDS);
+                finish.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -334,7 +342,7 @@ class StopBudgetLogTest {
         MemoryStore.afterStopCount = () -> {
             release.countDown();
             try {
-                assertTrue(published.await(5, TimeUnit.SECONDS));
+                assertTrue(published.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -343,7 +351,7 @@ class StopBudgetLogTest {
         DialogueMemoryPersistence.shutdownLoadGraceMillis = 50L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             if (heldBeforeStop) {
                 assertTrue(Files.readString(fixture.file).contains("only-in-memory"));
@@ -372,7 +380,7 @@ class StopBudgetLogTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
         MemoryStore.beforeKeyScan = () -> {
             try {
-                scanRelease.await(30, TimeUnit.SECONDS);
+                scanRelease.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -380,7 +388,7 @@ class StopBudgetLogTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertEquals(new String(before, StandardCharsets.UTF_8), Files.readString(fixture.file));
             List<String> lines = infos(fixture.records);
@@ -410,7 +418,7 @@ class StopBudgetLogTest {
         finished.files.onReload();
         Thread loader = finished.files.diskLoader();
         if (loader != null) {
-            loader.join(5_000L);
+            loader.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
         assertTrue(finished.files.memoryLoadedFromDisk());
         finished.store.append(finished.player, "innkeeper", "user", "after-load", 70L, 8, 8_000, 0L);
@@ -428,7 +436,7 @@ class StopBudgetLogTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release);
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertTrue(Files.readString(fixture.file).contains("only-in-memory"));
             assertTrue(infos(fixture.records).isEmpty(), fixture.records.toString());
@@ -471,7 +479,7 @@ class StopBudgetLogTest {
         int fullBefore = MemoryStore.fullDocumentAppends.get();
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertTrue(rejected.get() > 0, fixture.records.toString());
             String written = Files.readString(fixture.file);
@@ -515,7 +523,7 @@ class StopBudgetLogTest {
             };
             try {
                 fixture.files.onReload();
-                assertTrue(inside.await(5, TimeUnit.SECONDS));
+                assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
                 fixture.files.shutdown();
                 String written = Files.readString(fixture.file);
                 assertFalse(written.contains(broken + ":"), written);
@@ -606,7 +614,7 @@ class StopBudgetLogTest {
         return () -> {
             inside.countDown();
             try {
-                if (!release.await(15, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("load was not released");
                 }
             } catch (InterruptedException e) {
@@ -619,7 +627,7 @@ class StopBudgetLogTest {
     private static void join(Fixture fixture) throws InterruptedException {
         Thread pending = fixture.files.diskLoader();
         if (pending != null) {
-            pending.join(5_000L);
+            pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
     }
 

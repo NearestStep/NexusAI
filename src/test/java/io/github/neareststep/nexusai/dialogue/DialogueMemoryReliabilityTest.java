@@ -4,6 +4,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -36,7 +37,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * NAI-77, NAI-74, and NAI-75. The loader is substituted per case. The file on disk is not replaced
  * by a failed or hung read, and stop does not wait out a load that is still going.
  */
+@Timeout(value = 5, unit = TimeUnit.MINUTES)
 class DialogueMemoryReliabilityTest {
+    /**
+     * Latches and joins wait longer than the 5 minute test timeout, so a test host pause cannot make a
+     * paused load give up and leave memory unloaded; only the test timeout ends a stuck test.
+     */
+    private static final long LATCH_WAIT_MINUTES = 10L;
+
 
     private static final String SECRET = "sk-qaConfiguredKey1111";
     private static final String PAUSED = "Saves of dialogue-memory.yml are paused because the first load "
@@ -259,7 +267,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = () -> {
             inside.countDown();
             try {
-                if (!release.await(15, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("hung load was not released");
                 }
             } catch (InterruptedException e) {
@@ -269,7 +277,7 @@ class DialogueMemoryReliabilityTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             assertFalse(fixture.files.memoryLoadedFromDisk());
             assertTrue(fixture.files.diskLoader() != null && fixture.files.diskLoader().isAlive());
             fixture.files.save();
@@ -292,7 +300,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -361,7 +369,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = () -> {
             inside.countDown();
             try {
-                if (!release.await(15, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("long load was not released");
                 }
             } catch (InterruptedException e) {
@@ -371,7 +379,7 @@ class DialogueMemoryReliabilityTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
@@ -387,9 +395,11 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk(), "the paused first load did not load the file");
             assertArrayEquals(afterShutdown, Files.readAllBytes(fixture.file));
             assertEquals("kept-from-disk", line(fixture.store, player, "blacksmith"));
             assertEquals("only-in-memory", line(fixture.store, player, "innkeeper"));
@@ -400,7 +410,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -428,7 +438,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = () -> {
             inside.countDown();
             try {
-                if (!release.await(15, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("large load was not released");
                 }
             } catch (InterruptedException e) {
@@ -438,7 +448,7 @@ class DialogueMemoryReliabilityTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
@@ -453,7 +463,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
             assertEquals(merged, Files.readString(fixture.file));
@@ -462,7 +472,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -527,7 +537,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "large saved load was not released");
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             MemoryStore.fullDocumentAppends.set(0);
             long started = System.nanoTime();
             fixture.files.shutdown();
@@ -548,7 +558,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(15_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
             assertEquals(merged, Files.readString(fixture.file));
@@ -557,7 +567,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(15_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -606,7 +616,7 @@ class DialogueMemoryReliabilityTest {
             MemoryStore.fullDocumentAppends.set(0);
             MemoryStore.eventScans.set(0);
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
@@ -633,7 +643,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(30_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
             assertEquals(merged, Files.readString(fixture.file));
@@ -642,7 +652,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(30_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -668,7 +678,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "format load was not released");
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             MemoryStore.fullDocumentAppends.set(0);
             fixture.files.shutdown();
             String merged = Files.readString(fixture.file);
@@ -689,7 +699,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
         } finally {
@@ -697,7 +707,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -717,7 +727,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.beforeKeyScan = () -> {
             scanInside.countDown();
             try {
-                if (!scanRelease.await(30, TimeUnit.SECONDS)) {
+                if (!scanRelease.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("budget scan was not released");
                 }
             } catch (InterruptedException e) {
@@ -729,10 +739,10 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.clock.addAndGet(DialogueMemoryPersistence.LOAD_HANG_WARNING_AFTER_MILLIS);
             fixture.files.shutdown();
-            assertTrue(scanInside.await(5, TimeUnit.SECONDS));
+            assertTrue(scanInside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             List<String> notes = warnings(fixture.records, "Did not save");
             assertEquals(1, notes.size(), fixture.records.toString());
@@ -750,7 +760,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -770,7 +780,7 @@ class DialogueMemoryReliabilityTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             List<String> notes = warnings(fixture.records, "Did not save");
@@ -787,7 +797,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -808,7 +818,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "unreadable load was not released");
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             List<String> notes = warnings(fixture.records, "Did not save");
@@ -823,7 +833,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -844,7 +854,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             MemoryStore.fullDocumentAppends.set(0);
             long started = System.nanoTime();
             fixture.files.shutdown();
@@ -868,7 +878,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -886,7 +896,7 @@ class DialogueMemoryReliabilityTest {
         fixture.files.shutdown();
         Thread pending = fixture.files.diskLoader();
         if (pending != null) {
-            pending.join(5_000L);
+            pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
         String merged = Files.readString(fixture.file);
         YamlConfiguration loaded = yaml(merged);
@@ -941,7 +951,7 @@ class DialogueMemoryReliabilityTest {
         }
         Thread pending = fixture.files.diskLoader();
         if (pending != null) {
-            pending.join(5_000L);
+            pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
     }
 
@@ -975,7 +985,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 2_000L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             MemoryStore.fullDocumentAppends.set(0);
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
@@ -1003,7 +1013,7 @@ class DialogueMemoryReliabilityTest {
             fixture.files.onReload();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
@@ -1033,13 +1043,13 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.beforeLoaderRewrite = () -> {
             inside.countDown();
             try {
-                if (!release.await(30, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("mask rewrite was not released");
                 }
             } catch (InterruptedException first) {
                 Thread.currentThread().interrupt();
                 try {
-                    if (!release.await(30, TimeUnit.SECONDS)) {
+                    if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                         throw new IllegalStateException("mask rewrite was not released");
                     }
                 } catch (InterruptedException again) {
@@ -1053,7 +1063,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 300L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             assertNoTempFile(fixture.file.getParent());
@@ -1065,7 +1075,7 @@ class DialogueMemoryReliabilityTest {
             Thread pending = fixture.files.diskLoader();
             release.countDown();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
@@ -1078,7 +1088,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -1099,7 +1109,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = () -> {
             inside.countDown();
             try {
-                if (!stopStarted.await(30, TimeUnit.SECONDS)) {
+                if (!stopStarted.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("stop did not start");
                 }
             } catch (InterruptedException e) {
@@ -1110,7 +1120,7 @@ class DialogueMemoryReliabilityTest {
             }
             filled.countDown();
             try {
-                if (!release.await(30, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("count load was not released");
                 }
             } catch (InterruptedException e) {
@@ -1120,7 +1130,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.afterStopCount = () -> {
             stopStarted.countDown();
             try {
-                if (!filled.await(30, TimeUnit.SECONDS)) {
+                if (!filled.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("loader did not fill memory");
                 }
             } catch (InterruptedException e) {
@@ -1134,7 +1144,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 200L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             fixture.files.shutdown();
             assertArrayEquals(before, Files.readAllBytes(fixture.file));
             List<String> notes = warnings(fixture.records, "Did not save");
@@ -1150,7 +1160,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -1170,7 +1180,7 @@ class DialogueMemoryReliabilityTest {
         DialogueMemoryPersistence.shutdownAppendBudgetMillis = 4_000L;
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
@@ -1192,7 +1202,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -1210,7 +1220,7 @@ class DialogueMemoryReliabilityTest {
         };
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             long started = System.nanoTime();
             fixture.files.shutdown();
             long elapsed = millisSince(started);
@@ -1229,7 +1239,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -1255,7 +1265,7 @@ class DialogueMemoryReliabilityTest {
         MemoryStore.pauseDuringLoad = waitingLoad(inside, release, "saved load was not released");
         try {
             fixture.files.onReload();
-            assertTrue(inside.await(5, TimeUnit.SECONDS));
+            assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             MemoryStore.fullDocumentAppends.set(0);
             fixture.files.shutdown();
             assertEquals(0, MemoryStore.fullDocumentAppends.get(), "stop rewrote the file");
@@ -1274,9 +1284,11 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 assertFalse(pending.isAlive());
             }
+            awaitFinished(fixture.files);
+            assertTrue(fixture.files.memoryLoadedFromDisk(), "the paused first load did not load the file");
             assertEquals(merged, Files.readString(fixture.file));
             assertEquals("disk-shared", line(fixture.store, player, "shared"));
             assertEquals("only-in-memory", line(fixture.store, player, "innkeeper"));
@@ -1286,7 +1298,7 @@ class DialogueMemoryReliabilityTest {
             release.countDown();
             Thread pending = fixture.files.diskLoader();
             if (pending != null) {
-                pending.join(5_000L);
+                pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             }
         }
     }
@@ -1312,7 +1324,7 @@ class DialogueMemoryReliabilityTest {
         return () -> {
             inside.countDown();
             try {
-                if (!release.await(30, TimeUnit.SECONDS)) {
+                if (!release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException(timeout);
                 }
             } catch (InterruptedException e) {
@@ -1415,7 +1427,7 @@ class DialogueMemoryReliabilityTest {
     }
 
     private static void awaitFinished(DialogueMemoryPersistence files) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(LATCH_WAIT_MINUTES);
         while (!files.loadFinished()) {
             if (System.nanoTime() > deadline) {
                 fail("loader did not finish");
