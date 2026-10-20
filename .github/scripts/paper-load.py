@@ -126,18 +126,7 @@ def run(args, scenarios: list[str]) -> int:
     write_load_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, high_limits())
     server_port = smoke.free_port()
     rcon_port = smoke.free_port()
-    smoke.write_server(
-        work,
-        server_port,
-        rcon_port,
-        max_players=max(30, args.bots + 5),
-        rcon_password="loadtest",
-        motd="NexusAI load",
-        extras=["spawn-protection=0"],
-    )
-    write_spigot(work / "spigot.yml")
-    jfc = work / "load.jfc"
-    jfc.write_text(JFC, encoding="utf-8")
+    jfc = write_server_files(smoke, work, server_port, rcon_port, args.bots)
 
     log_chunks: list[str] = []
     process = boot_process(work, args.stall_ms)
@@ -172,26 +161,10 @@ def run(args, scenarios: list[str]) -> int:
                         stop_bots(bots)
                         bots = None
 
-        state = {"limits": high_limits(), "baseline_mean": None}
-
-        def run_one(scenario: str, recover) -> dict:
-            wanted = limits_for(scenario)
-            if wanted != state["limits"]:
-                write_load_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, wanted)
-                reload_plugin(smoke, rcon_port, log_chunks, process)
-                state["limits"] = wanted
-            if scenario == "S5" and bots is not None:
-                (work / "talk.flag").write_text("go\n", encoding="utf-8")
-            elif (work / "talk.flag").exists():
-                (work / "talk.flag").unlink()
-            outcome = execute_scenario(
-                smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
-                requests_path, state["baseline_mean"], bot_note, bots is not None, recover=recover,
-            )
-            if scenario == "baseline" and outcome.get("report"):
-                state["baseline_mean"] = outcome["report"]["mspt"]["mean"]
-            return outcome
-
+        run_one = scenario_runner(
+            smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path, mock_port,
+            bot_note, bots is not None,
+        )
         return run_plan(
             smoke, rcon_port, log_chunks, process, planned, run_one, results,
             lambda done: write_summary(out, args, paper, done, log_chunks),
@@ -209,6 +182,108 @@ def run(args, scenarios: list[str]) -> int:
             process.wait(timeout=30)
         mock.close()
         (out / "server.log").write_text("".join(log_chunks), encoding="utf-8")
+
+
+def write_server_files(smoke, work: Path, server_port: int, rcon_port: int, bots: int) -> Path:
+    """server.properties, spigot.yml with the long watchdog timeout, and the JFR settings."""
+    smoke.write_server(
+        work,
+        server_port,
+        rcon_port,
+        max_players=max(30, bots + 5),
+        rcon_password="loadtest",
+        motd="NexusAI load",
+        extras=["spawn-protection=0"],
+    )
+    write_spigot(work / "spigot.yml")
+    jfc = work / "load.jfc"
+    jfc.write_text(JFC, encoding="utf-8")
+    return jfc
+
+
+def scenario_runner(smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path, mock_port,
+                    bot_note, bots_up, execute=None):
+    """The per-scenario step for run_plan: limits and reload, the talk flag, the scenario with the
+    recovery step it is given, and the baseline mean for later scenarios."""
+    state = {"limits": high_limits(), "baseline_mean": None}
+    execute = execute or execute_scenario
+
+    def run_one(scenario: str, recover) -> dict:
+        wanted = limits_for(scenario)
+        if wanted != state["limits"]:
+            write_load_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, wanted)
+            reload_plugin(smoke, rcon_port, log_chunks, process)
+            state["limits"] = wanted
+        if scenario == "S5" and bots_up:
+            (work / "talk.flag").write_text("go\n", encoding="utf-8")
+        elif (work / "talk.flag").exists():
+            (work / "talk.flag").unlink()
+        outcome = execute(
+            smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
+            requests_path, state["baseline_mean"], bot_note, bots_up, recover=recover,
+        )
+        if scenario == "baseline" and outcome.get("report"):
+            state["baseline_mean"] = outcome["report"]["mspt"]["mean"]
+        return outcome
+
+    return run_one
+
+
+def end_budget(args, scenario: str) -> int:
+    """How long to wait for SCENARIO_END: the window plus at least the watchdog timeout, so a host
+    pause the server survives does not end the run first."""
+    return seconds_for(args, scenario) + max(90, SPIGOT_TIMEOUT_SECONDS)
+
+
+def unfinished_attempt(scenario: str, attempt: int, process, budget: int, evidence: list[str]) -> dict:
+    """An attempt without SCENARIO_END: invalid when the host stalled, otherwise a failure."""
+    code = process.poll()
+    why = f"server exited with {code}" if code is not None else f"no SCENARIO_END within {budget} s"
+    if not evidence:
+        raise RuntimeError(f"{why} for {scenario}")
+    # The host stalled and the scenario never finished: nothing to judge, so it is invalid.
+    return {"scenario": scenario, "attempt": attempt, "status": "invalid",
+            "reasons": [f"test host stall: {item}" for item in evidence] + [f"{why}; not judged"],
+            "report": None}
+
+
+def process_state(pid: int) -> str:
+    """The state letter from /proc/<pid>/stat (T when stopped), or "" where it cannot be read."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return ""
+    after = text.rsplit(")", 1)[-1].split()
+    return after[0] if after else ""
+
+
+def wait_scenario_end(process, chunks: list[str], start: int, scenario: str, timeout_s: float, stall_ms: int,
+                      clock=time.monotonic, sleep=time.sleep, state=None) -> tuple[bool, list[str]]:
+    """Waits for SCENARIO_END. Returns (ended, stall evidence). Evidence of a test host stall: the
+    server process seen stopped, a pause of the harness itself longer than stall_ms, or the
+    driver's SCENARIO_INVALID line for this scenario. Without evidence a missing end is a failure."""
+    token = f"SCENARIO_END {scenario}"
+    invalid_token = f"SCENARIO_INVALID {scenario} "
+    state = state or (lambda: process_state(process.pid))
+    evidence: list[str] = []
+    deadline = clock() + timeout_s
+    last = clock()
+    while True:
+        window = chunks[start:]
+        if any(token in line for line in window):
+            return True, evidence
+        if stall_ms > 0:
+            if any(invalid_token in line for line in window) and "driver logged SCENARIO_INVALID" not in evidence:
+                evidence.append("driver logged SCENARIO_INVALID")
+            now = clock()
+            if (now - last) * 1000 > stall_ms:
+                evidence.append(f"harness paused {int((now - last) * 1000)} ms")
+            last = now
+            if state() == "T" and "server process stopped" not in evidence:
+                evidence.append("server process stopped")
+        if process.poll() is not None or clock() >= deadline:
+            return False, evidence
+        sleep(0.2)
 
 
 def execute_scenario(
@@ -244,7 +319,10 @@ def execute_scenario(
                 )
             except RuntimeError as error:
                 jfr_note = str(error)
-        wait_marker(process, log_chunks, before, f"SCENARIO_END {scenario}", seconds_for(args, scenario) + 90)
+        budget = end_budget(args, scenario)
+        ended, evidence = wait_scenario_end(process, log_chunks, before, scenario, budget, args.stall_ms)
+        if not ended:
+            return unfinished_attempt(scenario, attempt, process, budget, evidence)
         ended = time.time()
         ended_mono = time.monotonic()
         report_path = work / "plugins" / "NexusAI-LoadDriver" / "report.json"
@@ -341,11 +419,14 @@ def parse_tps(text: str) -> float | None:
 
 
 def wait_for_tps(read_tps, timeout_s: float = 150.0, poll_s: float = 5.0,
-                 clock=time.monotonic, sleep=time.sleep) -> tuple[bool, float | None]:
-    """Polls until the 1-minute TPS is at least TPS_READY. Returns (ready, last value read)."""
+                 clock=time.monotonic, sleep=time.sleep, stop=None) -> tuple[bool, float | None]:
+    """Polls until the 1-minute TPS is at least TPS_READY. Returns (ready, last value read).
+    A read that raises counts as no value. stop() ends the wait early (the server has exited)."""
     deadline = clock() + timeout_s
     last = None
     while True:
+        if stop is not None and stop():
+            return False, last
         try:
             last = read_tps()
         except Exception:
@@ -357,25 +438,43 @@ def wait_for_tps(read_tps, timeout_s: float = 150.0, poll_s: float = 5.0,
         sleep(poll_s)
 
 
-def recover_after_stall(smoke, rcon_port: int, log_chunks: list[str], process) -> str:
+def recover_after_stall(smoke, rcon_port: int, log_chunks: list[str], process, unreachable: dict | None = None,
+                        wait=None) -> str:
     """Before the retry of an invalid attempt: /nai reload drops the provider pause and backoff
     the stall left behind, then the 1-minute TPS must climb back to TPS_READY, so the retry is
-    not judged on the stall. Returns "" when ready, otherwise why not."""
-    if process.poll() is not None:
-        return f"server stopped after the stall (exit {process.poll()}, Paper watchdog?)"
+    not judged on the stall. Returns "" when ready, otherwise why not. When the server has exited
+    or does not answer RCON, unreachable["reason"] is set so run_plan stops starting scenarios."""
+    unreachable = unreachable if unreachable is not None else {}
+
+    def stopped() -> str:
+        code = process.poll()
+        return "" if code is None else f"server stopped after the stall (exit {code}, Paper watchdog?)"
+
+    if stopped():
+        unreachable["reason"] = stopped()
+        return stopped()
     try:
         reload_plugin(smoke, rcon_port, log_chunks, process)
-    except (OSError, RuntimeError) as error:
-        if process.poll() is not None:
-            return f"server stopped after the stall (exit {process.poll()}, Paper watchdog?)"
-        return f"/nai reload failed after the stall: {error}"
-    ready, tps = wait_for_tps(
-        lambda: parse_tps(smoke.strip_colors(smoke.rcon("127.0.0.1", rcon_port, "loadtest", "tps"))))
-    if process.poll() is not None:
-        return f"server stopped after the stall (exit {process.poll()}, Paper watchdog?)"
+    except Exception as error:  # OSError, EOFError ("rcon connection closed"), RuntimeError
+        unreachable["reason"] = stopped() or f"server does not answer RCON after the stall: {error}"
+        return unreachable["reason"]
+    answered = []
+
+    def read() -> float | None:
+        text = smoke.rcon("127.0.0.1", rcon_port, "loadtest", "tps")
+        answered.append(True)
+        return parse_tps(smoke.strip_colors(text))
+
+    ready, tps = (wait or wait_for_tps)(read, stop=lambda: process.poll() is not None)
+    if stopped():
+        unreachable["reason"] = stopped()
+        return stopped()
     if ready:
         say(f"server ready for the retry: /nai reload done, TPS {tps}")
         return ""
+    if not answered:
+        unreachable["reason"] = "server does not answer RCON after the stall"
+        return unreachable["reason"]
     return f"TPS {tps} did not reach {TPS_READY} within 150 s after the stall"
 
 
@@ -383,15 +482,20 @@ def run_plan(smoke, rcon_port: int, log_chunks: list[str], process, planned, run
              summarize) -> int:
     """Runs every scenario with the recovery step for stalled attempts, writes the summary, and
     returns the exit code. Once the server has exited (for example the Paper watchdog stopped it
-    after a long stall) the remaining scenarios are not run."""
+    after a long stall) or stopped answering RCON after a stall, the remaining scenarios are
+    reported as not-run instead of failing the run."""
+    unreachable: dict = {}
 
     def recover() -> str:
-        return recover_after_stall(smoke, rcon_port, log_chunks, process)
+        return recover_after_stall(smoke, rcon_port, log_chunks, process, unreachable)
 
     for scenario in planned:
         if process.poll() is not None:
             outcome = {"scenario": scenario, "status": "not-run",
                        "reasons": ["the server stopped earlier in this run"], "report": None}
+        elif unreachable:
+            outcome = {"scenario": scenario, "status": "not-run",
+                       "reasons": [f"not run: {unreachable['reason']}"], "report": None}
         else:
             outcome = run_one(scenario, recover)
         results.append(outcome)
@@ -1828,8 +1932,9 @@ def stall_self_check() -> None:
     if "server stopped" not in problem:
         raise SystemExit(f"a server stopped by the watchdog was not reported: {problem!r}")
     alive_refused = FakeSmoke([], refuse=True)
-    if "reload failed" not in recover_after_stall(alive_refused, 0, [], FakeProcess()):
-        raise SystemExit("a refused reload was not reported")
+    flag = {}
+    if "does not answer RCON" not in recover_after_stall(alive_refused, 0, [], FakeProcess(), flag) or not flag:
+        raise SystemExit("a refused reload was not reported as an unreachable server")
     if "server stopped" not in recover_after_stall(FakeSmoke([]), 0, [], FakeProcess(1)):
         raise SystemExit("a dead server was not reported before the reload")
 
@@ -1874,6 +1979,8 @@ def stall_self_check() -> None:
         write_spigot(spigot)
         if f"timeout-time: {SPIGOT_TIMEOUT_SECONDS}" not in spigot.read_text(encoding="utf-8") or SPIGOT_TIMEOUT_SECONDS < 600:
             raise SystemExit("spigot.yml does not raise the watchdog timeout")
+
+    stall_wiring_self_check(FakeProcess, FakeSmoke)
 
     # finish_run gives the exit code of the whole run.
     for statuses, wanted in ((["pass", "invalid"], 3), (["pass", "fail", "invalid"], 1), (["pass"], 0)):
@@ -1925,6 +2032,168 @@ def stall_self_check() -> None:
         match = re.search(r'PROPERTY = "([^"]+)"', detector.read_text(encoding="utf-8"))
         if match is None or match.group(1) != "nexusai.load.stallMillis":
             raise SystemExit(f"HostStallDetector.PROPERTY does not match the server command: {match and match.group(1)}")
+
+
+def stall_wiring_self_check(FakeProcess, FakeSmoke) -> None:
+    """N12 to N14 and the wiring of main: closed RCON, a server that stays silent, a scenario that
+    never ends during a stall, the per-scenario step, and the server files."""
+    quick = lambda read, stop: wait_for_tps(read, timeout_s=0, stop=stop)
+
+    class EofSmoke(FakeSmoke):
+        def __init__(self, chunks, fail_on, process=None):
+            super().__init__(chunks)
+            self.fail_on, self.process = fail_on, process
+
+        def rcon(self, host, port, password, command):
+            if command == self.fail_on:
+                if self.process is not None:
+                    self.process.code = 137
+                raise EOFError("rcon connection closed")
+            return super().rcon(host, port, password, command)
+
+    # EOFError in the reload or in the tps read never escapes, and the server is marked unreachable.
+    for fail_on, dies in (("nai reload", False), ("nai reload", True), ("tps", False), ("tps", True)):
+        process = FakeProcess()
+        chunks = []
+        flag = {}
+        problem = recover_after_stall(EofSmoke(chunks, fail_on, process if dies else None), 0, chunks, process,
+                                      flag, wait=quick)
+        if not problem or not flag:
+            raise SystemExit(f"EOFError on {fail_on} (server dies: {dies}) gave {problem!r}, flag {flag}")
+        if dies and "server stopped" not in problem:
+            raise SystemExit(f"a server that died on {fail_on} was not reported as stopped: {problem!r}")
+
+    reads = []
+    if wait_for_tps(lambda: reads.append(1) or 20.0, timeout_s=60, sleep=lambda seconds: None,
+                    stop=lambda: True) != (False, None) or reads:
+        raise SystemExit("wait_for_tps kept reading after the server stopped")
+
+    # A server that is alive but stops answering RCON after a stall: the rest is not-run, exit 3.
+    process = FakeProcess()
+    log = []
+    silent = FakeSmoke(log, refuse=True)
+    started = []
+
+    def run_one(scenario, recover):
+        started.append(scenario)
+
+        def attempt(number):
+            if scenario == "S1" and number == 1:
+                return {"scenario": scenario, "status": "invalid", "reasons": ["tick gap 150000 ms"]}
+            return {"scenario": scenario, "status": "pass", "reasons": []}
+
+        return execute_scenario(None, None, scenario, process, log, 0, None, None, None, None, None, "", True,
+                                recover=recover, measure=attempt)
+
+    results = []
+    code = run_plan(silent, 0, log, process, ["baseline", "S1", "S2", "S3"], run_one, results, lambda done: None)
+    statuses = [item["status"] for item in results]
+    if code != 3 or statuses != ["pass", "invalid", "not-run", "not-run"] or started != ["baseline", "S1"]:
+        raise SystemExit(f"RCON lost after a stall: exit {code}, {statuses}, started {started}")
+
+    # The server exits between scenarios without any stall: the rest is not-run.
+    dying = FakeProcess()
+    ran = []
+
+    def run_and_die(scenario, recover):
+        ran.append(scenario)
+        dying.code = 1
+        return {"scenario": scenario, "status": "pass", "reasons": [], "report": None}
+
+    results = []
+    code = run_plan(None, 0, [], dying, ["baseline", "S1"], run_and_die, results, lambda done: None)
+    if ran != ["baseline"] or [item["status"] for item in results] != ["pass", "not-run"]:
+        raise SystemExit(f"scenario ran after the server exited: {ran}, exit {code}")
+
+    # SCENARIO_END wait: stall evidence makes the attempt invalid, no evidence keeps it a failure.
+    if end_budget(argparse.Namespace(baseline_seconds=15, load_seconds=40, pool_seconds=3), "S1") < SPIGOT_TIMEOUT_SECONDS:
+        raise SystemExit("the SCENARIO_END wait is shorter than the watchdog timeout")
+    now = [0.0]
+
+    def tick(seconds):
+        now[0] += seconds
+
+    def wait(chunks, states, code=None, timeout=10.0, jump=0.0):
+        process = FakeProcess(code)
+        now[0] = 0.0
+        sequence = iter(states)
+        clock_jumps = [jump]
+
+        def clock():
+            if clock_jumps and clock_jumps[0] and now[0] >= 1.0:
+                now[0] += clock_jumps.pop()
+            return now[0]
+
+        return wait_scenario_end(process, chunks, 0, "S1", timeout, 5000, clock=clock, sleep=tick,
+                                 state=lambda: next(sequence, "S"))
+
+    if wait(["[INFO]: SCENARIO_END S1\n"], []) != (True, []):
+        raise SystemExit("SCENARIO_END was not seen")
+    ended, evidence = wait([], ["S", "T", "T", "S"])
+    if ended or evidence != ["server process stopped"]:
+        raise SystemExit(f"a stopped server was not taken as stall evidence: {ended}, {evidence}")
+    if wait([], []) != (False, []):
+        raise SystemExit("a scenario that never ends without a stall gave stall evidence")
+    ended, evidence = wait([], [], jump=200.0)
+    if ended or not evidence or not evidence[0].startswith("harness paused"):
+        raise SystemExit(f"a harness pause was not taken as stall evidence: {evidence}")
+    ended, evidence = wait(["[WARN]: SCENARIO_INVALID S1 test host stall: tick gap 150000 ms\n"], [], code=1)
+    if ended or evidence != ["driver logged SCENARIO_INVALID"]:
+        raise SystemExit(f"SCENARIO_INVALID before the server exited was not evidence: {evidence}")
+    stalled = unfinished_attempt("S1", 1, FakeProcess(1), 640, ["server process stopped"])
+    if stalled["status"] != "invalid" or not any("server exited with 1" in item for item in stalled["reasons"]):
+        raise SystemExit(f"an unfinished attempt in a stall was not invalid: {stalled}")
+    try:
+        unfinished_attempt("S1", 1, FakeProcess(), 640, [])
+    except RuntimeError as error:
+        if "no SCENARIO_END within 640 s" not in str(error):
+            raise SystemExit(f"wrong failure for an unfinished attempt: {error}")
+    else:
+        raise SystemExit("an unfinished attempt without a stall was not a failure")
+
+    # scenario_runner: the recovery step, the baseline mean, and a reload when the limits change.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "plugins" / "NexusAI").mkdir(parents=True)
+        seen = []
+
+        def fake_execute(smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
+                         requests_path, baseline_mean, bot_note, bots_up, recover=None):
+            seen.append((scenario, baseline_mean, recover))
+            return {"scenario": scenario, "status": "pass", "reasons": [],
+                    "report": {"mspt": {"mean": 1.5}} if scenario == "baseline" else None}
+
+        chunks = []
+        smoke_fake = FakeSmoke(chunks)
+        run_one = scenario_runner(smoke_fake, None, FakeProcess(), chunks, 0, work, work, work / "load.jfc",
+                                  work / "requests.jsonl", 1, "", False, execute=fake_execute)
+        marker = object()
+        other = "S3"
+        if limits_for(other) == high_limits():
+            raise SystemExit("S3 no longer has its own limits; pick another scenario for this check")
+        run_one("baseline", marker)
+        run_one(other, marker)
+        if [item[2] for item in seen] != [marker, marker]:
+            raise SystemExit("scenario_runner did not pass the recovery step to the scenario")
+        if seen[1][1] != 1.5:
+            raise SystemExit(f"the baseline mean did not reach the next scenario: {seen}")
+        if smoke_fake.sent != ["nai reload"]:
+            raise SystemExit(f"a change of limits did not reload once: {smoke_fake.sent}")
+
+        class ServerSmoke:
+            def __init__(self):
+                self.calls = []
+
+            def write_server(self, work, server_port, rcon_port, **kwargs):
+                self.calls.append((server_port, rcon_port, kwargs.get("rcon_password")))
+
+        server_smoke = ServerSmoke()
+        jfc = write_server_files(server_smoke, work, 25565, 25575, 0)
+        spigot = work / "spigot.yml"
+        if server_smoke.calls != [(25565, 25575, "loadtest")] or not jfc.is_file():
+            raise SystemExit(f"server files were not written: {server_smoke.calls}")
+        if not spigot.is_file() or f"timeout-time: {SPIGOT_TIMEOUT_SECONDS}" not in spigot.read_text(encoding="utf-8"):
+            raise SystemExit("write_server_files did not raise the watchdog timeout")
 
 
 JFC = """<?xml version="1.0" encoding="UTF-8"?>
