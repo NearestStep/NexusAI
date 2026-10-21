@@ -23,7 +23,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RejectedExecutionException;
@@ -47,6 +50,10 @@ public final class AiHttpClient {
     private final Logger logger;
     private final ConcurrentHashMap<String, CompletableFuture<SharedCompletion>> inFlight = new ConcurrentHashMap<>();
     private volatile QuotaPolicy quotas;
+    static final String STOPPING = "NexusAI is stopping";
+    private final ConcurrentHashMap<CompletableFuture<?>, Runnable> pending = new ConcurrentHashMap<>();
+    private volatile boolean closing;
+    private volatile boolean closed;
     private volatile Executor completionExecutor = ForkJoinPool.commonPool();
     private static volatile BooleanSupplier serverThread = AiHttpClient::bukkitServerThread;
 
@@ -72,6 +79,58 @@ public final class AiHttpClient {
      */
     public void completionExecutor(Executor executor) {
         this.completionExecutor = executor == null ? ForkJoinPool.commonPool() : executor;
+    }
+
+    /**
+     * Plugin disable. New requests stop at once. Requests already sent get up to
+     * {@code waitMillis} to finish normally; the rest are cancelled, and their callers see a
+     * {@link CancellationException} without a log line, an event, or a cache write. After this
+     * returns no completion handler of this client runs, so nothing touches the plugin
+     * classloader once Bukkit closes it.
+     *
+     * @return how many requests were cancelled
+     */
+    public int close(long waitMillis) {
+        closing = true;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, waitMillis));
+        while (!pending.isEmpty() && System.nanoTime() < deadline) {
+            CompletableFuture<?>[] open = pending.keySet().toArray(new CompletableFuture<?>[0]);
+            long left = deadline - System.nanoTime();
+            try {
+                CompletableFuture.allOf(open).get(Math.max(1L, left), TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException | java.util.concurrent.TimeoutException | CancellationException ignored) {
+                // A failed reply is still finished; the loop checks what is left.
+            }
+        }
+        closed = true;
+        int cancelled = 0;
+        for (CompletableFuture<?> open : pending.keySet().toArray(new CompletableFuture<?>[0])) {
+            Runnable stop = pending.remove(open);
+            if (stop == null) {
+                continue;
+            }
+            open.cancel(false);
+            // Also when the provider ignores cancel: the caller is answered now, and a reply
+            // that still arrives later finds the client closed and does nothing.
+            stop.run();
+            cancelled++;
+        }
+        return cancelled;
+    }
+
+    /** Requests sent and not yet finished. */
+    public int pendingCount() {
+        return pending.size();
+    }
+
+    private void stopQuietly(String cacheKey, CompletableFuture<SharedCompletion> created) {
+        created.completeExceptionally(new CancellationException(STOPPING));
+        if (cacheKey != null) {
+            inFlight.remove(cacheKey, created);
+        }
     }
 
     /** Test hook: which thread counts as the server thread. {@code null} restores the Bukkit check. */
@@ -467,6 +526,10 @@ public final class AiHttpClient {
             QuotaPolicy.Hold quotaHold
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        if (closing) {
+            stopQuietly(cacheKey, created);
+            return;
+        }
         CompletableFuture<ModelAnswer> upstream;
         try {
             upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
@@ -478,7 +541,39 @@ public final class AiHttpClient {
         // A reply that is already complete runs this callback on the calling thread, which for
         // a placeholder is the server thread. Post and Fail are async events, and Bukkit refuses
         // them there, so the callback moves to a NexusAI worker first.
-        upstream.whenComplete((answer, error) -> offServerThread(() -> {
+        pending.put(upstream, () -> stopQuietly(cacheKey, created));
+        upstream.whenComplete((answer, error) -> {
+            pending.remove(upstream);
+            if (closed) {
+                // The plugin is being disabled. Nothing else runs, so no class is loaded from
+                // a classloader that is about to close.
+                stopQuietly(cacheKey, created);
+                return;
+            }
+            completion(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
+                    cacheTtl, clearPause, quotaHold, trace);
+        });
+        if (closed) {
+            pending.remove(upstream);
+            upstream.cancel(false);
+        }
+    }
+
+    private void completion(
+            String cacheKey,
+            String admissionKey,
+            long pauseStamp,
+            long failureEpoch,
+            CompletableFuture<SharedCompletion> created,
+            ModelAnswer answer,
+            Throwable error,
+            boolean writeCache,
+            Duration cacheTtl,
+            boolean clearPause,
+            QuotaPolicy.Hold quotaHold,
+            CallTrace trace
+    ) {
+        offServerThread(() -> {
             try {
                 finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
                         effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold, trace);
@@ -489,7 +584,7 @@ public final class AiHttpClient {
                     inFlight.remove(cacheKey, created);
                 }
             }
-        }));
+        });
     }
 
     /**

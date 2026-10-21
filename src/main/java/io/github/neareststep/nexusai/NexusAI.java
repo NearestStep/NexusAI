@@ -97,6 +97,8 @@ public final class NexusAI extends JavaPlugin {
     private PoolService poolService;
     private PrewarmService prewarmService;
     private HttpPool httpPool;
+    /** How long disable waits for AI requests already sent. */
+    static final long STOP_WAIT_MILLIS = 500L;
     private ExecutorService httpExecutor;
     private ScheduledExecutorService scheduler;
     private HttpClient sharedHttpClient;
@@ -209,6 +211,13 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onDisable() {
         unregisterPlaceholderExpansion();
+        if (aiHttpClient != null) {
+            // Bounded: the rest are cancelled so no completion runs after the classloader closes.
+            int cancelled = aiHttpClient.close(STOP_WAIT_MILLIS);
+            if (cancelled > 0) {
+                getLogger().fine("Cancelled " + cancelled + " AI request(s) still waiting for the provider on stop.");
+            }
+        }
         if (dialogueService != null) {
             dialogueService.shutdown();
             NexusAIApi.bind(null);
