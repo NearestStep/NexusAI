@@ -2267,6 +2267,19 @@ def stall_wiring_self_check(FakeProcess, FakeSmoke) -> None:
                 or len([c for c in sent if c.startswith("naiload S1 ")]) != 2:
             raise SystemExit(f"two unfinished attempts were not a failure: {outcome}, {sent}, {recovered}")
 
+        def short_stall(process, chunks, start, scenario, timeout_s, stall_ms, stalled=None):
+            stalled["ms"] = 100_000
+            return False, ["harness paused 100000 ms"]
+
+        sent.clear()
+        recovered.clear()
+        outcome = execute_scenario(AttemptSmoke(), attempt_args, "S1", FakeProcess(), [], 0, work, work, None,
+                                   work / "requests.jsonl", None, "", False,
+                                   recover=lambda: recovered.append(1) or "", wait=short_stall)
+        if outcome["status"] != "fail" or not outcome.get("stop_run") or recovered \
+                or len([c for c in sent if c.startswith("naiload S1 ")]) != 1:
+            raise SystemExit(f"a hang during a 100 s stall was retried or not a failure: {outcome}, {sent}")
+
         def ends_after_stale(process, chunks, start, scenario, timeout_s, stall_ms, stalled=None):
             return True, []
 
