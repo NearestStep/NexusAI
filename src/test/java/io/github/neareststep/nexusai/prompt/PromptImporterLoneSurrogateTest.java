@@ -38,5 +38,32 @@ class PromptImporterLoneSurrogateTest {
         assertEquals("qa-fb\uFFFD", parsed.catalog().find("block").orElseThrow().fallbackModel().model());
         assertTrue(parsed.catalog().find("block").orElseThrow().template().startsWith("tip "));
         assertTrue(parsed.catalog().find("flow").orElseThrow().template().startsWith("flow "));
+        assertEquals(1, topLevelCount(prompts, "flow"), prompts);
+    }
+
+    @Test
+    void explicitKeyAfterABlockIsNotCopiedTwice(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("prompts.yml"), "config-version: 1\nexisting: \"here\"\n", StandardCharsets.UTF_8);
+        Path imports = Files.createDirectories(dir.resolve("import"));
+        Files.writeString(imports.resolve("pack.yml"), """
+                block:
+                  prompt: "tip"
+                ? flow
+                : "flow text"
+                """, StandardCharsets.UTF_8);
+
+        PromptImporter.Report report = PromptImporter.importFile(dir, "pack.yml", false);
+        assertTrue(report.success(), report.error());
+        String prompts = Files.readString(dir.resolve("prompts.yml"), StandardCharsets.UTF_8);
+        assertEquals(1, topLevelCount(prompts, "flow"), prompts);
+        assertEquals(0, prompts.lines().filter(line -> line.startsWith("? ") || line.startsWith(": ")).count(), prompts);
+        PromptCatalog.Parsed parsed = PromptCatalog.parse(prompts);
+        assertTrue(parsed.valid(), parsed.error());
+        assertEquals("tip", parsed.catalog().find("block").orElseThrow().template());
+        assertEquals("flow text", parsed.catalog().find("flow").orElseThrow().template());
+    }
+
+    private static long topLevelCount(String yaml, String id) {
+        return yaml.lines().filter(line -> line.startsWith(id + ":")).count();
     }
 }

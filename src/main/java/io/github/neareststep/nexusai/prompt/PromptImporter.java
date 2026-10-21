@@ -365,6 +365,11 @@ public final class PromptImporter {
         if (first == ' ' || first == '\t' || first == '#' || first == '-') {
             return false;
         }
+        if ((first == '?' || first == ':') && (line.length() == 1 || line.charAt(1) == ' ' || line.charAt(1) == '\t')) {
+            // An explicit "? key" / ": value" entry starts a new top-level entry, so the block
+            // above it ends here and is not copied together with it.
+            return true;
+        }
         return line.indexOf(':') > 0;
     }
 
