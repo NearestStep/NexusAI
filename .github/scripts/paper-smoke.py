@@ -2154,6 +2154,23 @@ def _placeholder_order_self_check() -> None:
     if time.monotonic() - started > 1:
         raise AssertionError("post wait did not return once the line was there")
 
+    # wait_event_checks must wait for the Post line after it sees the text.
+    action = "NEXUSAI_EVENT phase=action requestId=1 character=smoke primary=true\nACTION_DONE result=ran\n"
+    global PLACEHOLDER_POST_WAIT_SECONDS
+    saved_wait = PLACEHOLDER_POST_WAIT_SECONDS
+    PLACEHOLDER_POST_WAIT_SECONDS = 0.5
+    try:
+        started = time.monotonic()
+        wait_event_checks(Running(), [pre + "\n", shown + "\n", action], 5)
+        if time.monotonic() - started < 0.4:
+            raise AssertionError("wait_event_checks did not wait for the placeholder Post line")
+        started = time.monotonic()
+        wait_event_checks(Running(), [pre + "\n", post + "\n", shown + "\n", action], 5)
+        if time.monotonic() - started > 0.4:
+            raise AssertionError("wait_event_checks waited although the Post line was there")
+    finally:
+        PLACEHOLDER_POST_WAIT_SECONDS = saved_wait
+
 
 def _download_self_check() -> None:
     global _fetch_to
