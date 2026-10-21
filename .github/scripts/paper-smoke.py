@@ -1091,19 +1091,51 @@ def verify_api_order(text: str) -> None:
 
 
 def verify_placeholder_order(text: str) -> None:
-    """One placeholder logs Pre then Post, both nexusai, and Post is before the visible text."""
+    """One placeholder logs Pre and Post for nexusai, and Post ran before the text was read.
+
+    The Post line comes from an HTTP thread and PLACEHOLDER_TEXT from the main thread, so
+    their console order is not proof. The load driver appends post=<requestId>, read from a
+    property the probe sets after it logs Post, which is.
+    """
     pre_index, pre_id, post_index, text_index = _paired_phase(
         text, "PLACEHOLDER", "nexusai", "PLACEHOLDER_TEXT", "text=pong"
     )
-    if pre_index is None or post_index is None or text_index is None:
+    if pre_index is None or text_index is None:
+        raise RuntimeError("events probe did not log a PLACEHOLDER pre for consumer nexusai before PLACEHOLDER_TEXT")
+    if post_index is None:
+        raise RuntimeError(f"events probe did not log a PLACEHOLDER post for requestId={pre_id}")
+    if pre_index >= text_index:
         raise RuntimeError(
-            "events probe did not log a PLACEHOLDER pre and post for consumer nexusai before PLACEHOLDER_TEXT"
+            f"expected PLACEHOLDER pre before PLACEHOLDER_TEXT; indexes were {pre_index}, {text_index}"
         )
-    if pre_index >= post_index or post_index >= text_index:
+    seen = _placeholder_post_seen(text.splitlines()[text_index])
+    if seen != pre_id:
         raise RuntimeError(
-            "expected PLACEHOLDER pre, then post, then PLACEHOLDER_TEXT; "
-            f"indexes were {pre_index}, {post_index}, {text_index} requestId={pre_id}"
+            f"PLACEHOLDER_TEXT was read with post={seen}, expected post={pre_id}; Post did not run first"
         )
+
+
+def _placeholder_post_seen(line: str) -> str | None:
+    marker = " post="
+    start = line.find(marker)
+    if start < 0:
+        return None
+    return line[start + len(marker):].split()[0]
+
+
+def wait_placeholder_post(process, chunks: list[str], timeout: float) -> None:
+    """Wait for the placeholder Post line; it can reach the console after PLACEHOLDER_TEXT."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = "".join(chunks)
+        _pre, pre_id, post_index, _text = _paired_phase(
+            text, "PLACEHOLDER", "nexusai", "PLACEHOLDER_TEXT", "text=pong"
+        )
+        if pre_id is None or post_index is not None:
+            return
+        if time.monotonic() >= deadline or process.poll() is not None:
+            return
+        time.sleep(0.2)
 
 
 def verify_action_thread(text: str) -> None:
@@ -1159,6 +1191,9 @@ def _paired_phase(
     return pre_index, pre_id, post_index, appearance_index
 
 
+PLACEHOLDER_POST_WAIT_SECONDS = 10.0
+
+
 def wait_event_checks(process, chunks: list[str], timeout: int) -> None:
     """Poll until the placeholder text and the action result are both in the log."""
     deadline = time.monotonic() + timeout
@@ -1168,6 +1203,7 @@ def wait_event_checks(process, chunks: list[str], timeout: int) -> None:
         text = "".join(chunks)
         if "PLACEHOLDER_TEXT text=pong" in text and "ACTION_DONE" in text and "phase=action" in text:
             print("event smoke saw placeholder text and a character action")
+            wait_placeholder_post(process, chunks, PLACEHOLDER_POST_WAIT_SECONDS)
             return
         if "PLACEHOLDER_TEXT timeout" in text or "PLACEHOLDER_TEXT error=" in text:
             raise RuntimeError("placeholder expansion did not return the model text")
@@ -2074,8 +2110,49 @@ def _smoke_self_check() -> None:
         with zipfile.ZipFile(jar_path, "w") as archive:
             archive.writestr("plugin.yml", "name: NexusAI\nfolia-supported: false\n")
         _need(not read_folia_supported(jar_path), "jar flag was not false")
+    _placeholder_order_self_check()
     _download_self_check()
     _download_cache_self_check()
+
+
+def _placeholder_order_self_check() -> None:
+    pre = "NEXUSAI_EVENT phase=pre requestId=3 origin=PLACEHOLDER consumer=nexusai"
+    post = "NEXUSAI_EVENT phase=post requestId=3 origin=PLACEHOLDER consumer=nexusai"
+    shown = "PLACEHOLDER_TEXT text=pong post=3"
+    verify_placeholder_order("\n".join([pre, post, shown]))
+    # Post logged by the HTTP thread after the main thread line still passes.
+    verify_placeholder_order("\n".join([pre, shown, post]))
+    bad = {
+        "no post line": [pre, shown],
+        "no pre line": [post, shown],
+        "post not seen": [pre, post, "PLACEHOLDER_TEXT text=pong post=none"],
+        "old driver": [pre, post, "PLACEHOLDER_TEXT text=pong"],
+        "other request": [pre, post, "PLACEHOLDER_TEXT text=pong post=2"],
+        "text before pre": [shown, pre, post],
+    }
+    for name, lines in bad.items():
+        try:
+            verify_placeholder_order("\n".join(lines))
+        except RuntimeError:
+            continue
+        raise AssertionError(f"placeholder order accepted {name}")
+
+    class Running:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    chunks = [pre + "\n", shown + "\n"]
+    started = time.monotonic()
+    wait_placeholder_post(Running(), chunks, 0.5)
+    if time.monotonic() - started < 0.4:
+        raise AssertionError("post wait returned before its timeout")
+    chunks.append(post + "\n")
+    started = time.monotonic()
+    wait_placeholder_post(Running(), chunks, 5)
+    if time.monotonic() - started > 1:
+        raise AssertionError("post wait did not return once the line was there")
 
 
 def _download_self_check() -> None:

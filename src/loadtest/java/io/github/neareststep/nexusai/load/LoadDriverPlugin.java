@@ -246,7 +246,9 @@ public final class LoadDriverPlugin extends JavaPlugin implements CommandExecuto
                 return;
             }
             if (value != null && value.contains("pong")) {
-                getLogger().info("PLACEHOLDER_TEXT text=pong");
+                // The events probe sets this property after it logs Post for a placeholder request.
+                getLogger().info("PLACEHOLDER_TEXT text=pong post="
+                        + System.getProperty("nexusai.eventsprobe.placeholderPost", "none"));
                 task.cancel();
             }
         }, 1L, 10L);
