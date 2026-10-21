@@ -25,8 +25,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RejectedExecutionException;
@@ -82,29 +80,16 @@ public final class AiHttpClient {
     }
 
     /**
-     * Plugin disable. New requests stop at once. Requests already sent get up to
-     * {@code waitMillis} to finish normally; the rest are cancelled, and their callers see a
-     * {@link CancellationException} without a log line, an event, or a cache write. After this
-     * returns no completion handler of this client runs, so nothing touches the plugin
-     * classloader once Bukkit closes it.
+     * Plugin disable. New requests stop at once and requests already sent are cancelled now:
+     * Paper marks the plugin disabled before {@code onDisable}, so a reply that arrived later
+     * could not be scheduled to its reader anyway. Callers see a {@link CancellationException}
+     * without a log line, an event, or a cache write. After this returns no completion handler
+     * of this client runs, so nothing touches the plugin classloader once Bukkit closes it.
      *
      * @return how many requests were cancelled
      */
-    public int close(long waitMillis) {
+    public int close() {
         closing = true;
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, waitMillis));
-        while (!pending.isEmpty() && System.nanoTime() < deadline) {
-            CompletableFuture<?>[] open = pending.keySet().toArray(new CompletableFuture<?>[0]);
-            long left = deadline - System.nanoTime();
-            try {
-                CompletableFuture.allOf(open).get(Math.max(1L, left), TimeUnit.NANOSECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (ExecutionException | java.util.concurrent.TimeoutException | CancellationException ignored) {
-                // A failed reply is still finished; the loop checks what is left.
-            }
-        }
         closed = true;
         int cancelled = 0;
         for (CompletableFuture<?> open : pending.keySet().toArray(new CompletableFuture<?>[0])) {

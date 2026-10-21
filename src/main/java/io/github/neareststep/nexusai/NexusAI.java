@@ -97,8 +97,6 @@ public final class NexusAI extends JavaPlugin {
     private PoolService poolService;
     private PrewarmService prewarmService;
     private HttpPool httpPool;
-    /** How long disable waits for AI requests already sent. */
-    static final long STOP_WAIT_MILLIS = 500L;
     private ExecutorService httpExecutor;
     private ScheduledExecutorService scheduler;
     private HttpClient sharedHttpClient;
@@ -127,6 +125,7 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onEnable() {
         long startedNanos = System.nanoTime();
+        StopGate.open();
         if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
@@ -210,13 +209,15 @@ public final class NexusAI extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // Paper already reports the plugin disabled here, so no reply can be scheduled to its
+        // reader any more. Everything still waiting for a provider is cancelled at once.
+        StopGate.close();
         unregisterPlaceholderExpansion();
         if (aiHttpClient != null) {
-            // Bounded: the rest are cancelled so no completion runs after the classloader closes.
-            int cancelled = aiHttpClient.close(STOP_WAIT_MILLIS);
-            if (cancelled > 0) {
-                getLogger().fine("Cancelled " + cancelled + " AI request(s) still waiting for the provider on stop.");
-            }
+            StopGate.dropped(aiHttpClient.close());
+        }
+        if (generationService != null) {
+            generationService.shutdown();
         }
         if (dialogueService != null) {
             dialogueService.shutdown();
@@ -225,13 +226,18 @@ public final class NexusAI extends JavaPlugin {
         }
         stopRuntimeServices(true);
         if (generationService != null) {
-            generationService.shutdown();
             NexusAIApi.bindGeneration(null);
             generationService = null;
         }
         EventDispatcher.install(null);
         closeSharedHttpClient();
-        shutdownExecutor(httpExecutor);
+        // Sends were cancelled above, so workers finish fast. Bounded so a provider that
+        // ignores cancel cannot hold stop.
+        shutdownExecutor(httpExecutor, HTTP_STOP_MILLIS);
+        String lost = StopGate.takeSummary();
+        if (lost != null) {
+            getLogger().info(lost);
+        }
         if (tokenStore != null) {
             tokenStore.flush();
         }
@@ -742,6 +748,26 @@ public final class NexusAI extends JavaPlugin {
             return thread;
         };
         return Executors.newSingleThreadScheduledExecutor(factory);
+    }
+
+    /** Total wait for the HTTP workers on disable. */
+    static final long HTTP_STOP_MILLIS = 600L;
+
+    static void shutdownExecutor(ExecutorService executor, long millis) {
+        if (executor == null) {
+            return;
+        }
+        executor.shutdown();
+        try {
+            long half = Math.max(1L, millis / 2);
+            if (!executor.awaitTermination(half, TimeUnit.MILLISECONDS)) {
+                executor.shutdownNow();
+                executor.awaitTermination(half, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static void shutdownExecutor(ExecutorService executor) {

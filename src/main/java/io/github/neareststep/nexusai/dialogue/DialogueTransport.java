@@ -36,6 +36,10 @@ public final class DialogueTransport {
     private final HttpClient httpClient;
     private final Supplier<PluginConfig> config;
     private final Supplier<HttpGate> gates;
+    static final String STOPPING = "NexusAI is stopping";
+    private final java.util.Set<java.util.concurrent.CompletableFuture<?>> open =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean closed;
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient) {
         this(config, httpClient, (HttpGate) null);
@@ -53,6 +57,34 @@ public final class DialogueTransport {
         this.config = Objects.requireNonNull(config, "config");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.gates = gates == null ? HttpGate::unlimited : gates;
+    }
+
+    /**
+     * Plugin disable. Sends still waiting for the provider or for a gate slot are cancelled
+     * now, so a dialogue worker blocked in {@link #send} returns at once instead of holding
+     * stop until the read timeout. New sends fail the same way.
+     *
+     * @return how many sends were cancelled
+     */
+    public int close() {
+        closed = true;
+        int cancelled = 0;
+        for (java.util.concurrent.CompletableFuture<?> call : open.toArray(new java.util.concurrent.CompletableFuture<?>[0])) {
+            if (open.remove(call)) {
+                call.cancel(true);
+                cancelled++;
+            }
+        }
+        return cancelled;
+    }
+
+    /** Sends in progress. */
+    int openCount() {
+        return open.size();
+    }
+
+    private static AiRequestException stopping() {
+        return new AiRequestException(AiErrorKind.OTHER, 0, STOPPING, null);
     }
 
     private HttpGate gate() {
@@ -104,9 +136,38 @@ public final class DialogueTransport {
             HttpRequest httpRequest = builder.POST(HttpRequest.BodyPublishers.ofByteArray(json)).build();
             CallTrace.delivered(trace);
             long started = System.nanoTime();
-            HttpResponse<String> response = gate().schedule(
-                    () -> httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
-            ).join();
+            if (closed) {
+                throw stopping();
+            }
+            java.util.concurrent.CompletableFuture<HttpResponse<String>> call = gate().schedule(() -> {
+                if (closed) {
+                    return java.util.concurrent.CompletableFuture.failedFuture(stopping());
+                }
+                java.util.concurrent.CompletableFuture<HttpResponse<String>> sent =
+                        httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString());
+                open.add(sent);
+                sent.whenComplete((ignored, error) -> open.remove(sent));
+                if (closed && open.remove(sent)) {
+                    sent.cancel(true);
+                }
+                return sent;
+            });
+            open.add(call);
+            if (closed && open.remove(call)) {
+                call.cancel(true);
+            }
+            HttpResponse<String> response;
+            try {
+                response = call.join();
+            } catch (RuntimeException failed) {
+                // Cancelled by close: the gate future or the HTTP exchange itself.
+                if (closed) {
+                    throw stopping();
+                }
+                throw failed;
+            } finally {
+                open.remove(call);
+            }
             long httpNanos = Math.max(0L, System.nanoTime() - started);
             String body = response.body() == null ? "" : response.body();
             Map<String, List<String>> headers = response.headers().map();

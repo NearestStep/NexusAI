@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.moderation;
 
+import io.github.neareststep.nexusai.StopGate;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.ai.PlayerInput;
 import io.github.neareststep.nexusai.context.RegionOwnership;
@@ -48,9 +49,15 @@ public final class FoliaStaffNotifier implements StaffNotifier {
                 "category", safe(category, 40),
                 "reason", safe(reason, 160)
         ));
+        if (StopGate.drop(plugin)) {
+            return;
+        }
         try {
             plugin.getServer().getGlobalRegionScheduler().run(plugin, scheduled -> deliver(text));
         } catch (Throwable thrown) {
+            if (StopGate.dropFailed(plugin)) {
+                return;
+            }
             logger.warning("Failed to schedule a moderation notice: " + thrown.getMessage());
         }
     }

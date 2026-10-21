@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.StopGate;
 import io.github.neareststep.nexusai.NexusAI;
 import io.github.neareststep.nexusai.budget.QuotaGroups;
 import io.github.neareststep.nexusai.budget.QuotaPolicy;
@@ -59,6 +60,7 @@ public final class DialogueService {
 
     private final NexusAI plugin;
     private final ExecutorService httpExecutor;
+    private final DialogueTransport transport;
     private final ScheduledExecutorService scheduler;
     private final MemoryStore memory;
     private final DialogueMemoryPersistence memoryFiles;
@@ -93,7 +95,7 @@ public final class DialogueService {
             MemoryStore.redactOnDisk(memoryFile(), secrets, plugin.getLogger(), memory);
         }
         HttpClient http = HttpClient.newBuilder().connectTimeout(plugin.getPluginConfig().getConnectTimeout()).build();
-        DialogueTransport transport = new DialogueTransport(
+        this.transport = new DialogueTransport(
                 plugin::getPluginConfig,
                 http,
                 () -> {
@@ -231,6 +233,7 @@ public final class DialogueService {
     }
 
     public void shutdown() {
+        StopGate.dropped(transport.close());
         if (sweep != null) {
             sweep.cancel(false);
         }
@@ -353,6 +356,8 @@ public final class DialogueService {
         };
         if (owns(player)) {
             run.run();
+        } else if (StopGate.drop(plugin)) {
+            future.completeExceptionally(new IllegalStateException(STOPPING));
         } else {
             player.getScheduler().run(plugin, task -> run.run(), () ->
                     future.completeExceptionally(new IllegalStateException("player unavailable")));
@@ -829,6 +834,9 @@ public final class DialogueService {
     private String runAction(UUID playerId, CharacterAction action, String command, long requestId, String characterId) {
         AtomicBoolean expired = new AtomicBoolean();
         CompletableFuture<String> done = new CompletableFuture<>();
+        if (StopGate.drop(plugin)) {
+            return "failed: " + STOPPING;
+        }
         try {
             plugin.getServer().getGlobalRegionScheduler().run(plugin, task -> {
                 if (expired.get()) {
@@ -852,7 +860,11 @@ public final class DialogueService {
                     done.complete(runCommand(expired, false, online, action, command, requestId, characterId));
                 }, () -> done.complete("failed: player unavailable"));
             });
-            String result = done.get(5, TimeUnit.SECONDS);
+            String result = awaitAction(done);
+            if (STOPPING.equals(result)) {
+                expired.set(true);
+                return "failed: " + STOPPING;
+            }
             return result == null ? "failed: timed out" : result;
         } catch (TimeoutException e) {
             expired.set(true);
@@ -860,6 +872,30 @@ public final class DialogueService {
         } catch (Exception e) {
             expired.set(true);
             return "failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        }
+    }
+
+    static final String STOPPING = "NexusAI is stopping";
+
+    /**
+     * Waits up to 5 s for an action, but returns {@link #STOPPING} within 100 ms of disable:
+     * tasks of a disabled plugin never run, so the worker would otherwise hold stop for 5 s.
+     */
+    static String awaitAction(CompletableFuture<String> done) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (true) {
+            if (StopGate.stopping()) {
+                return done.isDone() ? done.getNow(null) : STOPPING;
+            }
+            long left = deadline - System.nanoTime();
+            if (left <= 0) {
+                throw new TimeoutException();
+            }
+            try {
+                return done.get(Math.min(left, TimeUnit.MILLISECONDS.toNanos(100)), TimeUnit.NANOSECONDS);
+            } catch (TimeoutException slice) {
+                // Check the stop flag and wait again.
+            }
         }
     }
 
@@ -893,6 +929,9 @@ public final class DialogueService {
     private void sweep() {
         List<SessionBook.Session> expired = engine.sweep(System.currentTimeMillis());
         if (expired.isEmpty()) {
+            return;
+        }
+        if (StopGate.drop(plugin)) {
             return;
         }
         try {

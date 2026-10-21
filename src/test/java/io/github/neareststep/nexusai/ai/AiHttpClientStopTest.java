@@ -28,39 +28,40 @@ class AiHttpClientStopTest {
     private final List<LogRecord> records = new ArrayList<>();
 
     @Test
-    void aReplyThatArrivesWithinTheWaitIsDelivered() throws Exception {
-        Controlled provider = new Controlled();
-        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
-        AiHttpClient client = new AiHttpClient(cache, provider, config(), logger());
-        CompletableFuture<String> reply = client.requestAsync("ping");
-        assertEquals(1, client.pendingCount());
-        CompletableFuture.delayedExecutor(50, TimeUnit.MILLISECONDS)
-                .execute(() -> provider.inner.complete(ModelAnswer.text("pong")));
-        assertEquals(0, client.close(5_000L));
-        assertEquals("pong", reply.get(5, TimeUnit.SECONDS));
-        assertTrue(cache.get(client.cacheKey("ping")).isPresent());
-    }
-
-    @Test
-    void aRequestStillOpenAfterTheWaitIsCancelledQuietlyAndNothingRunsLater() throws Exception {
+    void anOpenRequestIsCancelledAtOnceQuietlyAndNothingRunsLater() throws Exception {
         Controlled provider = new Controlled();
         AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
         AiHttpClient client = new AiHttpClient(cache, provider, config(), logger());
         CompletableFuture<String> reply = client.requestAsync("ping");
         CompletableFuture<ModelAnswer> upstream = provider.last;
+        assertEquals(1, client.pendingCount());
 
         long started = System.nanoTime();
-        assertEquals(1, client.close(100L));
+        assertEquals(1, client.close());
         long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-        assertTrue(tookMillis >= 90 && tookMillis < 2_000, "close took " + tookMillis + " ms");
+        // No wait: a reply arriving during disable could not be scheduled to its reader anyway.
+        assertTrue(tookMillis < 50, "close took " + tookMillis + " ms");
         assertEquals(0, client.pendingCount());
         assertTrue(upstream.isCancelled());
+        assertTrue(reply.isDone());
 
         assertThrows(CancellationException.class, () -> reply.get(1, TimeUnit.SECONDS));
         // The provider's own future finishing later reaches no handler of this client.
         provider.inner.complete(ModelAnswer.text("late"));
         assertTrue(cache.get(client.cacheKey("ping")).isEmpty());
         assertTrue(records.stream().noneMatch(r -> r.getLevel().intValue() >= Level.WARNING.intValue()), names());
+    }
+
+    @Test
+    void aReplyFinishedBeforeCloseIsKept() throws Exception {
+        Controlled provider = new Controlled();
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
+        AiHttpClient client = new AiHttpClient(cache, provider, config(), logger());
+        CompletableFuture<String> reply = client.requestAsync("ping");
+        provider.inner.complete(ModelAnswer.text("pong"));
+        assertEquals("pong", reply.get(5, TimeUnit.SECONDS));
+        assertEquals(0, client.close());
+        assertTrue(cache.get(client.cacheKey("ping")).isPresent());
     }
 
     @Test
@@ -72,7 +73,7 @@ class AiHttpClientStopTest {
         CompletableFuture<ModelAnswer> upstream = provider.last;
         // A provider that does not support cancel: the reply still arrives after close.
         provider.ignoreCancel = true;
-        client.close(0L);
+        client.close();
         assertTrue(reply.isCompletedExceptionally());
         provider.inner.complete(ModelAnswer.text("late"));
         assertTrue(cache.get(client.cacheKey("ping")).isEmpty());
@@ -84,7 +85,7 @@ class AiHttpClientStopTest {
     void aRequestAfterCloseFailsAtOnceWithoutCallingTheProvider() {
         Controlled provider = new Controlled();
         AiHttpClient client = new AiHttpClient(new AiCache(Duration.ofMinutes(5), 10), provider, config(), logger());
-        assertEquals(0, client.close(0L));
+        assertEquals(0, client.close());
         CompletableFuture<String> reply = client.requestAsync("ping");
         assertThrows(CancellationException.class, () -> reply.get(1, TimeUnit.SECONDS));
         assertEquals(0, provider.calls.get());
@@ -94,7 +95,7 @@ class AiHttpClientStopTest {
     void closeWithNothingOpenReturnsAtOnce() {
         AiHttpClient client = new AiHttpClient(new AiCache(Duration.ofMinutes(5), 10), new Controlled(), config(), logger());
         long started = System.nanoTime();
-        assertEquals(0, client.close(5_000L));
+        assertEquals(0, client.close());
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_000);
     }
 

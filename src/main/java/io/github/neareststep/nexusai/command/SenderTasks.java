@@ -1,5 +1,6 @@
 package io.github.neareststep.nexusai.command;
 
+import io.github.neareststep.nexusai.StopGate;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -24,6 +25,10 @@ public final class SenderTasks {
                 logger.log(Level.WARNING, "NexusAI command result failed", thrown);
             }
         };
+        if (StopGate.drop(plugin)) {
+            // Stopping: nothing can be scheduled. Disable logs the count once.
+            return;
+        }
         try {
             if (sender instanceof Entity entity) {
                 entity.getScheduler().run(plugin, scheduled -> safe.run(), () ->
@@ -32,6 +37,9 @@ public final class SenderTasks {
             }
             plugin.getServer().getGlobalRegionScheduler().run(plugin, scheduled -> safe.run());
         } catch (Throwable thrown) {
+            if (StopGate.dropFailed(plugin)) {
+                return;
+            }
             logger.log(Level.WARNING, "Failed to schedule a command result", thrown);
         }
     }
