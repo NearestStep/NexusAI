@@ -35,6 +35,12 @@ final class DialogueMemoryPersistence {
     static volatile long shutdownAppendBudgetMillis = 5_000L;
 
     /**
+     * Runs on the stop thread when stop starts to wait, inside the stop budget, for a load that is
+     * still running. Tests release that load here. A null hook is the production path.
+     */
+    static volatile Runnable beforeLoadWait;
+
+    /**
      * Stop append wait after the load-grace join. {@code fileBytes} adds one millisecond per 8 KiB,
      * capped at the configured base, so a multi-megabyte {@code dialogue-memory.yml} gets more
      * room for the key scan and splice without stretching a short test budget on a tiny file.
@@ -300,6 +306,10 @@ final class DialogueMemoryPersistence {
             memory.warnStop(logger, summaries, MemoryStore.StopSkip.BUDGET);
             abandonLoad(pending);
             return;
+        }
+        Runnable hook = beforeLoadWait;
+        if (hook != null) {
+            hook.run();
         }
         try {
             pending.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(left)));

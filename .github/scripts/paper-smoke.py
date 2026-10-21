@@ -17,8 +17,10 @@ that cannot run fails the script.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
@@ -266,9 +268,11 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
     cache.parent.mkdir(parents=True, exist_ok=True)
     if sha256 and _cached_ok(cache, sha256):
         shutil.copy2(cache, destination)
+        _report_verified(destination, sha256, "cache, published sha256")
         return
     if not sha256 and _cached_by_url_ok(cache, check_zip):
         shutil.copy2(cache, destination)
+        _report_verified(destination, _sidecar(cache).read_text(encoding="utf-8").strip(), "cache, saved sha256")
         return
     problem = ""
     for attempt in range(1, max(1, attempts) + 1):
@@ -291,6 +295,7 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
                 if not sha256:
                     _sidecar(cache).write_text(digest + "\n", encoding="utf-8")
                 shutil.copy2(cache, destination)
+                _report_verified(destination, digest, "download, published sha256" if sha256 else "download, no published sha256")
                 return
         except (OSError, http.client.HTTPException) as error:
             problem = f"{type(error).__name__}: {error}"
@@ -300,6 +305,11 @@ def download(url: str, destination: Path, sha256: str | None = None, name: str |
         if attempt < attempts:
             _sleep(retry_pause(attempt))
     raise RuntimeError(f"download failed after {attempts} attempts: {url}: {problem}")
+
+
+def _report_verified(destination: Path, digest: str, source: str) -> None:
+    """One log line with the sha256 of the file that was checked and used."""
+    print(f"verified sha256 {digest} {destination.name} ({source})")
 
 
 def _cached_ok(cache: Path, sha256: str) -> bool:
@@ -2088,8 +2098,15 @@ def _download_self_check() -> None:
             source.write_bytes(payload)
             digest = hashlib.sha256(payload).hexdigest()
             url = source.as_uri()
-            download(url, root / "out" / "a.jar", sha256=digest)
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                download(url, root / "out" / "a.jar", sha256=digest)
+                download(url, root / "out" / "a2.jar", sha256=digest)
             _need((root / "out" / "a.jar").read_bytes() == payload, "verified download content differs")
+            _need(f"verified sha256 {digest} a.jar (download, published sha256)" in printed.getvalue(),
+                  f"the verified sha256 of a download was not logged: {printed.getvalue()}")
+            _need(f"verified sha256 {digest} a2.jar (cache, published sha256)" in printed.getvalue(),
+                  f"the verified sha256 of a cached file was not logged: {printed.getvalue()}")
             entry = root / "cache" / "sha256" / digest
             _need(entry.is_file(), "verified download not cached by sha256")
             entry.write_bytes(b"truncated")
@@ -2188,7 +2205,11 @@ def _download_cache_self_check() -> None:
             entry = root / "cache" / hashlib.sha256(url.encode("utf-8")).hexdigest()
             side = entry.with_name(entry.name + ".sha256")
 
-            download(url, root / "out" / "1.jar")
+            url_printed = io.StringIO()
+            with contextlib.redirect_stdout(url_printed):
+                download(url, root / "out" / "1.jar")
+            _need(f"verified sha256 {hashlib.sha256(jar_bytes).hexdigest()} 1.jar (download, no published sha256)"
+                  in url_printed.getvalue(), f"the sha256 of a URL download was not logged: {url_printed.getvalue()}")
             _need(entry.is_file() and side.read_text(encoding="utf-8").strip() == hashlib.sha256(jar_bytes).hexdigest(),
                   "URL entry saved without its sha256")
             fetches = []
@@ -2198,8 +2219,12 @@ def _download_cache_self_check() -> None:
                 return real_fetch(fetch_url, target)
 
             _fetch_to = counting
-            download(url, root / "out" / "2.jar")
+            url_printed = io.StringIO()
+            with contextlib.redirect_stdout(url_printed):
+                download(url, root / "out" / "2.jar")
             _need(fetches == [], "a good URL entry was downloaded again")
+            _need(f"verified sha256 {hashlib.sha256(jar_bytes).hexdigest()} 2.jar (cache, saved sha256)"
+                  in url_printed.getvalue(), f"the sha256 of a URL cache entry was not logged: {url_printed.getvalue()}")
             for label, damage in (
                 ("truncated", lambda data: data[: len(data) // 2]),
                 ("flipped", lambda data: data[:100] + bytes([data[100] ^ 0xFF]) + data[101:]),

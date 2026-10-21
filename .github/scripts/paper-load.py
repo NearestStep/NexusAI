@@ -161,14 +161,8 @@ def run(args, scenarios: list[str]) -> int:
                         stop_bots(bots)
                         bots = None
 
-        run_one = scenario_runner(
-            smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path, mock_port,
-            bot_note, bots is not None,
-        )
-        return run_plan(
-            smoke, rcon_port, log_chunks, process, planned, run_one, results,
-            lambda done: write_summary(out, args, paper, done, log_chunks),
-        )
+        return run_scenarios(smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path,
+                             mock_port, paper, planned, bot_note, bots is not None, results)
     finally:
         stop_bots(bots)
         try:
@@ -182,6 +176,20 @@ def run(args, scenarios: list[str]) -> int:
             process.wait(timeout=30)
         mock.close()
         (out / "server.log").write_text("".join(log_chunks), encoding="utf-8")
+
+
+def run_scenarios(smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path, mock_port, paper,
+                  planned, bot_note, bots_up, results, runner=None, plan=None) -> int:
+    """The scenario part of run: the per-scenario step from scenario_runner, run by run_plan with
+    the summary writer. runner and plan replace those two in the self-check."""
+    run_one = (runner or scenario_runner)(
+        smoke, args, process, log_chunks, rcon_port, work, out, jfc, requests_path, mock_port,
+        bot_note, bots_up,
+    )
+    return (plan or run_plan)(
+        smoke, rcon_port, log_chunks, process, planned, run_one, results,
+        lambda done: write_summary(out, args, paper, done, log_chunks),
+    )
 
 
 def write_server_files(smoke, work: Path, server_port: int, rcon_port: int, bots: int) -> Path:
@@ -235,16 +243,29 @@ def end_budget(args, scenario: str) -> int:
     return seconds_for(args, scenario) + max(90, SPIGOT_TIMEOUT_SECONDS)
 
 
-def unfinished_attempt(scenario: str, attempt: int, process, budget: int, evidence: list[str]) -> dict:
-    """An attempt without SCENARIO_END: invalid when the host stalled, otherwise a failure."""
+STALL_SHARE = 0.9
+
+
+def unfinished_attempt(scenario: str, attempt: int, process, budget: int, evidence: list[str],
+                       stalled_ms: int = 0, slack_s: int | None = None) -> dict:
+    """An attempt without SCENARIO_END. It is invalid only when the host stall can explain the
+    missing end: there is stall evidence and the measured stall is at least STALL_SHARE of the
+    slack the wait had beyond the window. Otherwise it is a failure (a hang, or a hang during a
+    short host pause), and the rest of the run is not started on that server."""
+    slack_s = SPIGOT_TIMEOUT_SECONDS if slack_s is None else slack_s
     code = process.poll()
     why = f"server exited with {code}" if code is not None else f"no SCENARIO_END within {budget} s"
-    if not evidence:
-        raise RuntimeError(f"{why} for {scenario}")
-    # The host stalled and the scenario never finished: nothing to judge, so it is invalid.
-    return {"scenario": scenario, "attempt": attempt, "status": "invalid",
-            "reasons": [f"test host stall: {item}" for item in evidence] + [f"{why}; not judged"],
-            "report": None}
+    if evidence and stalled_ms >= STALL_SHARE * slack_s * 1000:
+        # The host stalled and the scenario never finished: nothing to judge, so it is invalid.
+        return {"scenario": scenario, "attempt": attempt, "status": "invalid", "unfinished": True,
+                "reasons": [f"test host stall: {item}" for item in evidence] + [f"{why}; not judged"],
+                "report": None}
+    reasons = [why]
+    if evidence:
+        reasons.append(f"a test host stall of {stalled_ms} ms ({', '.join(evidence)}) does not explain it; "
+                       f"the wait allowed {slack_s} s beyond the window")
+    return {"scenario": scenario, "attempt": attempt, "status": "fail", "unfinished": True,
+            "stop_run": f"{scenario} did not finish", "reasons": reasons, "report": None}
 
 
 def process_state(pid: int) -> str:
@@ -257,14 +278,23 @@ def process_state(pid: int) -> str:
     return after[0] if after else ""
 
 
+TICK_GAP = re.compile(r"tick gap ([0-9]+) ms")
+
+
 def wait_scenario_end(process, chunks: list[str], start: int, scenario: str, timeout_s: float, stall_ms: int,
-                      clock=time.monotonic, sleep=time.sleep, state=None) -> tuple[bool, list[str]]:
+                      clock=time.monotonic, sleep=time.sleep, state=None, stalled=None) -> tuple[bool, list[str]]:
     """Waits for SCENARIO_END. Returns (ended, stall evidence). Evidence of a test host stall: the
     server process seen stopped, a pause of the harness itself longer than stall_ms, or the
-    driver's SCENARIO_INVALID line for this scenario. Without evidence a missing end is a failure."""
+    driver's SCENARIO_INVALID line for this scenario. Without evidence a missing end is a failure.
+    stalled["ms"], when given, receives how long the stall lasted: the harness pauses plus the
+    time the process was seen stopped, or the driver's tick gap when that is longer."""
     token = f"SCENARIO_END {scenario}"
     invalid_token = f"SCENARIO_INVALID {scenario} "
     state = state or (lambda: process_state(process.pid))
+    stalled = {} if stalled is None else stalled
+    stalled["ms"] = 0
+    measured = 0.0
+    driver_gap = 0
     evidence: list[str] = []
     deadline = clock() + timeout_s
     last = clock()
@@ -273,14 +303,24 @@ def wait_scenario_end(process, chunks: list[str], start: int, scenario: str, tim
         if any(token in line for line in window):
             return True, evidence
         if stall_ms > 0:
-            if any(invalid_token in line for line in window) and "driver logged SCENARIO_INVALID" not in evidence:
-                evidence.append("driver logged SCENARIO_INVALID")
+            for line in window:
+                if invalid_token in line:
+                    if "driver logged SCENARIO_INVALID" not in evidence:
+                        evidence.append("driver logged SCENARIO_INVALID")
+                    gap = TICK_GAP.search(line)
+                    driver_gap = max(driver_gap, int(gap.group(1)) if gap else 0)
             now = clock()
-            if (now - last) * 1000 > stall_ms:
-                evidence.append(f"harness paused {int((now - last) * 1000)} ms")
+            step = (now - last) * 1000
+            if step > stall_ms:
+                evidence.append(f"harness paused {int(step)} ms")
+                measured += step
             last = now
-            if state() == "T" and "server process stopped" not in evidence:
-                evidence.append("server process stopped")
+            if state() == "T":
+                if "server process stopped" not in evidence:
+                    evidence.append("server process stopped")
+                elif step <= stall_ms:
+                    measured += step
+            stalled["ms"] = int(max(measured, driver_gap))
         if process.poll() is not None or clock() >= deadline:
             return False, evidence
         sleep(0.2)
@@ -288,9 +328,10 @@ def wait_scenario_end(process, chunks: list[str], start: int, scenario: str, tim
 
 def execute_scenario(
     smoke, args, scenario, process, log_chunks, rcon_port, work, out, jfc,
-    requests_path, baseline_mean, bot_note, bots_up, recover=None, measure=None,
+    requests_path, baseline_mean, bot_note, bots_up, recover=None, measure=None, wait=None,
 ) -> dict:
-    """Runs one scenario with one retry. measure replaces the real attempt in the self-check."""
+    """Runs one scenario with one retry. measure replaces the real attempt, and wait the wait for
+    SCENARIO_END, in the self-check."""
     if scenario in {"S4", "S5", "S-world"} and not bots_up:
         return {
             "scenario": scenario,
@@ -301,6 +342,9 @@ def execute_scenario(
 
     def attempt_once(attempt: int) -> dict:
         before = len(log_chunks)
+        report_path = work / "plugins" / "NexusAI-LoadDriver" / "report.json"
+        # A report.json left by an earlier scenario must never be read for this one.
+        report_path.unlink(missing_ok=True)
         started = time.time()
         started_mono = time.monotonic()
         smoke.rcon(
@@ -320,12 +364,14 @@ def execute_scenario(
             except RuntimeError as error:
                 jfr_note = str(error)
         budget = end_budget(args, scenario)
-        ended, evidence = wait_scenario_end(process, log_chunks, before, scenario, budget, args.stall_ms)
+        stalled: dict = {}
+        ended, evidence = (wait or wait_scenario_end)(process, log_chunks, before, scenario, budget, args.stall_ms,
+                                                      stalled=stalled)
         if not ended:
-            return unfinished_attempt(scenario, attempt, process, budget, evidence)
+            return unfinished_attempt(scenario, attempt, process, budget, evidence, stalled.get("ms", 0),
+                                      budget - seconds_for(args, scenario))
         ended = time.time()
         ended_mono = time.monotonic()
-        report_path = work / "plugins" / "NexusAI-LoadDriver" / "report.json"
         if not report_path.is_file():
             raise RuntimeError(f"{scenario} did not write report.json")
         saved = out / f"report-{scenario}-try{attempt}.json"
@@ -397,6 +443,9 @@ def retry_once(scenario: str, attempt_once, recover=None) -> dict:
     invalid instead of judging a second attempt that still carries the stall.
     """
     last = attempt_once(1)
+    if last.get("stop_run"):
+        # The server hung or exited without a stall that explains it: a retry cannot run on it.
+        return last
     if last["status"] in RETRY_STATUSES:
         say(f"{scenario} attempt 1 {last['status']} ({'; '.join(last['reasons'])}); retrying once")
         if last["status"] == "invalid" and recover is not None:
@@ -404,7 +453,12 @@ def retry_once(scenario: str, attempt_once, recover=None) -> dict:
             if problem:
                 say(f"{scenario} not retried: {problem}")
                 return {**last, "reasons": last["reasons"] + [f"not retried: {problem}"]}
+        first = last
         last = attempt_once(2)
+        if first.get("unfinished") and last.get("unfinished") and last["status"] == "invalid":
+            # Two attempts in a row without SCENARIO_END are a hang, whatever the host did.
+            last = {**last, "status": "fail", "stop_run": f"{scenario} did not finish twice",
+                    "reasons": last["reasons"] + ["no SCENARIO_END in either attempt"]}
     return last
 
 
@@ -497,7 +551,14 @@ def run_plan(smoke, rcon_port: int, log_chunks: list[str], process, planned, run
             outcome = {"scenario": scenario, "status": "not-run",
                        "reasons": [f"not run: {unreachable['reason']}"], "report": None}
         else:
-            outcome = run_one(scenario, recover)
+            try:
+                outcome = run_one(scenario, recover)
+            except Exception as error:
+                # Still write the summary: the scenario failed, and the rest is not run.
+                outcome = {"scenario": scenario, "status": "fail", "reasons": [f"harness error: {error}"],
+                           "report": None, "stop_run": f"harness error in {scenario}"}
+            if outcome.get("stop_run") and not unreachable:
+                unreachable["reason"] = outcome["stop_run"]
         results.append(outcome)
         say(format_result(outcome))
     summarize(results)
@@ -2113,7 +2174,7 @@ def stall_wiring_self_check(FakeProcess, FakeSmoke) -> None:
     def tick(seconds):
         now[0] += seconds
 
-    def wait(chunks, states, code=None, timeout=10.0, jump=0.0):
+    def wait(chunks, states, code=None, timeout=10.0, jump=0.0, stall_ms=5000, stalled=None):
         process = FakeProcess(code)
         now[0] = 0.0
         sequence = iter(states)
@@ -2124,8 +2185,8 @@ def stall_wiring_self_check(FakeProcess, FakeSmoke) -> None:
                 now[0] += clock_jumps.pop()
             return now[0]
 
-        return wait_scenario_end(process, chunks, 0, "S1", timeout, 5000, clock=clock, sleep=tick,
-                                 state=lambda: next(sequence, "S"))
+        return wait_scenario_end(process, chunks, 0, "S1", timeout, stall_ms, clock=clock, sleep=tick,
+                                 state=lambda: next(sequence, "S"), stalled=stalled)
 
     if wait(["[INFO]: SCENARIO_END S1\n"], []) != (True, []):
         raise SystemExit("SCENARIO_END was not seen")
@@ -2140,16 +2201,132 @@ def stall_wiring_self_check(FakeProcess, FakeSmoke) -> None:
     ended, evidence = wait(["[WARN]: SCENARIO_INVALID S1 test host stall: tick gap 150000 ms\n"], [], code=1)
     if ended or evidence != ["driver logged SCENARIO_INVALID"]:
         raise SystemExit(f"SCENARIO_INVALID before the server exited was not evidence: {evidence}")
-    stalled = unfinished_attempt("S1", 1, FakeProcess(1), 640, ["server process stopped"])
-    if stalled["status"] != "invalid" or not any("server exited with 1" in item for item in stalled["reasons"]):
-        raise SystemExit(f"an unfinished attempt in a stall was not invalid: {stalled}")
+    # --stall-ms 0: no stall evidence at all, so a missing end is a failure.
+    stalled = {}
+    ended, evidence = wait(["[WARN]: SCENARIO_INVALID S1 test host stall: tick gap 150000 ms\n"],
+                           ["T"] * 60, jump=200.0, stall_ms=0, stalled=stalled)
+    if ended or evidence != [] or stalled.get("ms") != 0:
+        raise SystemExit(f"--stall-ms 0 still gave stall evidence: {evidence}, {stalled}")
+    # How long the stall lasted: time seen stopped, a harness pause, or the driver's tick gap.
+    stalled = {}
+    wait([], ["T"] * 25, timeout=10.0, stalled=stalled)
+    if not 4_000 <= stalled["ms"] <= 5_200:
+        raise SystemExit(f"the time the server was seen stopped was not measured: {stalled}")
+    stalled = {}
+    wait([], [], jump=200.0, stalled=stalled)
+    if stalled["ms"] < 200_000:
+        raise SystemExit(f"a harness pause was not measured: {stalled}")
+    stalled = {}
+    wait(["[WARN]: SCENARIO_INVALID S1 test host stall: tick gap 650000 ms\n"], [], stalled=stalled)
+    if stalled["ms"] != 650_000:
+        raise SystemExit(f"the driver's tick gap was not measured: {stalled}")
+
+    # Unfinished: invalid only when the stall explains the missing end.
+    long_stall = int(STALL_SHARE * 600 * 1000)
+    stalled_attempt = unfinished_attempt("S1", 1, FakeProcess(1), 640, ["server process stopped"], long_stall, 600)
+    if stalled_attempt["status"] != "invalid" or stalled_attempt.get("stop_run") \
+            or not any("server exited with 1" in item for item in stalled_attempt["reasons"]):
+        raise SystemExit(f"an unfinished attempt in a long stall was not invalid: {stalled_attempt}")
+    short = unfinished_attempt("S1", 1, FakeProcess(), 640, ["harness paused 6000 ms"], 6000, 600)
+    if short["status"] != "fail" or not short.get("stop_run") \
+            or not any("does not explain it" in item for item in short["reasons"]):
+        raise SystemExit(f"a hang during a short host pause was not a failure: {short}")
+    if unfinished_attempt("S1", 1, FakeProcess(), 640, ["x"], long_stall - 1, 600)["status"] != "fail":
+        raise SystemExit("a stall just under the share was taken as the reason")
+    hang = unfinished_attempt("S1", 1, FakeProcess(), 640, [])
+    if hang["status"] != "fail" or "no SCENARIO_END within 640 s" not in hang["reasons"][0] or not hang.get("stop_run"):
+        raise SystemExit(f"an unfinished attempt without a stall was not a failure: {hang}")
+
+    # execute_scenario with the real attempt and a fake wait: an old report.json is never read,
+    # a long stall makes attempt 1 invalid, and a second unfinished attempt is a failure.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        stale = work / "plugins" / "NexusAI-LoadDriver" / "report.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text('{"mspt": {"mean": 0.1}}', encoding="utf-8")
+        sent = []
+
+        class AttemptSmoke:
+            def rcon(self, host, port, password, command):
+                sent.append(command)
+                return ""
+
+        def never_ends(process, chunks, start, scenario, timeout_s, stall_ms, stalled=None):
+            stalled["ms"] = 10 * 60 * 1000
+            return False, ["server process stopped"]
+
+        attempt_args = argparse.Namespace(skip_jfr=True, stall_ms=5000, baseline_seconds=15, load_seconds=40,
+                                          pool_seconds=3, bots=0)
+        recovered = []
+        outcome = execute_scenario(AttemptSmoke(), attempt_args, "S1", FakeProcess(), [], 0, work, work, None,
+                                   work / "requests.jsonl", None, "", False,
+                                   recover=lambda: recovered.append(1) or "", wait=never_ends)
+        if stale.exists():
+            raise SystemExit("an old report.json was left for the scenario to read")
+        if outcome["status"] != "fail" or outcome.get("report") is not None or recovered != [1] \
+                or len([c for c in sent if c.startswith("naiload S1 ")]) != 2:
+            raise SystemExit(f"two unfinished attempts were not a failure: {outcome}, {sent}, {recovered}")
+
+        def ends_after_stale(process, chunks, start, scenario, timeout_s, stall_ms, stalled=None):
+            return True, []
+
+        stale.write_text('{"mspt": {"mean": 0.1}}', encoding="utf-8")
+        try:
+            execute_scenario(AttemptSmoke(), attempt_args, "S1", FakeProcess(), [], 0, work, work, None,
+                             work / "requests.jsonl", None, "", False, wait=ends_after_stale)
+        except RuntimeError as error:
+            if "did not write report.json" not in str(error):
+                raise SystemExit(f"wrong error for a missing report: {error}")
+        else:
+            raise SystemExit("a report.json from before the scenario was read")
+
+    # run_scenarios: scenario_runner builds the step, run_plan runs it with the summary writer.
+    calls = {}
+
+    def fake_runner(*given):
+        calls["runner"] = given
+        return "the-step"
+
+    def fake_plan(smoke, rcon_port, log_chunks, process, planned, run_one, results, summarize):
+        calls["plan"] = (smoke, rcon_port, planned, run_one, results)
+        calls["summarize"] = summarize
+        return 7
+
+    marker_smoke, marker_process, marker_results = object(), FakeProcess(), []
+    code = run_scenarios(marker_smoke, "args", marker_process, [], 9, "work", "out", "jfc", "req", 5, "paper",
+                         ["baseline", "S1"], "note", True, marker_results, runner=fake_runner, plan=fake_plan)
+    if code != 7 or calls["plan"] != (marker_smoke, 9, ["baseline", "S1"], "the-step", marker_results):
+        raise SystemExit(f"run_scenarios did not hand scenario_runner's step to run_plan: {calls}")
+    if calls["runner"] != (marker_smoke, "args", marker_process, [], 9, "work", "out", "jfc", "req", 5, "note", True):
+        raise SystemExit(f"scenario_runner got the wrong arguments: {calls['runner']}")
+    written = []
+    real_summary = globals()["write_summary"]
+    globals()["write_summary"] = lambda out, args, paper, done, log_chunks: written.append((out, args, paper, done))
     try:
-        unfinished_attempt("S1", 1, FakeProcess(), 640, [])
-    except RuntimeError as error:
-        if "no SCENARIO_END within 640 s" not in str(error):
-            raise SystemExit(f"wrong failure for an unfinished attempt: {error}")
-    else:
-        raise SystemExit("an unfinished attempt without a stall was not a failure")
+        calls["summarize"](["done"])
+    finally:
+        globals()["write_summary"] = real_summary
+    if written != [("out", "args", "paper", ["done"])]:
+        raise SystemExit(f"run_scenarios did not give run_plan the summary writer: {written}")
+
+    # run_plan: an exception or an unfinished failure still writes the summary; the rest is not run.
+    def broken(scenario, recover):
+        raise RuntimeError("boom")
+
+    summaries = []
+    results = []
+    code = run_plan(None, 0, [], FakeProcess(), ["baseline", "S1"], broken, results, summaries.append)
+    if code != 1 or [item["status"] for item in results] != ["fail", "not-run"] or len(summaries) != 1:
+        raise SystemExit(f"a harness error did not end in a written summary: {code}, {results}")
+
+    def hangs(scenario, recover):
+        return unfinished_attempt(scenario, 1, FakeProcess(), 640, [])
+
+    results = []
+    summaries = []
+    code = run_plan(None, 0, [], FakeProcess(), ["S1", "S2"], hangs, results, summaries.append)
+    if code != 1 or [item["status"] for item in results] != ["fail", "not-run"] or len(summaries) != 1:
+        raise SystemExit(f"a hang did not end in a written summary: {code}, {results}")
 
     # scenario_runner: the recovery step, the baseline mean, and a reload when the limits change.
     with tempfile.TemporaryDirectory() as tmp:
