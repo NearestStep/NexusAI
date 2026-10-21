@@ -1416,8 +1416,8 @@ public final class ModelQueue {
 
         private Slot(int index, String provider, String model, int dailyLimit, int dailyTokenLimit) {
             this.index = index;
-            this.provider = Utf16.replaceLoneSurrogates(provider);
-            this.model = Utf16.replaceLoneSurrogates(model);
+            this.provider = provider;
+            this.model = model;
             this.dailyLimit = dailyLimit;
             this.dailyTokenLimit = Math.max(0, dailyTokenLimit);
         }

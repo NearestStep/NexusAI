@@ -132,6 +132,13 @@ class UsageLoneSurrogateTest {
         assertEquals(4, queue.providerRequests("groq"));
     }
 
+    @Test
+    void tokenLedgerKeyForAFallbackModelMatchesUsageFile() {
+        assertEquals("groq|qa-fb\uFFFD", ModelQueue.fallbackStorageId("groq", "qa-fb" + HALF));
+        assertEquals("gr\uFFFD|m", ModelQueue.fallbackStorageId("gr" + HALF, "m"));
+        assertEquals("groq|qa-fb", ModelQueue.fallbackStorageId("groq", "qa-fb"));
+    }
+
     private static ModelQueue queue(Path file, List<QueueEntryConfig> rows) {
         return new ModelQueue(rows, 0, 60_000L, 300_000L, file.toFile(), () -> 1_000L, () -> DAY,
                 ZoneId.of("UTC"), Logger.getLogger("usage-lone-" + System.nanoTime()));
