@@ -74,6 +74,14 @@ public final class EventSupport {
                 Plugin.class.getClassLoader(),
                 new Class<?>[] {Plugin.class, Listener.class},
                 (proxy, method, args) -> {
+                    // Identity equality, so HandlerList.unregisterAll(plugin) in close() finds
+                    // this plugin and the listener does not leak into the next test.
+                    if ("equals".equals(method.getName()) && args != null && args.length == 1) {
+                        return proxy == args[0];
+                    }
+                    if ("hashCode".equals(method.getName())) {
+                        return System.identityHashCode(proxy);
+                    }
                     if ("getName".equals(method.getName())) {
                         return name;
                     }

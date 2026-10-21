@@ -90,6 +90,8 @@ public final class AiHttpClient {
             try {
                 ForkJoinPool.commonPool().execute(task);
             } catch (RejectedExecutionException alsoFull) {
+                // Both executors refuse (shutdown). The request must still finish, so it runs
+                // here; EventDispatcher skips the async Post or Fail on this thread with a FINE log.
                 task.run();
             }
         }
