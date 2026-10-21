@@ -99,6 +99,18 @@ class StopGateTest {
         assertTrue(tookMillis < NexusAI.HTTP_STOP_MILLIS + 300, "took " + tookMillis + " ms");
     }
 
+    @Test
+    void aDelayedRetryDoesNotHoldTheSchedulerOnStop() {
+        java.util.concurrent.ScheduledExecutorService scheduler = NexusAI.createScheduler();
+        AtomicBoolean ran = new AtomicBoolean();
+        scheduler.schedule(() -> ran.set(true), 2, TimeUnit.SECONDS);
+        long started = System.nanoTime();
+        NexusAI.shutdownExecutor(scheduler, 5_000L);
+        long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertTrue(tookMillis < 500, "took " + tookMillis + " ms");
+        assertFalse(ran.get());
+    }
+
     private static Logger capture(List<LogRecord> records) {
         Logger logger = Logger.getLogger("stop-gate-" + System.nanoTime());
         logger.setUseParentHandlers(false);

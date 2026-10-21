@@ -78,7 +78,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -741,13 +740,20 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
-    private static ScheduledExecutorService createScheduler() {
+    static ScheduledExecutorService createScheduler() {
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, "nexusai-scheduler");
             thread.setDaemon(true);
             return thread;
         };
-        return Executors.newSingleThreadScheduledExecutor(factory);
+        java.util.concurrent.ScheduledThreadPoolExecutor executor =
+                new java.util.concurrent.ScheduledThreadPoolExecutor(1, factory);
+        // On disable, retries and refills that were only scheduled do not run: stop would
+        // otherwise wait for them. Saves are flushed by the services before this shuts down.
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        executor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
     }
 
     /** Total wait for the HTTP workers on disable. */

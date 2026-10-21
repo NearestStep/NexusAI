@@ -306,6 +306,9 @@ public final class DialogueEngine {
      * line was not sent.
      */
     private static boolean shouldLogFailure(AiRequestException typed, String detail) {
+        if (DialogueTransport.isStopping(typed)) {
+            return false;
+        }
         if (typed != null && typed.kind() == AiErrorKind.LOCAL_QUOTA) {
             return false;
         }

@@ -67,6 +67,7 @@ class DialogueStopTest {
             assertTrue(tookMillis < 1_000, "worker returned after " + tookMillis + " ms");
             AiRequestException stopping = assertInstanceOf(AiRequestException.class, thrown);
             assertEquals(DialogueTransport.STOPPING, stopping.getMessage());
+            assertTrue(DialogueTransport.isStopping(stopping));
             assertEquals(0, transport.openCount());
             AiRequestException later = assertThrows(AiRequestException.class, () -> transport.send(request(config)));
             assertEquals(DialogueTransport.STOPPING, later.getMessage());
@@ -113,6 +114,15 @@ class DialogueStopTest {
         } catch (Exception e) {
             throw new AssertionError(e);
         }
+    }
+
+    @Test
+    void onlyTheStopFailureCountsAsStopping() {
+        assertTrue(!DialogueTransport.isStopping(new AiRequestException(
+                io.github.neareststep.nexusai.ai.AiErrorKind.TIMEOUT, 0, DialogueTransport.STOPPING, null)));
+        assertTrue(!DialogueTransport.isStopping(new AiRequestException(
+                io.github.neareststep.nexusai.ai.AiErrorKind.OTHER, 500, "HTTP 500", null)));
+        assertTrue(!DialogueTransport.isStopping(null));
     }
 
     private static DialogueTransport.Request request(PluginConfig config) {

@@ -83,6 +83,12 @@ public final class DialogueTransport {
         return open.size();
     }
 
+    /** True for the failure {@link #close} gives a send: plugin disable, not a provider error. */
+    public static boolean isStopping(Throwable error) {
+        return error instanceof AiRequestException typed && typed.kind() == AiErrorKind.OTHER
+                && STOPPING.equals(typed.getMessage());
+    }
+
     private static AiRequestException stopping() {
         return new AiRequestException(AiErrorKind.OTHER, 0, STOPPING, null);
     }
