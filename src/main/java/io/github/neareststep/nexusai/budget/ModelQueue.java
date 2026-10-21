@@ -203,8 +203,8 @@ public final class ModelQueue {
 
     /** Id of a dedicated fallback slot, {@code provider|model}. */
     public static String fallbackStorageId(String provider, String model) {
-        String left = provider == null ? "" : provider;
-        String right = model == null ? "" : model;
+        String left = provider == null ? "" : Utf16.replaceLoneSurrogates(provider);
+        String right = model == null ? "" : Utf16.replaceLoneSurrogates(model);
         return left + "|" + right;
     }
 
@@ -463,7 +463,7 @@ public final class ModelQueue {
 
     public synchronized int providerRequests(String provider) {
         roll(clock.getAsLong());
-        AtomicInteger count = providerCounts.get(provider);
+        AtomicInteger count = providerCounts.get(Utf16.replaceLoneSurrogates(provider));
         return count == null ? 0 : count.get();
     }
 
@@ -933,12 +933,13 @@ public final class ModelQueue {
             }
             for (Slot slot : slots) {
                 if (slot.storageId().equals(String.valueOf(id))) {
-                    slot.requests.set(requests);
-                    slot.rejected.set(rejected);
-                    if (slot.dailyLimit > 0 && requests >= slot.dailyLimit) {
+                    // Rows with the same id (an older version could write two) are summed.
+                    int total = slot.requests.addAndGet(requests);
+                    slot.rejected.addAndGet(rejected);
+                    if (slot.dailyLimit > 0 && total >= slot.dailyLimit) {
                         holdUntilMidnight(slot, clock.getAsLong());
                     }
-                    if (slot.dailyLimit > 0 && requests * 100L >= slot.dailyLimit * 80L) {
+                    if (slot.dailyLimit > 0 && total * 100L >= slot.dailyLimit * 80L) {
                         slot.warned = true;
                     }
                 }
@@ -963,8 +964,9 @@ public final class ModelQueue {
                 rejected = Math.max(0, number.intValue());
             }
             Slot slot = fallbackSlot(String.valueOf(provider), String.valueOf(model));
-            slot.requests.set(requests);
-            slot.rejected.set(rejected);
+            // Rows with the same provider and model (an older version could write two) are summed.
+            slot.requests.addAndGet(requests);
+            slot.rejected.addAndGet(rejected);
         }
     }
 
@@ -1338,7 +1340,9 @@ public final class ModelQueue {
         return null;
     }
 
-    private Slot fallbackSlot(String provider, String model) {
+    private Slot fallbackSlot(String rawProvider, String rawModel) {
+        String provider = Utf16.replaceLoneSurrogates(rawProvider);
+        String model = Utf16.replaceLoneSurrogates(rawModel);
         String id = provider + "|" + model;
         Slot existing = fallbackSlots.get(id);
         if (existing != null) {
@@ -1412,8 +1416,8 @@ public final class ModelQueue {
 
         private Slot(int index, String provider, String model, int dailyLimit, int dailyTokenLimit) {
             this.index = index;
-            this.provider = provider;
-            this.model = model;
+            this.provider = Utf16.replaceLoneSurrogates(provider);
+            this.model = Utf16.replaceLoneSurrogates(model);
             this.dailyLimit = dailyLimit;
             this.dailyTokenLimit = Math.max(0, dailyTokenLimit);
         }

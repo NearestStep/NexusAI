@@ -54,14 +54,15 @@ After `/nai reload`, `<K>` is counted again from zero: timeouts that were counte
 
 After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is paused for `context.suspend-seconds` (60) and the log shows `Context provider '<id>' suspended until ...`. An exception is logged as a warning, at most once per `limits.error-log-cooldown-seconds` per provider. `/nai status` lists each provider with its state and a count labelled `timeouts`. The count goes up on every failed call, a timeout or an exception, so a provider that only throws also shows a growing count. A provider that never started because both threads were busy is skipped for that request and does not count against it.
 
-## Known limits with lone surrogates in names
+## Lone surrogates in provider and model names
 
-A lone UTF-16 surrogate (half of an emoji) is replaced with U+FFFD in model replies, answers, and the files NexusAI writes. A provider or model name with one can come from a YAML escape such as `\ud83d` that an admin wrote into `config.yml` or `prompts.yml`, or from a plugin that passes such a model name through the API (`GenerationRequest.Builder.model` or `PromptDefinition.Builder.model`), which does not check for lone surrogates; such a name is sent to the provider as written. `usage.yml` and `token-usage.yml` count API requests under the model-queue entry, so a model name passed through the API is not stored there and the limits below do not apply to it. Two limits remain for a name from `config.yml` or `prompts.yml`:
+A lone UTF-16 surrogate (half of an emoji) is replaced with U+FFFD in model replies, answers, and the files NexusAI writes. A provider or model name with one can come from a YAML escape such as `\ud83d` in `config.yml` or `prompts.yml`, or from a plugin that passes such a model name through the API (`GenerationRequest.Builder.model` or `PromptDefinition.Builder.model`).
 
-- The name is sent to the provider as written, and `usage.yml` stores it with U+FFFD. After a restart, a fallback row with that name can appear twice in `usage.yml`, and the requests counted for it can be too low.
-- `token-usage.yml` is written as UTF-8 bytes, so the same name is stored there with `?` instead of U+FFFD, and the key differs from the one in `usage.yml`.
+- From `config.yml` (`api.provider`, `api.model`, `providers` keys, `model-queue`, `fallback-model`) and `prompts.yml` (a prompt's `model` and `fallback-model`), the name is loaded with U+FFFD, and one warning per setting is logged on startup and on `/nai reload`, for example `fallback-model.model has a broken character (a lone UTF-16 surrogate). It was replaced with U+FFFD.`
+- A model name from the API is replaced the same way, without a warning.
+- The provider gets the name with U+FFFD, and `usage.yml` and `token-usage.yml` store the same name, so each model keeps one row and one count across restarts. Rows with the same id that an older version wrote twice in `usage.yml` are added together on load.
 
-Use plain names for providers and models to avoid both.
+Use plain names for providers and models: the provider does not know a name with U+FFFD.
 
 ## Validate before you act
 

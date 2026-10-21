@@ -687,6 +687,9 @@ public final class NexusAI extends JavaPlugin {
         for (String warning : pluginConfig.structuredOutputWarnings()) {
             getLogger().warning(warning);
         }
+        for (String warning : pluginConfig.identifierWarnings()) {
+            getLogger().warning(warning);
+        }
     }
 
     private void migrateOtherConfigs() {

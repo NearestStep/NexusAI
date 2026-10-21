@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 /**
  * One configured {@code model-queue} row.
  * A limit of {@code 0} means that cap is not set.
@@ -12,8 +14,8 @@ public record QueueEntryConfig(String provider, String model, int dailyRequestLi
     }
 
     public QueueEntryConfig {
-        provider = provider == null ? "" : provider;
-        model = model == null ? "" : model;
+        provider = provider == null ? "" : Utf16.replaceLoneSurrogates(provider);
+        model = model == null ? "" : Utf16.replaceLoneSurrogates(model);
         dailyRequestLimit = Math.max(0, dailyRequestLimit);
         dailyTokenLimit = Math.max(0, dailyTokenLimit);
     }

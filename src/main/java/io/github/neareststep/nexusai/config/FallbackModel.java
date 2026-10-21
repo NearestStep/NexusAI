@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.util.Locale;
 import java.util.Objects;
 
@@ -10,8 +12,8 @@ import java.util.Objects;
 public record FallbackModel(String provider, String model) {
 
     public FallbackModel {
-        provider = provider == null ? "" : provider.trim().toLowerCase(Locale.ROOT);
-        model = model == null ? "" : model.trim();
+        provider = provider == null ? "" : Utf16.replaceLoneSurrogates(provider.trim().toLowerCase(Locale.ROOT));
+        model = model == null ? "" : Utf16.replaceLoneSurrogates(model.trim());
     }
 
     public static FallbackModel none() {

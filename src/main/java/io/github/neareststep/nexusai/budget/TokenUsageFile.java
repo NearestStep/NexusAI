@@ -1,6 +1,8 @@
 package io.github.neareststep.nexusai.budget;
 
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.config.YamlStrings;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -95,10 +97,29 @@ final class TokenUsageFile {
             return;
         }
         yaml.append(name).append(":\n");
-        for (Map.Entry<String, TokenLedger.Counts> entry : new TreeMap<>(values).entrySet()) {
+        for (Map.Entry<String, TokenLedger.Counts> entry : cleanKeys(values).entrySet()) {
             yaml.append("  ").append(quote(entry.getKey())).append(":\n");
             writeCounts(yaml, null, entry.getValue(), 4);
         }
+    }
+
+    /**
+     * The map sorted by key, with lone surrogates in keys replaced by U+FFFD. Two keys that become
+     * the same are summed, so the file never gets a duplicate key.
+     */
+    static TreeMap<String, TokenLedger.Counts> cleanKeys(Map<String, TokenLedger.Counts> values) {
+        TreeMap<String, TokenLedger.Counts> sorted = new TreeMap<>();
+        for (Map.Entry<String, TokenLedger.Counts> entry : values.entrySet()) {
+            TokenLedger.Counts counts = entry.getValue() == null ? TokenLedger.Counts.zero() : entry.getValue();
+            sorted.merge(Utf16.replaceLoneSurrogates(entry.getKey() == null ? "" : entry.getKey()), counts,
+                    (left, right) -> new TokenLedger.Counts(
+                            left.requests() + right.requests(),
+                            left.prompt() + right.prompt(),
+                            left.completion() + right.completion(),
+                            left.total() + right.total(),
+                            left.estimated() + right.estimated()));
+        }
+        return sorted;
     }
 
     private static void writeCounts(StringBuilder yaml, String name, TokenLedger.Counts counts, int indent) {
@@ -176,8 +197,7 @@ final class TokenUsageFile {
     }
 
     static String quote(String key) {
-        String safe = key == null ? "" : key;
-        return '"' + safe.replace("\\", "\\\\").replace("\"", "\\\"") + '"';
+        return YamlStrings.quote(key);
     }
 
     static final class CorruptFile extends RuntimeException {

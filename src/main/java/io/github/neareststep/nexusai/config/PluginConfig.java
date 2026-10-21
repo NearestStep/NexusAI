@@ -124,6 +124,7 @@ public final class PluginConfig {
     private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
     private final List<String> structuredOutputWarnings = new ArrayList<>();
+    private final List<String> identifierWarnings = new ArrayList<>();
     private boolean pluginApiEnabled = true;
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
@@ -153,14 +154,17 @@ public final class PluginConfig {
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
         structuredOutputWarnings.clear();
+        identifierWarnings.clear();
         httpLimitWarnings.clear();
         pluginApiWarnings.clear();
         quotaWarnings.clear();
         knowledgeWarnings.clear();
         startupBannerWarning = null;
 
-        this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
-        this.model = config.getString("api.model", "gpt-4o-mini");
+        this.provider = ConfigIdentifiers.clean("api.provider",
+                config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT), identifierWarnings);
+        this.model = ConfigIdentifiers.clean("api.model", config.getString("api.model", "gpt-4o-mini"),
+                identifierWarnings);
         this.baseUrl = resolveBaseUrl(provider, substitute(config.getString("api.base-url", "")));
         this.systemPrompt = blankToNull(config.getString("api.system-prompt", ""));
         double temperatureRaw = config.getDouble("api.temperature", -1.0d);
@@ -244,8 +248,10 @@ public final class PluginConfig {
             this.modelQueueStrategyWarning = null;
         }
         this.fallbackModel = FallbackModel.of(
-                config.getString("fallback-model.provider", ""),
-                config.getString("fallback-model.model", ""));
+                ConfigIdentifiers.clean("fallback-model.provider",
+                        config.getString("fallback-model.provider", ""), identifierWarnings),
+                ConfigIdentifiers.clean("fallback-model.model",
+                        config.getString("fallback-model.model", ""), identifierWarnings));
         this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
         this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
         readKnowledge(config);
@@ -549,7 +555,8 @@ public final class PluginConfig {
             if (one == null) {
                 continue;
             }
-            String normalizedId = id.trim().toLowerCase(Locale.ROOT);
+            String normalizedId = ConfigIdentifiers.clean("providers key",
+                    id.trim().toLowerCase(Locale.ROOT), identifierWarnings);
             String type = ProviderCatalog.normalizeType(one.getString("type"), normalizedId);
             String url = substitute(one.getString("url", "")).trim();
             if (url.isBlank()) {
@@ -604,8 +611,10 @@ public final class PluginConfig {
             if (providerValue == null || modelValue == null) {
                 continue;
             }
-            String providerId = String.valueOf(providerValue).trim().toLowerCase(Locale.ROOT);
-            String modelId = String.valueOf(modelValue).trim();
+            String providerId = ConfigIdentifiers.clean("model-queue provider",
+                    String.valueOf(providerValue).trim().toLowerCase(Locale.ROOT), identifierWarnings);
+            String modelId = ConfigIdentifiers.clean("model-queue model",
+                    String.valueOf(modelValue).trim(), identifierWarnings);
             if (providerId.isEmpty() || modelId.isEmpty()) {
                 continue;
             }
@@ -1537,6 +1546,11 @@ public final class PluginConfig {
     }
 
     /** Unknown {@code structured-output} values. Empty when every provider is {@code auto} or a known mode. */
+    /** One warning per provider or model name that had a lone surrogate. */
+    public List<String> identifierWarnings() {
+        return List.copyOf(identifierWarnings);
+    }
+
     public List<String> structuredOutputWarnings() {
         return List.copyOf(structuredOutputWarnings);
     }
