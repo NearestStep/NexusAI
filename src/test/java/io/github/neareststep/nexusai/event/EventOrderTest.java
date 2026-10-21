@@ -4,6 +4,8 @@ import io.github.neareststep.nexusai.cache.AiCache;
 import io.github.neareststep.nexusai.ai.AiDiagnostics;
 import io.github.neareststep.nexusai.ai.AiErrorKind;
 import io.github.neareststep.nexusai.ai.AiHttpClient;
+import io.github.neareststep.nexusai.ai.AiProvider;
+import io.github.neareststep.nexusai.ai.ModelAnswer;
 import io.github.neareststep.nexusai.ai.AiRequestException;
 import io.github.neareststep.nexusai.ai.CallTrace;
 import io.github.neareststep.nexusai.ai.ChatCaller;
@@ -57,6 +59,7 @@ class EventOrderTest {
 
     private EventSupport support;
     private ExecutorService executor;
+    private RoutingProvider lastProvider;
 
     @AfterEach
     void tearDown() {
@@ -64,6 +67,7 @@ class EventOrderTest {
             support.close();
         }
         EventDispatcher.install(null);
+        AiHttpClient.serverThreadCheck(null);
         if (executor != null) {
             executor.shutdownNow();
         }
@@ -96,6 +100,99 @@ class EventOrderTest {
         assertEquals("pong", post.text());
         assertFalse(cachedAtPost.get());
         assertTrue(cache.get(client.cacheKey("ping")).isPresent());
+    }
+
+    /**
+     * F39-1. A reply that is already complete when the client attaches its callback ran the
+     * callback on the calling thread. For a placeholder that is the server thread, where Bukkit
+     * refuses the async Post event, so Post was lost while the text still reached the cache.
+     */
+    @Test
+    void postFromAnAlreadyCompleteReplyLeavesTheServerThread() throws Exception {
+        support = listen();
+        Thread server = Thread.currentThread();
+        AiHttpClient.serverThreadCheck(() -> Thread.currentThread() == server);
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
+        AiHttpClient[] holder = new AiHttpClient[1];
+        AtomicBoolean cachedAtPost = new AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<Thread> postThread = new java.util.concurrent.atomic.AtomicReference<>();
+        install(event -> {
+            if (event.isAsynchronous() && Thread.currentThread() == server) {
+                // What Paper does for an async event on the server thread.
+                throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+            }
+            support.events.add(event);
+            if (event instanceof NexusPostGenerateEvent) {
+                postThread.set(Thread.currentThread());
+                cachedAtPost.set(cache.get(holder[0].cacheKey("ping")).isPresent());
+            }
+        });
+        PluginConfig config = oneRow();
+        AiHttpClient routed = client(config, cache, (prompt, overrides, baseUrl, apiKey, model) ->
+                new ChatExchange("pong", Map.of()));
+        RoutingProvider routing = lastProvider;
+        ExecutorService completions = Executors.newSingleThreadExecutor();
+        try {
+            AiProvider done = new AiProvider() {
+                @Override
+                public java.util.concurrent.CompletableFuture<String> complete(String prompt) {
+                    throw new UnsupportedOperationException();
+                }
+
+                @Override
+                public java.util.concurrent.CompletableFuture<ModelAnswer> answer(
+                        String prompt, GenerationOverrides overrides, boolean ignoreCooldown, CallTrace trace) {
+                    // Finished before the client attaches its callback, as a fast reply can be.
+                    return java.util.concurrent.CompletableFuture.completedFuture(
+                            routing.answer(prompt, overrides, ignoreCooldown, trace).join());
+                }
+            };
+            holder[0] = new AiHttpClient(cache, done, config, Logger.getLogger("event-order-done"));
+            holder[0].completionExecutor(completions);
+            CallTrace trace = CallTrace.start(RequestOrigin.PLACEHOLDER, null, "harbor", "");
+            assertEquals("pong", holder[0].requestAsync("ping", null, GenerationOverrides.none(), null, null, trace)
+                    .get(5, TimeUnit.SECONDS));
+            assertEquals(2, support.events.size(), names());
+            NexusPreGenerateEvent pre = assertInstanceOf(NexusPreGenerateEvent.class, support.events.get(0));
+            NexusPostGenerateEvent post = assertInstanceOf(NexusPostGenerateEvent.class, support.events.get(1));
+            assertEquals(pre.requestId(), post.requestId());
+            assertEquals(RequestOrigin.PLACEHOLDER, post.origin());
+            assertTrue(postThread.get() != server, "Post ran on the server thread");
+            assertFalse(cachedAtPost.get(), "the text was cached before Post");
+            assertTrue(cache.get(holder[0].cacheKey("ping")).isPresent());
+            assertTrue(routed != null);
+        } finally {
+            completions.shutdownNow();
+        }
+    }
+
+    @Test
+    void completionOffTheServerThreadStaysInline() throws Exception {
+        support = listen();
+        AiHttpClient.serverThreadCheck(() -> false);
+        java.util.concurrent.atomic.AtomicReference<Thread> postThread = new java.util.concurrent.atomic.AtomicReference<>();
+        install(event -> {
+            support.events.add(event);
+            if (event instanceof NexusPostGenerateEvent) {
+                postThread.set(Thread.currentThread());
+            }
+        });
+        Thread caller = Thread.currentThread();
+        AiCache cache = new AiCache(Duration.ofMinutes(5), 10);
+        AiProvider done = new AiProvider() {
+            @Override
+            public java.util.concurrent.CompletableFuture<String> complete(String prompt) {
+                return java.util.concurrent.CompletableFuture.completedFuture("pong");
+            }
+        };
+        AiHttpClient client = new AiHttpClient(cache, done, oneRow(), Logger.getLogger("event-order-inline"));
+        client.completionExecutor(command -> {
+            throw new AssertionError("no handoff off the server thread");
+        });
+        CallTrace trace = CallTrace.start(RequestOrigin.PLACEHOLDER, null, "", "");
+        assertEquals("pong", client.requestAsync("ping", null, GenerationOverrides.none(), null, null, trace)
+                .get(5, TimeUnit.SECONDS));
+        assertEquals(caller, postThread.get());
     }
 
     @Test
@@ -319,6 +416,7 @@ class EventOrderTest {
                 config.modelQueue(), 0, 60_000L, 300_000L, null, () -> 10_000L,
                 LocalDate::now, ZoneId.of("UTC"), logger);
         RoutingProvider provider = new RoutingProvider(config, queue, http, executor, logger);
+        lastProvider = provider;
         AiDiagnostics diagnostics = new AiDiagnostics(logger, Duration.ofSeconds(30), config::configuredSecrets);
         return new AiHttpClient(cache, provider, config, RequestGate.permissive(), diagnostics, logger);
     }

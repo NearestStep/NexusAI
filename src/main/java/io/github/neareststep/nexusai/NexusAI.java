@@ -304,6 +304,7 @@ public final class NexusAI extends JavaPlugin {
                 Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()),
                 pluginConfig::configuredSecrets);
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
+        this.aiHttpClient.completionExecutor(httpExecutor);
         this.aiPool = new AiPool(pluginConfig.allowMarkup());
         PoolStore poolStore = new PoolStore(
                 new File(getDataFolder(), "pool.yml"),
