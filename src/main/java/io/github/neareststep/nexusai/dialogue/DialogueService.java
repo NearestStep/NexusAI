@@ -288,7 +288,12 @@ public final class DialogueService {
             return;
         }
         try {
-            httpExecutor.execute(() -> present(player, engine.talk(endRequest(player)), true, false));
+            httpExecutor.execute(() -> {
+                TalkResult ended = engine.talk(endRequest(player));
+                if (ended.code() != TalkCode.SHUTDOWN) {
+                    present(player, ended, true, false);
+                }
+            });
         } catch (RejectedExecutionException rejected) {
             plugin.getLogger().fine(HttpPool.QUEUE_FULL);
         }
@@ -542,6 +547,7 @@ public final class DialogueService {
             case BUSY -> messages.format("talk.busy");
             case FAILED -> messages.format("talk.failed", Map.of("error", result.error()));
             case EMPTY -> messages.format("talk.empty");
+            case SHUTDOWN -> "";
         };
     }
 
@@ -630,12 +636,18 @@ public final class DialogueService {
             if (timeoutHandle != null) {
                 timeoutHandle.cancel(false);
             }
+            if (failIfStopping(future, result, null)) {
+                return;
+            }
             future.complete(present(player, result, notifyReply, notifyStart));
         } catch (Throwable thrown) {
             if (timeoutHandle != null) {
                 timeoutHandle.cancel(false);
             }
             if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            if (failIfStopping(future, null, thrown)) {
                 return;
             }
             plugin.getLogger().warning("Dialogue failed: " + thrown.getMessage());
@@ -875,7 +887,24 @@ public final class DialogueService {
         }
     }
 
-    static final String STOPPING = "NexusAI is stopping";
+    static final String STOPPING = StopGate.MESSAGE;
+
+    /**
+     * A turn cut by plugin stop: the API future fails with {@link IllegalStateException}
+     * {@code "NexusAI is stopping"}, the same way {@code talk} reports a disabled plugin, and
+     * nothing is shown. Not "busy", so a caller can tell a stop from a slow provider. The
+     * request was already counted once as cancelled, so no delivery is counted.
+     *
+     * @return true when the future was completed here
+     */
+    static boolean failIfStopping(CompletableFuture<String> future, TalkResult result, Throwable thrown) {
+        boolean stopped = (result != null && result.code() == TalkCode.SHUTDOWN)
+                || (thrown != null && StopGate.isStopFailure(thrown));
+        if (stopped) {
+            future.completeExceptionally(new IllegalStateException(STOPPING));
+        }
+        return stopped;
+    }
 
     /**
      * Waits up to 5 s for an action, but returns {@link #STOPPING} within 100 ms of disable:

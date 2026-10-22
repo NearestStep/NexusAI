@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -123,6 +124,32 @@ class DialogueStopTest {
         assertTrue(!DialogueTransport.isStopping(new AiRequestException(
                 io.github.neareststep.nexusai.ai.AiErrorKind.OTHER, 500, "HTTP 500", null)));
         assertTrue(!DialogueTransport.isStopping(null));
+    }
+
+    @Test
+    void theTalkApiFailsWithStoppingInsteadOfBusy() {
+        CompletableFuture<String> future = new CompletableFuture<>();
+        assertTrue(DialogueService.failIfStopping(future, TalkResult.of(TalkCode.SHUTDOWN, "npc"), null));
+        ExecutionException failed = assertThrows(ExecutionException.class, () -> future.get(1, TimeUnit.SECONDS));
+        IllegalStateException stopping = assertInstanceOf(IllegalStateException.class, failed.getCause());
+        assertEquals("NexusAI is stopping", stopping.getMessage());
+
+        CompletableFuture<String> thrown = new CompletableFuture<>();
+        assertTrue(DialogueService.failIfStopping(thrown, null,
+                new java.util.concurrent.CompletionException(DialogueTransportStop.failure())));
+        assertTrue(thrown.isCompletedExceptionally());
+
+        CompletableFuture<String> busy = new CompletableFuture<>();
+        assertTrue(!DialogueService.failIfStopping(busy, TalkResult.of(TalkCode.BUSY, "npc"), null));
+        assertTrue(!busy.isDone());
+    }
+
+    /** The failure a closed transport gives a send. */
+    private static final class DialogueTransportStop {
+        static AiRequestException failure() {
+            return new AiRequestException(
+                    io.github.neareststep.nexusai.ai.AiErrorKind.OTHER, 0, DialogueTransport.STOPPING, null);
+        }
     }
 
     private static DialogueTransport.Request request(PluginConfig config) {

@@ -281,6 +281,9 @@ public final class DialogueEngine {
 
     private TalkResult failure(TalkRequest request, RuntimeException error) {
         AiRequestException typed = AiErrors.find(error);
+        if (DialogueTransport.isStopping(typed)) {
+            return TalkResult.of(TalkCode.SHUTDOWN, request.characterId());
+        }
         if (typed != null && (typed.kind() == AiErrorKind.REJECTED
                 || typed.kind() == AiErrorKind.EMPTY_REPLY
                 || typed.kind() == AiErrorKind.MARKUP_ONLY)) {

@@ -17,6 +17,17 @@ public final class SenderTasks {
     private SenderTasks() {
     }
 
+    /**
+     * Delivers the result of an AI request. A request cancelled by plugin stop is skipped
+     * without a count: it was already counted once as cancelled.
+     */
+    public static void runReply(JavaPlugin plugin, CommandSender sender, Throwable error, Runnable task, Logger logger) {
+        if (StopGate.isStopFailure(error)) {
+            return;
+        }
+        run(plugin, sender, task, logger);
+    }
+
     public static void run(JavaPlugin plugin, CommandSender sender, Runnable task, Logger logger) {
         Runnable safe = () -> {
             try {

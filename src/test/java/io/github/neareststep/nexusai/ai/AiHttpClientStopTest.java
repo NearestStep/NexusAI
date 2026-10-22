@@ -53,6 +53,26 @@ class AiHttpClientStopTest {
     }
 
     @Test
+    void aCancelledCommandReplyIsCountedOnceNotAlsoAsASkippedDelivery() {
+        io.github.neareststep.nexusai.StopGate.open();
+        try {
+            Controlled provider = new Controlled();
+            AiHttpClient client = new AiHttpClient(new AiCache(Duration.ofMinutes(5), 10), provider, config(), logger());
+            java.util.concurrent.atomic.AtomicBoolean delivered = new java.util.concurrent.atomic.AtomicBoolean();
+            client.requestAsync("ping").whenComplete((answer, error) ->
+                    io.github.neareststep.nexusai.command.SenderTasks.runReply(
+                            null, null, error, () -> delivered.set(true), logger()));
+            io.github.neareststep.nexusai.StopGate.close();
+            io.github.neareststep.nexusai.StopGate.dropped(client.close());
+            assertTrue(!delivered.get());
+            String summary = io.github.neareststep.nexusai.StopGate.takeSummary();
+            assertTrue(summary.startsWith("Stopped with 1 AI request(s)") && summary.contains(" and 0 reply"), summary);
+        } finally {
+            io.github.neareststep.nexusai.StopGate.open();
+        }
+    }
+
+    @Test
     void aReplyFinishedBeforeCloseIsKept() throws Exception {
         Controlled provider = new Controlled();
         AiCache cache = new AiCache(Duration.ofMinutes(5), 10);

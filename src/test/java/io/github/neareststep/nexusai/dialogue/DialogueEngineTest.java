@@ -113,6 +113,15 @@ class DialogueEngineTest {
     }
 
     @Test
+    void aTurnCutByStopIsShutdownNotBusy() {
+        DialogueEngine engine = engine(reply -> {
+            throw new AiRequestException(AiErrorKind.OTHER, 0, io.github.neareststep.nexusai.StopGate.MESSAGE, null);
+        });
+        TalkResult result = engine.talk(request("hi", false, List.of(), settings(), 1_000L, node -> true));
+        assertEquals(TalkCode.SHUTDOWN, result.code());
+    }
+
+    @Test
     void markupOnlyReplyFallsBackWithoutLookingLikeAFailure() {
         DialogueEngine engine = engine(reply -> {
             throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);

@@ -48,7 +48,7 @@ public final class AiHttpClient {
     private final Logger logger;
     private final ConcurrentHashMap<String, CompletableFuture<SharedCompletion>> inFlight = new ConcurrentHashMap<>();
     private volatile QuotaPolicy quotas;
-    static final String STOPPING = "NexusAI is stopping";
+    static final String STOPPING = io.github.neareststep.nexusai.StopGate.MESSAGE;
     private final ConcurrentHashMap<CompletableFuture<?>, Runnable> pending = new ConcurrentHashMap<>();
     private volatile boolean closing;
     private volatile boolean closed;

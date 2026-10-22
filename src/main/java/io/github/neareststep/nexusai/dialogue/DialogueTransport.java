@@ -36,7 +36,7 @@ public final class DialogueTransport {
     private final HttpClient httpClient;
     private final Supplier<PluginConfig> config;
     private final Supplier<HttpGate> gates;
-    static final String STOPPING = "NexusAI is stopping";
+    static final String STOPPING = io.github.neareststep.nexusai.StopGate.MESSAGE;
     private final java.util.Set<java.util.concurrent.CompletableFuture<?>> open =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile boolean closed;

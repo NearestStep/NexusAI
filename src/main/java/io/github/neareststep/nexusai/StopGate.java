@@ -17,7 +17,23 @@ public final class StopGate {
     private static final AtomicInteger CANCELLED = new AtomicInteger();
     private static final AtomicInteger SKIPPED = new AtomicInteger();
 
+    /** The message every stop failure carries: cancelled requests, refused sends, the talk API. */
+    public static final String MESSAGE = "NexusAI is stopping";
+
     private StopGate() {
+    }
+
+    /**
+     * True when {@code error}, or one of its causes, is a stop failure. Its request was already
+     * counted as cancelled, so a caller must not deliver it, and the loss is not counted twice.
+     */
+    public static boolean isStopFailure(Throwable error) {
+        for (Throwable at = error; at != null; at = at.getCause() == at ? null : at.getCause()) {
+            if (MESSAGE.equals(at.getMessage())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Plugin enable: replies are delivered again. */
