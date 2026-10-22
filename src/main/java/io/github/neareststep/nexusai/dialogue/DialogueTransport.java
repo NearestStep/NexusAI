@@ -39,6 +39,9 @@ public final class DialogueTransport {
     static final String STOPPING = io.github.neareststep.nexusai.StopGate.MESSAGE;
     private final java.util.Set<java.util.concurrent.CompletableFuture<?>> open =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** HTTP exchanges behind the calls in {@code open}. Cancelled on close, not counted again. */
+    private final java.util.Set<java.util.concurrent.CompletableFuture<?>> exchanges =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile boolean closed;
 
     public DialogueTransport(Supplier<PluginConfig> config, HttpClient httpClient) {
@@ -73,6 +76,12 @@ public final class DialogueTransport {
             if (open.remove(call)) {
                 call.cancel(true);
                 cancelled++;
+            }
+        }
+        // One send is one request: its HTTP exchange is stopped too, but not counted twice.
+        for (java.util.concurrent.CompletableFuture<?> sent : exchanges.toArray(new java.util.concurrent.CompletableFuture<?>[0])) {
+            if (exchanges.remove(sent)) {
+                sent.cancel(true);
             }
         }
         return cancelled;
@@ -151,9 +160,9 @@ public final class DialogueTransport {
                 }
                 java.util.concurrent.CompletableFuture<HttpResponse<String>> sent =
                         httpClient.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString());
-                open.add(sent);
-                sent.whenComplete((ignored, error) -> open.remove(sent));
-                if (closed && open.remove(sent)) {
+                exchanges.add(sent);
+                sent.whenComplete((ignored, error) -> exchanges.remove(sent));
+                if (closed && exchanges.remove(sent)) {
                     sent.cancel(true);
                 }
                 return sent;

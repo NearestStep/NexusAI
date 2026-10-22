@@ -61,7 +61,8 @@ class DialogueStopTest {
             assertTrue(received.await(5, TimeUnit.SECONDS));
             assertTrue(transport.openCount() > 0);
             long started = System.nanoTime();
-            assertTrue(transport.close() >= 1);
+            // One send in flight is one request, counted once (not the gate call and its exchange).
+            assertEquals(1, transport.close());
             Throwable thrown = worker.get(2, TimeUnit.SECONDS);
             long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             // The read timeout is 30 s; stop must not wait for it.
