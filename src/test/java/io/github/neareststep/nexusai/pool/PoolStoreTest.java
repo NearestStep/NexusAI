@@ -213,13 +213,14 @@ class PoolStoreTest {
                       - "<key:key.jump>"
                 """;
         Files.writeString(file.toPath(), original);
-        assumeTrue(Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null,
-                "POSIX permissions are not available");
+        boolean posix = Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null;
         Set<PosixFilePermission> mode = EnumSet.of(
                 PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE,
                 PosixFilePermission.GROUP_READ);
-        Files.setPosixFilePermissions(file.toPath(), mode);
+        if (posix) {
+            Files.setPosixFilePermissions(file.toPath(), mode);
+        }
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         Logger logger = Logger.getLogger("pool-bak-" + dir.getFileName());
         logger.setUseParentHandlers(false);
@@ -250,13 +251,17 @@ class PoolStoreTest {
             Path backup = dir.resolve("pool.yml.bak");
             assertTrue(Files.isRegularFile(backup));
             assertEquals(original, Files.readString(backup));
-            assertEquals(mode, Files.getPosixFilePermissions(backup));
+            if (posix) {
+                assertEquals(mode, Files.getPosixFilePermissions(backup));
+            }
             String saved = Files.readString(file.toPath());
             assertTrue(saved.contains("CLICK"));
             assertTrue(saved.contains("Normal pool answer"));
             assertFalse(saved.contains("click:run_command"));
             assertFalse(saved.contains("key.jump"));
-            assertEquals(mode, Files.getPosixFilePermissions(file.toPath()));
+            if (posix) {
+                assertEquals(mode, Files.getPosixFilePermissions(file.toPath()));
+            }
             assertTrue(infos.stream().anyMatch(line -> line.contains("Backed up pool.yml") && line.contains(backup.toString())));
             assertFalse(Files.exists(dir.resolve("pool.yml.tmp")));
 
