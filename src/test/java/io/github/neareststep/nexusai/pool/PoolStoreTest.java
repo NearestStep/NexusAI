@@ -213,6 +213,8 @@ class PoolStoreTest {
                       - "<key:key.jump>"
                 """;
         Files.writeString(file.toPath(), original);
+        assumeTrue(Files.getFileAttributeView(dir, PosixFileAttributeView.class) != null,
+                "POSIX permissions are not available");
         Set<PosixFilePermission> mode = EnumSet.of(
                 PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE,

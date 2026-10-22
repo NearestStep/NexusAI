@@ -51,7 +51,7 @@ class ConfigMigrationTest {
         config.load(Path.of("src/main/resources/config.yml").toFile());
         assertEquals(ConfigVersions.CONFIG, config.getInt("config-version"));
         assertFalse(config.getBoolean("sanitize.allow-markup"));
-        assertTrue(Files.readString(Path.of("src/main/resources/config.yml")).contains(ConfigMerger.SANITIZE_COMMENT));
+        assertTrue(bundledConfigText().contains(ConfigMerger.SANITIZE_COMMENT));
         assertEquals(256, config.getInt("api.max-tokens"));
         assertEquals("openai-compatible", config.getString("providers.openai.type"));
         assertEquals("https://api.openai.com/v1", config.getString("providers.openai.url"));
@@ -114,7 +114,7 @@ class ConfigMigrationTest {
 
     @Test
     void missingMaxTokensIsAppendedWithTheBackupRule() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         String without = defaults.replace("  max-tokens: 256\n", "");
         assertFalse(without.contains("max-tokens: 256"));
         Path dir = Files.createTempDirectory("nexusai-max-tokens");
@@ -171,7 +171,7 @@ class ConfigMigrationTest {
         Path dir = Files.createTempDirectory("nexusai-one-backup");
         Path file = dir.resolve("config.yml");
         Files.writeString(file, V06, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("one-backup");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.valid());
@@ -439,7 +439,7 @@ class ConfigMigrationTest {
 
     @Test
     void missingMaxTokensOnVersion1IsAppendedOnce() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         String original = defaults
                 .replace("config-version: " + ConfigVersions.CONFIG, "config-version: 1")
                 .replace("  max-tokens: 256\n", "");
@@ -482,7 +482,7 @@ class ConfigMigrationTest {
 
     @Test
     void appendsSanitizeSectionWithoutBumpingConfigVersion() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         int marker = defaults.indexOf("\n" + ConfigMerger.SANITIZE_COMMENT);
         assertTrue(marker > 0);
         String original = defaults.substring(0, marker).stripTrailing() + "\n";
@@ -578,7 +578,7 @@ class ConfigMigrationTest {
                   max-tokens: 256
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("http-merge");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("http.max-in-flight"));
@@ -609,7 +609,7 @@ class ConfigMigrationTest {
                   model: gpt-4o-mini
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("world-context-merge");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("world-context.enabled"), outcome.addedKeys().toString());
@@ -640,7 +640,7 @@ class ConfigMigrationTest {
 
     @Test
     void contextLogTimeoutsIsAppendedOnceAndAnExistingFalseIsKept() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Path dir = Files.createTempDirectory("nexusai-context-log-timeouts");
         Path file = dir.resolve("config.yml");
         String original = """
@@ -677,7 +677,7 @@ class ConfigMigrationTest {
 
     @Test
     void dialogueLogStopBudgetIsAppendedOnceAndAnExistingFalseIsKept() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Path dir = Files.createTempDirectory("nexusai-log-stop-budget");
         Path file = dir.resolve("config.yml");
         String original = """
@@ -724,7 +724,7 @@ class ConfigMigrationTest {
                   model: gpt-4o-mini
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("plugin-api-merge");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("plugin-api.enabled"), outcome.addedKeys().toString());
@@ -766,7 +766,7 @@ class ConfigMigrationTest {
                   model: gpt-4o-mini
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("quota-merge");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("quotas.missing-usage"), outcome.addedKeys().toString());
@@ -809,7 +809,7 @@ class ConfigMigrationTest {
                   max-file-chars: 3000
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("knowledge-merge");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("knowledge.select"), outcome.addedKeys().toString());
@@ -856,7 +856,7 @@ class ConfigMigrationTest {
                     model: gpt-4o-mini
                 """;
         Files.writeString(file, original, StandardCharsets.UTF_8);
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Logger logger = Logger.getLogger("v1-current-keys");
         ConfigStartup.Outcome outcome = ConfigStartup.prepareConfig(file, defaults, logger);
         assertTrue(outcome.addedKeys().contains("plugin-api.enabled"), outcome.addedKeys().toString());
@@ -917,7 +917,7 @@ class ConfigMigrationTest {
      */
     @Test
     void oldConfigWithoutStartupBannerGetsTrue() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         assertTrue(defaults.contains("\nstartup-banner: true\n"));
         String original = defaults.replace(
                 "\n# Startup console banner. true (default) prints the full brand banner.\n"
@@ -958,7 +958,7 @@ class ConfigMigrationTest {
     /** A value already in the file, including false and old 1.3.0 development words, is kept. */
     @Test
     void existingStartupBannerValueIsKept() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         for (String value : List.of("false", "true", "full", "compact", "off")) {
             String original = defaults.replace("startup-banner: true\n", "startup-banner: " + value + "\n");
             Path dir = Files.createTempDirectory("nexusai-startup-banner-kept");
@@ -980,7 +980,7 @@ class ConfigMigrationTest {
 
     @Test
     void versionOneConfigMigratesWithStartupBannerTrue() throws Exception {
-        String defaults = Files.readString(Path.of("src/main/resources/config.yml"));
+        String defaults = bundledConfigText();
         Path dir = Files.createTempDirectory("nexusai-startup-banner-v1");
         Path file = dir.resolve("config.yml");
         Files.writeString(file, V06, StandardCharsets.UTF_8);
@@ -1023,5 +1023,9 @@ class ConfigMigrationTest {
             throw new AssertionError(yaml, e);
         }
         return parsed;
+    }
+
+    private static String bundledConfigText() throws Exception {
+        return Files.readString(Path.of("src/main/resources/config.yml")).replace("\r\n", "\n");
     }
 }

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.List;
 import java.util.Set;
@@ -141,11 +142,14 @@ class ApiKeyFileTest {
         Files.write(huge, new byte[KeyFiles.MAX_BYTES + 1]);
         Path odd = dir.resolve("odd.key");
         Files.writeString(odd, "sk-live:extra token\n", StandardCharsets.UTF_8);
-        Files.setPosixFilePermissions(odd, Set.of(
-                PosixFilePermission.OWNER_READ,
-                PosixFilePermission.OWNER_WRITE,
-                PosixFilePermission.GROUP_READ,
-                PosixFilePermission.OTHERS_READ));
+        boolean posix = Files.getFileAttributeView(odd, PosixFileAttributeView.class) != null;
+        if (posix) {
+            Files.setPosixFilePermissions(odd, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.GROUP_READ,
+                    PosixFilePermission.OTHERS_READ));
+        }
         Path previousBase = PluginConfig.secretsBase;
         Function<String, String> previousEnv = PluginConfig.environment;
         PluginConfig.secretsBase = dir;
@@ -156,7 +160,7 @@ class ApiKeyFileTest {
             PluginConfig missingConfig = new PluginConfig(missing);
             assertTrue(missingConfig.provider("openai").apiKeys().isEmpty());
             String missingWarning = String.join("\n", missingConfig.keyFileWarnings());
-            assertTrue(missingWarning.contains("secrets/missing.key"), missingWarning);
+            assertTrue(missingWarning.replace('\\', '/').contains("secrets/missing.key"), missingWarning);
             assertFalse(missingWarning.contains("Exception"), missingWarning);
 
             YamlConfiguration oversized = base();
@@ -176,7 +180,9 @@ class ApiKeyFileTest {
             assertTrue(oddWarning.contains("does not look like a raw key"), oddWarning);
             assertFalse(oddWarning.contains("sk-live"), oddWarning);
             assertFalse(oddWarning.contains("extra token"), oddWarning);
-            assertTrue(oddWarning.contains("chmod 600"), oddWarning);
+            if (posix) {
+                assertTrue(oddWarning.contains("chmod 600"), oddWarning);
+            }
         } finally {
             PluginConfig.environment = previousEnv;
             PluginConfig.secretsBase = previousBase;

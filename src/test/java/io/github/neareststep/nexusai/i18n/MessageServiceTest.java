@@ -279,7 +279,7 @@ class MessageServiceTest {
         assertEquals(2, warnings.size());
         String first = warnings.get(0).getMessage();
         String second = warnings.get(1).getMessage();
-        assertTrue(first.contains("plugins/NexusAI/lang/xx.yml"), first);
+        assertTrue(first.contains(expected.getPath()), first);
         assertTrue(first.contains("xx"), first);
         assertTrue(first.contains("Using English"), first);
         assertFalse(first.contains("missing in jar"), first);
@@ -303,7 +303,7 @@ class MessageServiceTest {
         List<LogRecord> warnings = records.stream().filter(record -> record.getLevel() == Level.WARNING).toList();
         assertEquals(1, warnings.size());
         String message = warnings.getFirst().getMessage();
-        assertTrue(message.contains("plugins/NexusAI/lang/ru.yml"), message);
+        assertTrue(message.contains(file.getPath()), message);
         assertTrue(message.contains("line"), message);
         assertTrue(message.contains("column"), message);
         assertTrue(message.contains("Using the bundled ru locale."), message);
