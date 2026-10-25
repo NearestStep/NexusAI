@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.github.neareststep"
-version = "1.3.1-SNAPSHOT"
+version = "1.3.1"
 
 java {
     toolchain {
