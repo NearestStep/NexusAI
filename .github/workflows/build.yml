@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 # The public repository NearestStep/NexusAI runs everything on every push and pull request.
-# Any other copy (the private development repository) saves Actions minutes:
+# Any other repository (for example a fork) saves Actions minutes:
 # - a push runs nothing, the pull request run covers it;
 # - a pull request runs build and unit tests only, and a newer commit cancels the older run;
 # - the Paper/Folia smoke matrix runs on workflow_dispatch or on a pull request labeled full-ci
