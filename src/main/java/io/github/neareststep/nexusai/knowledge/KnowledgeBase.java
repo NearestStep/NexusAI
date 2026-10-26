@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -270,7 +271,7 @@ public final class KnowledgeBase {
     private static String cap(String text, int cap, boolean warn, String name, List<String> notes) {
         String body = text == null ? "" : text;
         if (body.length() > cap) {
-            body = body.substring(0, cap);
+            body = Utf16.head(body, cap);
             if (warn) {
                 notes.add("Knowledge file '" + name + "' was truncated to " + cap + " characters.");
             }
@@ -353,7 +354,7 @@ public final class KnowledgeBase {
         }
         String content = body.toString();
         if (content.length() > maxChars) {
-            content = content.substring(0, maxChars);
+            content = Utf16.head(content, maxChars);
             String key = String.join("\n", names);
             if (truncationWarned.add(key)) {
                 logger.warning("Knowledge text was truncated to " + maxChars + " characters for this request.");

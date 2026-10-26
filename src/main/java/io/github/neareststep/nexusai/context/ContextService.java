@@ -48,6 +48,7 @@ public final class ContextService {
     private final ConcurrentHashMap<String, Health> health = new ConcurrentHashMap<>();
     private final Set<String> truncationLogged = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Long> lastErrorLog = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, TimeoutLog> timeoutLog = new ConcurrentHashMap<>();
     private final AtomicInteger rejected = new AtomicInteger();
 
     private volatile ContextSettings settings;
@@ -101,6 +102,7 @@ public final class ContextService {
         health.clear();
         truncationLogged.clear();
         lastErrorLog.clear();
+        timeoutLog.clear();
         rejected.set(0);
     }
 
@@ -271,6 +273,7 @@ public final class ContextService {
                     // The call itself overran. A task still waiting for a worker is a full pool,
                     // same as a rejected submission, and is not a strike against this provider.
                     recordFailure(id, null, true, current);
+                    logTimeout(id, timeoutMs, current);
                 }
                 result.complete(Contribution.empty(id, priority));
             }, timeoutMs, TimeUnit.MILLISECONDS);
@@ -377,6 +380,39 @@ public final class ContextService {
         logger.warning("Context provider '" + id + "' failed (" + error.getClass().getSimpleName() + ") and was skipped.");
     }
 
+    /**
+     * One INFO line for a provider call that overran its timeout. Per provider, at most one line per
+     * {@code limits.error-log-cooldown-seconds}; timeouts inside that window are counted and the next
+     * line reports how many were not logged. Runs on the scheduler thread, never on the main thread.
+     */
+    private void logTimeout(String id, int timeoutMs, ContextSettings current) {
+        if (logger == null || !current.logTimeouts()) {
+            return;
+        }
+        long now = clock.getAsLong();
+        TimeoutLog row = timeoutLog.computeIfAbsent(id, ignored -> new TimeoutLog());
+        int skipped;
+        synchronized (row) {
+            if (row.logged && now - row.lastMillis < errorLogCooldownMillis) {
+                row.skipped++;
+                return;
+            }
+            row.logged = true;
+            row.lastMillis = now;
+            skipped = row.skipped;
+            row.skipped = 0;
+        }
+        logger.info(timeoutLine(id, timeoutMs, skipped));
+    }
+
+    static String timeoutLine(String id, int timeoutMs, int skipped) {
+        String line = "Context provider '" + id + "' timed out after " + timeoutMs + " ms and was skipped.";
+        if (skipped > 0) {
+            line += " " + skipped + (skipped == 1 ? " more timeout" : " more timeouts") + " since the last notice.";
+        }
+        return line;
+    }
+
     private void noteTruncation(String id) {
         if (id == null || logger == null) {
             return;
@@ -411,6 +447,12 @@ public final class ContextService {
         public String format() {
             return formatLine(this);
         }
+    }
+
+    private static final class TimeoutLog {
+        private boolean logged;
+        private long lastMillis;
+        private int skipped;
     }
 
     private static final class Health {

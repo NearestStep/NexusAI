@@ -20,6 +20,50 @@ Built-in tokens such as `{player}`, `{world}`, `{biome}`, `{time}`, and `{weathe
 
 NexusAI 1.3.0 adds an optional helper for this: `NexusAIApi.worldContext(plugin, player)` (and an overload with `WorldContextLimits`) returns one compact `World:` block with player, world, coordinates, inventory materials, nearby block counts, and biome. It is off by default; enable it with `world-context.enabled: true` and tune `world-context.radius`, `max-blocks`, `max-block-types`, `max-inventory-items`, `max-chars`, and `cooldown-millis`. Only a short snapshot is taken on the player's region thread; sorting and formatting run on `nexusai-context-*`. The future completes with `""` when the feature is off, NexusAI is disabled, or the player is gone, so do not depend on it being non-empty, and never join it on the main thread or a region thread. `NexusAIApi.worldContextEstimatedTokens(block)` returns the token estimate. See [World context](api.md#world-context).
 
+## World context cost
+
+`NexusAIApi.worldContext` is off by default (`world-context.enabled: false`). When it is on, the snapshot (player, inventory, nearby blocks, biome) is taken on the player's region thread: the main thread on Paper, the region owner on Folia. If the caller already owns that region, the snapshot runs inside the caller's current tick. Sorting and formatting run afterwards on `nexusai-context-*`.
+
+The cost of a snapshot grows with the number of blocks it reads. The limits come from `config.yml` and are clamped by the loader. A `WorldContextLimits` override is clamped the same way:
+
+| Key | Default | Range |
+|-----|---------|-------|
+| `world-context.radius` | 2 | 0..8, a cube around the block at the player's feet |
+| `world-context.max-blocks` | 125 | 1..1331, hard cap on blocks examined |
+| `world-context.cooldown-millis` | 250 | 0..5000 |
+
+Within `cooldown-millis` a second call for the same player returns the last block without reading the world again, even when it passes different `WorldContextLimits`: the saved block is kept per player, not per set of limits. It is shared by every plugin that calls `worldContext` for that player, its time is when the block was ready (not when the call was made), an empty block is not saved, and `/nai reload` clears it. There is no shared per-tick budget and no merging of calls in flight: calls for the same player that arrive before the first block is ready each take their own snapshot. Keep `max-blocks` near the default if another plugin calls the helper often, and measure before raising it toward 1331.
+
+## Context provider timeouts
+
+Each `NexusContextProvider` runs on `nexusai-context-N` (2 threads, queue of 256), never on the main thread or a region thread. Three limits apply:
+
+| Limit | Default | Where |
+|-------|---------|-------|
+| Provider request | 100 ms | `NexusContextProvider.timeout()` |
+| Ceiling for one provider | 200 ms | `context.max-provider-timeout-millis` (10..1000); `timeout()` is clamped to it |
+| Whole collect | 300 ms | `context.total-timeout-millis` (10..2000) |
+
+A provider that is still blocking in `provide()` at its limit is interrupted and only its value is dropped. A provider that returned a future and completes it later on another thread is not interrupted: its value is ignored. The limit counts from the moment the call is queued, so a provider that waited for a free thread has less time, and it can log `timed out after <N> ms` after running for less than `<N>` ms. The other providers that finished are kept, and the request to the model goes ahead. A value that arrives after the limit is discarded and is not cached. When the whole collect reaches `total-timeout-millis`, the block is built from the providers that have finished.
+
+A call that overruns its provider limit logs one INFO line: `Context provider '<id>' timed out after <N> ms and was skipped.` `<N>` is the limit that applied, `min(timeout(), context.max-provider-timeout-millis)`. Per provider there is at most one line per `limits.error-log-cooldown-seconds` (30). Timeouts inside that window are counted, and the next line adds `<K> more timeouts since the last notice.` (`1 more timeout` for one). The line is written on the `nexusai-scheduler` thread, never on the main thread or a region thread. A provider that never started because both threads were busy logs no line. `context.log-timeouts: false` turns the line off; the timeout still counts toward the pause below and in the `/nai status` count.
+
+World context formatting (`NexusAIApi.worldContext`) runs on the same two threads and the same queue. Frequent `worldContext` calls can leave a provider without a free thread. A provider that never gets a thread before its limit is skipped for the request and is not counted as a failure; one that gets a thread late has less time left, can time out, and is then counted and logged as described above. When the queue is full, `worldContext` itself completes with an empty string.
+
+After `/nai reload`, `<K>` is counted again from zero: timeouts that were counted but not yet reported are not reported, and the next timeout logs a line right away, even inside the old cooldown window. Reload also clears the pause and the count in `/nai status`.
+
+After `context.suspend-after-timeouts` (5) timeouts or exceptions in a row, the provider is paused for `context.suspend-seconds` (60) and the log shows `Context provider '<id>' suspended until ...`. An exception is logged as a warning, at most once per `limits.error-log-cooldown-seconds` per provider. `/nai status` lists each provider with its state and a count labelled `timeouts`. The count goes up on every failed call, a timeout or an exception, so a provider that only throws also shows a growing count. A provider that never started because both threads were busy is skipped for that request and does not count against it.
+
+## Lone surrogates in provider and model names
+
+A lone UTF-16 surrogate (half of an emoji) is replaced with U+FFFD in model replies, answers, and the files NexusAI writes. A provider or model name with one can come from a YAML escape such as `\ud83d` in `config.yml` or `prompts.yml`, or from a plugin that passes such a model name through the API (`GenerationRequest.Builder.model` or `PromptDefinition.Builder.model`).
+
+- From `config.yml` (`api.provider`, `api.model`, `providers` keys, `model-queue`, `fallback-model`) and `prompts.yml` (a prompt's `model` and `fallback-model`), the name is loaded with U+FFFD, and one warning per setting is logged on startup and on `/nai reload`, for example `fallback-model.model has a broken character (a lone UTF-16 surrogate). It was replaced with U+FFFD.`
+- A model name from the API is replaced the same way, without a warning.
+- The provider gets the name with U+FFFD, and `usage.yml` and `token-usage.yml` store the same name, so each model keeps one row and one count across restarts. Rows with the same id that an older version wrote twice in `usage.yml` are added together on load.
+
+Use plain names for providers and models: the provider does not know a name with U+FFFD.
+
 ## Validate before you act
 
 Prompt-injection protection and output sanitising reduce risk. They do not make structured answers safe to run as commands. Even when `generateJson` reports `success()` (JSON extracted and checked against your `JsonSchema`), check the values again in your plugin before changing the world: types you expect, ranges, allow-lists for action names, and strings that must not enter a command, a file name, or a path.

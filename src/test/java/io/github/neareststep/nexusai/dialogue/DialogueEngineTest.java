@@ -113,6 +113,15 @@ class DialogueEngineTest {
     }
 
     @Test
+    void aTurnCutByStopIsShutdownNotBusy() {
+        DialogueEngine engine = engine(reply -> {
+            throw new AiRequestException(AiErrorKind.OTHER, 0, io.github.neareststep.nexusai.StopGate.MESSAGE, null);
+        });
+        TalkResult result = engine.talk(request("hi", false, List.of(), settings(), 1_000L, node -> true));
+        assertEquals(TalkCode.SHUTDOWN, result.code());
+    }
+
+    @Test
     void markupOnlyReplyFallsBackWithoutLookingLikeAFailure() {
         DialogueEngine engine = engine(reply -> {
             throw new AiRequestException(AiErrorKind.MARKUP_ONLY, 200, PlayerInput.MARKUP_ONLY, null);
@@ -245,6 +254,24 @@ class DialogueEngineTest {
             memoryEngine.talk(request("m" + i, false, List.of(), wide, 10_000L + i * 10L, node -> true));
         }
         assertEquals(8, userLines.get(userLines.size() - 1));
+    }
+
+    @Test
+    void carriageReturnsInAModelReplyAreStoredAsNewlines() {
+        List<String> remembered = new ArrayList<>();
+        DialogueEngine engine = engine(reply -> {
+            for (DialogueProtocol.MemoryLine line : reply.messages()) {
+                if ("assistant".equals(line.role())) {
+                    remembered.add(line.text());
+                }
+            }
+            return DialogueEngine.ModelReply.text("First\r\nsecond\rthird\u2028fourth");
+        });
+        engine.talk(request("one", false, List.of(), settings(), 1_000L, node -> true));
+        engine.talk(request("two", false, List.of(), settings(), 10_000L, node -> true));
+        assertEquals(List.of("First\nsecond\nthird\u2028fourth"), remembered);
+        assertEquals("plain", DialogueEngine.normalizeLineBreaks("plain"));
+        assertEquals("a\n\nb\n", DialogueEngine.normalizeLineBreaks("a\r\n\rb\r"));
     }
 
     @Test

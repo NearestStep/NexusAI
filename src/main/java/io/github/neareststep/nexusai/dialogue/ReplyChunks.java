@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +32,9 @@ public final class ReplyChunks {
                 if (breakAt > start) {
                     end = breakAt;
                 }
+                // Keep a surrogate pair in one chunk; a limit of 1 then takes the whole pair.
+                int whole = Utf16.boundaryBefore(source, end);
+                end = whole > start ? whole : Utf16.boundaryAfter(source, end);
             }
             String piece = source.substring(start, end).stripLeading();
             if (!piece.isEmpty()) {

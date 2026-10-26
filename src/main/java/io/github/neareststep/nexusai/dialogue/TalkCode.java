@@ -18,5 +18,10 @@ public enum TalkCode {
     BUSY,
     FAILED,
     REPLY,
-    EMPTY
+    EMPTY,
+    /**
+     * NexusAI is stopping. Nothing is shown to the player; the API future fails with
+     * {@link IllegalStateException} {@code "NexusAI is stopping"}.
+     */
+    SHUTDOWN
 }

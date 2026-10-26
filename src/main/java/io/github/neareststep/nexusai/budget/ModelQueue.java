@@ -8,6 +8,7 @@ import io.github.neareststep.nexusai.config.ConfigVersions;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.QueueEntryConfig;
 import io.github.neareststep.nexusai.config.QueueStrategy;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
@@ -202,8 +203,8 @@ public final class ModelQueue {
 
     /** Id of a dedicated fallback slot, {@code provider|model}. */
     public static String fallbackStorageId(String provider, String model) {
-        String left = provider == null ? "" : provider;
-        String right = model == null ? "" : model;
+        String left = provider == null ? "" : Utf16.replaceLoneSurrogates(provider);
+        String right = model == null ? "" : Utf16.replaceLoneSurrogates(model);
         return left + "|" + right;
     }
 
@@ -462,7 +463,7 @@ public final class ModelQueue {
 
     public synchronized int providerRequests(String provider) {
         roll(clock.getAsLong());
-        AtomicInteger count = providerCounts.get(provider);
+        AtomicInteger count = providerCounts.get(Utf16.replaceLoneSurrogates(provider));
         return count == null ? 0 : count.get();
     }
 
@@ -811,14 +812,14 @@ public final class ModelQueue {
         yaml.set("config-version", ConfigVersions.CURRENT);
         yaml.set("day", day.toString());
         for (Map.Entry<String, AtomicInteger> entry : providerCounts.entrySet()) {
-            yaml.set("providers." + entry.getKey(), entry.getValue().get());
+            yaml.set("providers." + Utf16.replaceLoneSurrogates(entry.getKey()), entry.getValue().get());
         }
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Slot slot : slots) {
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", slot.storageId());
-            row.put("provider", slot.provider);
-            row.put("model", slot.model);
+            row.put("id", Utf16.replaceLoneSurrogates(slot.storageId()));
+            row.put("provider", Utf16.replaceLoneSurrogates(slot.provider));
+            row.put("model", Utf16.replaceLoneSurrogates(slot.model));
             row.put("requests", slot.requests.get());
             row.put("rejected", slot.rejected.get());
             rows.add(row);
@@ -830,9 +831,9 @@ public final class ModelQueue {
             List<Map<String, Object>> fallbackRows = new ArrayList<>();
             for (Slot slot : fallbackSlots.values()) {
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", slot.storageId());
-                row.put("provider", slot.provider);
-                row.put("model", slot.model);
+                row.put("id", Utf16.replaceLoneSurrogates(slot.storageId()));
+                row.put("provider", Utf16.replaceLoneSurrogates(slot.provider));
+                row.put("model", Utf16.replaceLoneSurrogates(slot.model));
                 row.put("requests", slot.requests.get());
                 row.put("rejected", slot.rejected.get());
                 fallbackRows.add(row);
@@ -932,12 +933,13 @@ public final class ModelQueue {
             }
             for (Slot slot : slots) {
                 if (slot.storageId().equals(String.valueOf(id))) {
-                    slot.requests.set(requests);
-                    slot.rejected.set(rejected);
-                    if (slot.dailyLimit > 0 && requests >= slot.dailyLimit) {
+                    // Rows with the same id (an older version could write two) are summed.
+                    int total = slot.requests.addAndGet(requests);
+                    slot.rejected.addAndGet(rejected);
+                    if (slot.dailyLimit > 0 && total >= slot.dailyLimit) {
                         holdUntilMidnight(slot, clock.getAsLong());
                     }
-                    if (slot.dailyLimit > 0 && requests * 100L >= slot.dailyLimit * 80L) {
+                    if (slot.dailyLimit > 0 && total * 100L >= slot.dailyLimit * 80L) {
                         slot.warned = true;
                     }
                 }
@@ -962,8 +964,9 @@ public final class ModelQueue {
                 rejected = Math.max(0, number.intValue());
             }
             Slot slot = fallbackSlot(String.valueOf(provider), String.valueOf(model));
-            slot.requests.set(requests);
-            slot.rejected.set(rejected);
+            // Rows with the same provider and model (an older version could write two) are summed.
+            slot.requests.addAndGet(requests);
+            slot.rejected.addAndGet(rejected);
         }
     }
 
@@ -1337,7 +1340,9 @@ public final class ModelQueue {
         return null;
     }
 
-    private Slot fallbackSlot(String provider, String model) {
+    private Slot fallbackSlot(String rawProvider, String rawModel) {
+        String provider = Utf16.replaceLoneSurrogates(rawProvider);
+        String model = Utf16.replaceLoneSurrogates(rawModel);
         String id = provider + "|" + model;
         Slot existing = fallbackSlots.get(id);
         if (existing != null) {

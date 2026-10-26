@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "io.github.neareststep"
-version = "1.3.0"
+version = "1.3.1"
 
 java {
     toolchain {
@@ -34,24 +34,26 @@ dependencies {
     // 1.20.6 is the oldest server this jar runs on. Newer Paper APIs are class file 69
     // (Java 25) and would not load on Java 21. Biome and other calls stay on the 1.20.6 shape.
     compileOnly("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    compileOnly("me.clip:placeholderapi:2.11.6")
+    compileOnly("me.clip:placeholderapi:2.12.3")
 
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
     implementation("com.github.ben-manes.caffeine:caffeine:3.2.0")
 
     testImplementation("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    testImplementation("me.clip:placeholderapi:2.11.6")
+    testImplementation("me.clip:placeholderapi:2.12.3")
     testImplementation(platform("org.junit:junit-bom:5.12.1"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     "loadtestCompileOnly"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
-    "loadtestCompileOnly"("me.clip:placeholderapi:2.11.6")
+    "loadtestCompileOnly"("me.clip:placeholderapi:2.12.3")
     "loadtestCompileOnly"(sourceSets.main.get().output)
     "loadtestTestImplementation"(platform("org.junit:junit-bom:5.12.1"))
     "loadtestTestImplementation"("org.junit.jupiter:junit-jupiter")
     "loadtestTestImplementation"("io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT")
     "loadtestTestRuntimeOnly"("org.junit.platform:junit-platform-launcher")
+    // LoadDriverPluginWiringTest loads the context providers, which implement the NexusAI API.
+    "loadtestTestRuntimeOnly"(sourceSets.main.get().output)
 }
 
 tasks {
@@ -131,6 +133,29 @@ tasks {
     named<JavaCompile>("compileLoadtestTestJava") {
         options.encoding = "UTF-8"
         options.release.set(21)
+    }
+
+    // Bukkit's YAML comes from the server: SnakeYAML 2.2 on Paper 1.20.6 to 1.21.x and Folia,
+    // 2.6 on Paper 26.2. These runs repeat the unit tests on each, so a dump that one of them
+    // rejects fails check.
+    for ((suffix, snakeYaml) in listOf("22" to "2.2", "26" to "2.6")) {
+        val runtime = configurations.testRuntimeClasspath.get().copyRecursive().apply {
+            resolutionStrategy.force("org.yaml:snakeyaml:$snakeYaml")
+        }
+        val run = register<Test>("testSnakeYaml$suffix") {
+            group = "verification"
+            description = "Unit tests with SnakeYAML $snakeYaml."
+            testClassesDirs = sourceSets.test.get().output.classesDirs
+            classpath = sourceSets.test.get().output + sourceSets.main.get().output + runtime
+            useJUnitPlatform()
+            systemProperty("nexusai.test.snakeyaml", snakeYaml)
+            minHeapSize = System.getenv("NEXUS_TEST_MIN_HEAP") ?: "512m"
+            maxHeapSize = System.getenv("NEXUS_TEST_MAX_HEAP") ?: "1g"
+            shouldRunAfter(test)
+        }
+        check {
+            dependsOn(run)
+        }
     }
 
     register<Test>("loadtestTest") {

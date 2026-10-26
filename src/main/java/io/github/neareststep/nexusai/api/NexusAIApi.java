@@ -106,6 +106,11 @@ public final class NexusAIApi {
         return registry == null ? List.of() : registry.ids();
     }
 
+    /**
+     * One dialogue turn. The future completes exceptionally with {@link IllegalStateException}
+     * {@code "NexusAI is not enabled"} when NexusAI is not enabled, and with
+     * {@code "NexusAI is stopping"} when the server stops before the reply arrives.
+     */
     public static CompletableFuture<String> talk(Player player, String id, String message) {
         DialogueService current = service;
         if (current == null) {

@@ -9,6 +9,7 @@ import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.json.StructuredOutputSupport;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -541,7 +542,7 @@ public final class OpenAiProvider implements AiProvider, ChatCaller {
         if (body == null) {
             return "";
         }
-        return body.length() <= 200 ? body : body.substring(0, 200) + "...";
+        return body.length() <= 200 ? body : Utf16.head(body, 200) + "...";
     }
 
     private static String blankToNull(String value) {

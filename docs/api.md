@@ -2,7 +2,7 @@
 
 `NexusAIApi.API_VERSION` is 3. New methods are additive. Compile against the plugin jar and set `softdepend: [NexusAI]`. There is no separate API artifact.
 
-A manual Groq check on 2026-10-09 is recorded in Structured JSON. OpenRouter, OpenAI, and Ollama are not recorded.
+Manual Groq and Ollama checks on 2026-10-26 are recorded in Structured JSON. OpenRouter and OpenAI are not recorded.
 
 ## Text generation
 
@@ -30,7 +30,7 @@ NexusAIApi.generate(plugin, GenerationRequest.prompt("quests:intro")
 
 ## World context
 
-`NexusAIApi.worldContext(plugin, player)` collects player name, world, block coordinates, inventory materials, nearby block counts, and biome into one compact prompt block in a single call. Call from any thread. World reads run on the player's region thread (Paper main thread, Folia region owner) with the caps in `world-context.*`. Sorting and formatting run off that thread on `nexusai-context-*`. Within `world-context.cooldown-millis` (default 250) a second call for the same player returns the last block without a fresh region read. The future completes with `""` when `world-context.enabled` is false, NexusAI is not enabled, or the player is gone. It does not complete exceptionally for those cases. Do not join the future on the main thread or a region thread.
+`NexusAIApi.worldContext(plugin, player)` collects player name, world, block coordinates, inventory materials, nearby block counts, and biome into one compact prompt block in a single call. Call from any thread. World reads run on the player's region thread (Paper main thread, Folia region owner) with the caps in `world-context.*`. When the caller already owns that region, the read runs inside the caller's current tick. Costs and limits are in [Limitations and best practices](limitations.md#world-context-cost). Sorting and formatting run off that thread on `nexusai-context-*`. Within `world-context.cooldown-millis` (default 250) a second call for the same player returns the last block without a fresh region read, even when it passes different `WorldContextLimits` (the saved block is kept per player, not per set of limits). The saved block is shared by every plugin that calls `worldContext` for that player and is cleared by `/nai reload`. The future completes with `""` when `world-context.enabled` is false, NexusAI is not enabled, or the player is gone. It does not complete exceptionally for those cases. Do not join the future on the main thread or a region thread.
 
 Optional overrides: `NexusAIApi.worldContext(plugin, player, WorldContextLimits.builder().radius(1).maxBlocks(27).build())`. Empty fields keep the config values. Cooldown is config-only.
 
@@ -125,18 +125,19 @@ NexusAIApi.generateJson(plugin, GenerationRequest.template("Invent a short fetch
         });
 ```
 
-Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400. The Groq rows below are a manual run on 2026-10-09. OpenRouter, OpenAI, and Ollama are not recorded.
+Live checks against Groq, OpenRouter, Ollama, and OpenAI are not part of the default build. They run only when `NEXUSAI_LIVE_JSON=true`. The quest schema above is the one those checks use. A provider that rejects `json_schema` is covered by the `auto` downgrade, which the mock exercises with HTTP 400. The Groq and Ollama rows below are a manual run on 2026-10-26 (Ollama on a CPU-only host). OpenRouter and OpenAI are not recorded because no keys were available.
 
-| Provider | Model | structured-output | Result (1.2.0, 2026-10-09) |
+| Provider | Model | structured-output | Result (1.3.1, 2026-10-26) |
 |---|---|---|---|
 | Groq | openai/gpt-oss-20b | auto | `json_schema` with `strict: true` accepted; valid JSON on the first attempt. Usage reported (incl. reasoning tokens), no cost field. |
-| Groq | openai/gpt-oss-20b | json-object / prompt | Works. `json-object` needed one repair retry in our run. |
+| Groq | openai/gpt-oss-20b | json-object / prompt | Works. Valid JSON on the first attempt in this run, no repair retry. |
 | Groq | qwen/qwen3.8-27b | auto | `json_schema` with `strict: true` accepted; valid JSON. |
-| Groq | allam-2-7b | auto | 400 "does not support response format `json_schema`" → downgraded to `json_object` (logged once, kept until `/nai reload`). Output often fails the schema; use a stronger model for JSON. |
+| Groq | allam-2-7b | auto | 400 "does not support response format `json_schema`" → downgraded to `json_object` (logged once, kept until `/nai reload`). The reply passed the schema in this run, but its values were weak; use a stronger model for JSON. |
 | Groq | allam-2-7b | json-schema | 400, no downgrade in manual mode (expected). |
-| OpenRouter | — | — | Not recorded. |
-| OpenAI | — | — | Not recorded. |
-| Ollama | — | — | Not recorded. |
+| OpenRouter | — | — | Not recorded (no key). |
+| OpenAI | — | — | Not recorded (no key). |
+| Ollama | qwen2.5:7b | auto | `json_schema` accepted; valid JSON on the first attempt. Usage reported, no cost field. |
+| Ollama | qwen2.5:7b | prompt | Works. Valid JSON on the first attempt. |
 
 Events are created only when that event's handler list has listeners. With none registered, a request is unchanged, except that a character-action task which starts after the 5 second wait does not run the command.
 

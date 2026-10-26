@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.time.Duration;
 
 /**
@@ -8,6 +10,10 @@ import java.time.Duration;
  * <p>
  * Provider, model, usage, and attempt fields are empty when the reply did not come from a model
  * call. The two-argument constructor keeps that empty shape.
+ * <p>
+ * A lone UTF-16 surrogate in {@code text} (a provider can send an escaped half of an emoji) is
+ * replaced with U+FFFD, so the cache, the answer pool, and the files they are saved to never get
+ * one. Text without one is kept as the same instance.
  */
 public record ModelAnswer(
         String text,
@@ -45,6 +51,7 @@ public record ModelAnswer(
     }
 
     public ModelAnswer {
+        text = Utf16.replaceLoneSurrogates(text);
         providerId = providerId == null ? "" : providerId;
         model = model == null ? "" : model;
         if (usage == null) {

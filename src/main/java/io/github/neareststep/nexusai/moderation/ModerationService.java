@@ -18,6 +18,7 @@ import io.github.neareststep.nexusai.config.PluginConfig;
 import io.github.neareststep.nexusai.config.ProviderSettings;
 import io.github.neareststep.nexusai.config.SecretMask;
 import io.github.neareststep.nexusai.event.EventDispatcher;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -358,7 +359,7 @@ public final class ModerationService {
             return "";
         }
         String flat = text.replace('\r', ' ').replace('\n', ' ').trim();
-        return flat.length() <= 200 ? flat : flat.substring(0, 200) + "...";
+        return flat.length() <= 200 ? flat : Utf16.head(flat, 200) + "...";
     }
 
     public enum Skip {

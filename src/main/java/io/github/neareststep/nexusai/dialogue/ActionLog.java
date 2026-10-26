@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.dialogue;
 
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.LogRedaction;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.function.Supplier;
 import java.util.logging.Logger;
@@ -62,10 +63,11 @@ public final class ActionLog {
         }
     }
 
+    /** A lone UTF-16 surrogate becomes U+FFFD: UTF-8 cannot encode it and the line would be lost. */
     private static String sanitize(String value) {
         if (value == null) {
             return "";
         }
-        return value.replace('\n', ' ').replace('\r', ' ').trim();
+        return Utf16.replaceLoneSurrogates(value.replace('\n', ' ').replace('\r', ' ').trim());
     }
 }

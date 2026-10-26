@@ -1,7 +1,10 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 /**
- * Double-quoted YAML scalars with no line wrapping. Newlines are escaped as {@code \n}.
+ * Double-quoted YAML scalars with no line wrapping. Newlines are escaped as {@code \n}. A lone
+ * UTF-16 surrogate is written as U+FFFD: UTF-8 cannot encode it, so writing the file would fail.
  */
 public final class YamlStrings {
 
@@ -20,7 +23,16 @@ public final class YamlStrings {
                 case '\n' -> out.append("\\n");
                 case '\r' -> out.append("\\r");
                 case '\t' -> out.append("\\t");
-                default -> out.append(c);
+                default -> {
+                    if (!Character.isSurrogate(c)) {
+                        out.append(c);
+                    } else if (Character.isHighSurrogate(c) && i + 1 < text.length()
+                            && Character.isLowSurrogate(text.charAt(i + 1))) {
+                        out.append(c).append(text.charAt(++i));
+                    } else {
+                        out.append(Utf16.REPLACEMENT);
+                    }
+                }
             }
         }
         out.append('"');

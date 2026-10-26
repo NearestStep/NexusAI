@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.ai;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.util.Arrays;
 import java.util.regex.Pattern;
 
@@ -48,7 +50,7 @@ public final class AnswerFormatter {
             if (maxChars == 1) {
                 text = "…";
             } else {
-                text = text.substring(0, maxChars - 1).stripTrailing() + "…";
+                text = Utf16.head(text, maxChars - 1).stripTrailing() + "…";
             }
         }
         return text;

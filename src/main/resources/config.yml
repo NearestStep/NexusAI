@@ -22,6 +22,10 @@ config-version: 2
 # Player-facing command language (lang/<locale>.yml). Missing keys fall back to en.
 locale: en
 
+# Startup console banner. true (default) prints the full brand banner.
+# false prints one short line instead: NexusAI enabled. Ready in <N> ms
+startup-banner: true
+
 api:
   # openai | groq | cerebras | gemini | deepseek | ollama | openrouter
   provider: openai
@@ -379,6 +383,10 @@ dialogue:
   memory-max-chars: 8000
   # Drop a saved transcript after this many hours without a new line. 0 keeps it.
   memory-expiry-hours: 168
+  # One INFO line when the server stops while the first load of dialogue-memory.yml is still
+  # running: the stop budget, the time used, and how many characters were appended or were already
+  # in the file. false turns it off.
+  log-stop-budget: true
   # End a session after this many seconds without a player line. 0 disables the timer.
   session-timeout-seconds: 120
   # End a session when the player moves farther than this many blocks from where it started. 0 disables it.
@@ -427,6 +435,9 @@ context:
   refresh-seconds: 30                # 1..3600, snapshot age for cached_ placeholders
   suspend-after-timeouts: 5          # 1..100
   suspend-seconds: 60                # 1..3600
+  # One INFO line when a provider overruns its timeout, at most once per provider per
+  # limits.error-log-cooldown-seconds. false keeps single timeouts out of the log.
+  log-timeouts: true
 
 # World snapshot for NexusAIApi.worldContext (player, inventory, nearby blocks, biome).
 # Off by default. When enabled, world reads run on the player's region thread with the

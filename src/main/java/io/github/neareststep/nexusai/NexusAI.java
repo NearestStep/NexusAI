@@ -78,7 +78,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -125,6 +124,7 @@ public final class NexusAI extends JavaPlugin {
     @Override
     public void onEnable() {
         long startedNanos = System.nanoTime();
+        StopGate.open();
         if (!getDataFolder().exists() && !getDataFolder().mkdirs() && !getDataFolder().isDirectory()) {
             getLogger().warning("Could not create the NexusAI data folder.");
         }
@@ -156,6 +156,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -201,12 +202,22 @@ public final class NexusAI extends JavaPlugin {
         registerModerationListener();
 
         long readyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
-        ConsoleBanner.print(ConsoleBanner.Snapshot.from(this, pluginConfig, readyMs));
+        ConsoleBanner.announce(pluginConfig.startupBanner(),
+                ConsoleBanner.Snapshot.from(this, pluginConfig, readyMs), getLogger());
     }
 
     @Override
     public void onDisable() {
+        // Paper already reports the plugin disabled here, so no reply can be scheduled to its
+        // reader any more. Everything still waiting for a provider is cancelled at once.
+        StopGate.close();
         unregisterPlaceholderExpansion();
+        if (aiHttpClient != null) {
+            StopGate.dropped(aiHttpClient.close());
+        }
+        if (generationService != null) {
+            generationService.shutdown();
+        }
         if (dialogueService != null) {
             dialogueService.shutdown();
             NexusAIApi.bind(null);
@@ -214,13 +225,18 @@ public final class NexusAI extends JavaPlugin {
         }
         stopRuntimeServices(true);
         if (generationService != null) {
-            generationService.shutdown();
             NexusAIApi.bindGeneration(null);
             generationService = null;
         }
         EventDispatcher.install(null);
         closeSharedHttpClient();
-        shutdownExecutor(httpExecutor);
+        // Sends were cancelled above, so workers finish fast. Bounded so a provider that
+        // ignores cancel cannot hold stop.
+        shutdownExecutor(httpExecutor, HTTP_STOP_MILLIS);
+        String lost = StopGate.takeSummary();
+        if (lost != null) {
+            getLogger().info(lost);
+        }
         if (tokenStore != null) {
             tokenStore.flush();
         }
@@ -267,6 +283,7 @@ public final class NexusAI extends JavaPlugin {
         logMissingEnvVars();
         logKeyFileWarnings();
         logQueueStrategy();
+        logStartupBannerWarning();
         logStructuredOutput();
         logHttpLimitWarning();
         logPluginApiWarnings();
@@ -301,6 +318,7 @@ public final class NexusAI extends JavaPlugin {
                 Duration.ofSeconds(pluginConfig.getErrorLogCooldownSeconds()),
                 pluginConfig::configuredSecrets);
         this.aiHttpClient = new AiHttpClient(aiCache, provider, pluginConfig, gate, diagnostics, getLogger());
+        this.aiHttpClient.completionExecutor(httpExecutor);
         this.aiPool = new AiPool(pluginConfig.allowMarkup());
         PoolStore poolStore = new PoolStore(
                 new File(getDataFolder(), "pool.yml"),
@@ -666,6 +684,13 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
+    private void logStartupBannerWarning() {
+        String warning = pluginConfig.startupBannerWarning();
+        if (warning != null && !warning.isBlank()) {
+            getLogger().warning(warning);
+        }
+    }
+
     private void logQueueStrategy() {
         String warning = pluginConfig.modelQueueStrategyWarning();
         if (warning != null && !warning.isBlank()) {
@@ -675,6 +700,9 @@ public final class NexusAI extends JavaPlugin {
 
     private void logStructuredOutput() {
         for (String warning : pluginConfig.structuredOutputWarnings()) {
+            getLogger().warning(warning);
+        }
+        for (String warning : pluginConfig.identifierWarnings()) {
             getLogger().warning(warning);
         }
     }
@@ -712,13 +740,40 @@ public final class NexusAI extends JavaPlugin {
         }
     }
 
-    private static ScheduledExecutorService createScheduler() {
+    static ScheduledExecutorService createScheduler() {
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, "nexusai-scheduler");
             thread.setDaemon(true);
             return thread;
         };
-        return Executors.newSingleThreadScheduledExecutor(factory);
+        java.util.concurrent.ScheduledThreadPoolExecutor executor =
+                new java.util.concurrent.ScheduledThreadPoolExecutor(1, factory);
+        // On disable, retries and refills that were only scheduled do not run: stop would
+        // otherwise wait for them. Saves are flushed by the services before this shuts down.
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        executor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
+
+    /** Total wait for the HTTP workers on disable. */
+    static final long HTTP_STOP_MILLIS = 600L;
+
+    static void shutdownExecutor(ExecutorService executor, long millis) {
+        if (executor == null) {
+            return;
+        }
+        executor.shutdown();
+        try {
+            long half = Math.max(1L, millis / 2);
+            if (!executor.awaitTermination(half, TimeUnit.MILLISECONDS)) {
+                executor.shutdownNow();
+                executor.awaitTermination(half, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static void shutdownExecutor(ExecutorService executor) {

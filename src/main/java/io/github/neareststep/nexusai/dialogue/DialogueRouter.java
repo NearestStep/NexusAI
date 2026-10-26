@@ -195,6 +195,10 @@ public final class DialogueRouter {
                     }
                     return spokenReply(current, call, key, sent, toolsDropped, admissionKey, keepPause);
                 } catch (AiRequestException error) {
+                    if (DialogueTransport.isStopping(error)) {
+                        // Plugin disable: not a provider failure. No log, pause, or row cooldown.
+                        throw error;
+                    }
                     last = error.withPausedProvider(choice.provider());
                     now = clock.getAsLong();
                     if (HttpPool.isQueueFull(error)) {
@@ -426,6 +430,9 @@ public final class DialogueRouter {
                 }
                 return spokenReply(current, call, key, sent, sent.unsupportedTools(), admissionKey, keepPause);
             } catch (AiRequestException error) {
+                if (DialogueTransport.isStopping(error)) {
+                    throw error;
+                }
                 AiRequestException tagged = error.withPausedProvider(plan.provider());
                 if (last != null) {
                     for (String paused : AiRequestException.pausedProvidersOf(last)) {

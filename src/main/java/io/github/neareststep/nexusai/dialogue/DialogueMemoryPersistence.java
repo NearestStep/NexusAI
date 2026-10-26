@@ -1,6 +1,6 @@
 package io.github.neareststep.nexusai.dialogue;
 
-import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.config.LogRedaction;
 
 import java.io.File;
 import java.util.List;
@@ -33,6 +33,12 @@ final class DialogueMemoryPersistence {
      * {@link #appendBudgetMillis(long)}.
      */
     static volatile long shutdownAppendBudgetMillis = 5_000L;
+
+    /**
+     * Runs on the stop thread when stop starts to wait, inside the stop budget, for a load that is
+     * still running. Tests release that load here. A null hook is the production path.
+     */
+    static volatile Runnable beforeLoadWait;
 
     /**
      * Stop append wait after the load-grace join. {@code fileBytes} adds one millisecond per 8 KiB,
@@ -223,14 +229,21 @@ final class DialogueMemoryPersistence {
             if (pending != null && pending.isAlive()) {
                 File target = file.get();
                 long bytes = target != null && target.isFile() ? target.length() : 0L;
-                long deadline = System.nanoTime()
-                        + appendBudgetMillis(bytes) * 1_000_000L;
-                MemoryStore.LiveSplice splice = memory.spliceForStop(
-                        target, logger, summaries, secretList(), scan, deadline);
-                if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
-                    awaitLoaderAndSave(pending, deadline, summaries);
-                } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
-                    memory.forbidLoaderPublish();
+                long budgetMillis = appendBudgetMillis(bytes);
+                long started = System.nanoTime();
+                long deadline = started + budgetMillis * 1_000_000L;
+                try {
+                    MemoryStore.LiveSplice splice = memory.spliceForStop(
+                            target, logger, summaries, secretList(), scan, deadline);
+                    if (splice == MemoryStore.LiveSplice.WAIT_FOR_LOAD) {
+                        awaitLoaderAndSave(pending, deadline, summaries);
+                    } else if (splice == MemoryStore.LiveSplice.GAVE_UP) {
+                        memory.forbidLoaderPublish();
+                    }
+                } finally {
+                    logBudgetStop(budgetMillis, bytes, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                            memory.stopWrittenCount(), memory.stopAlreadyInFileCount(),
+                            memory.stopHeldCount(summaries));
                 }
                 return;
             }
@@ -245,6 +258,34 @@ final class DialogueMemoryPersistence {
             }
             MemoryStore.abandonScan(started);
         }
+    }
+
+    /**
+     * One INFO line when stop took the budget path, that is, the first off-to-on load was still
+     * running. A normal stop never reaches this. {@code dialogue.log-stop-budget: false} turns it off.
+     * Runs on the thread that calls stop, after the budget work, so it adds no wait of its own.
+     */
+    private void logBudgetStop(
+            long budgetMillis, long fileBytes, long usedMillis, int appended, int alreadyInFile, int held) {
+        DialogueSettings current = settings.get();
+        if (logger == null || (current != null && !current.logStopBudget())) {
+            return;
+        }
+        logger.info(budgetStopLine(budgetMillis, fileBytes, usedMillis, appended, alreadyInFile, held));
+    }
+
+    /**
+     * {@code appended} counts characters stop wrote to the file. {@code alreadyInFile} counts
+     * characters held in memory that the file already had, so they needed no write and are not lost.
+     */
+    static String budgetStopLine(
+            long budgetMillis, long fileBytes, long usedMillis, int appended, int alreadyInFile, int held) {
+        long kib = (Math.max(0L, fileBytes) + 1023L) / 1024L;
+        return "Stop ran during the first dialogue memory load and used the stop budget: "
+                + budgetMillis + " ms for a " + kib + " KiB dialogue-memory.yml, " + usedMillis + " ms used. "
+                + MemoryStore.dialogueCharacters(held)
+                + " held in memory: appended " + appended
+                + ", already in file " + alreadyInFile + ".";
     }
 
     /**
@@ -265,6 +306,10 @@ final class DialogueMemoryPersistence {
             memory.warnStop(logger, summaries, MemoryStore.StopSkip.BUDGET);
             abandonLoad(pending);
             return;
+        }
+        Runnable hook = beforeLoadWait;
+        if (hook != null) {
+            hook.run();
         }
         try {
             pending.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(left)));
@@ -361,11 +406,11 @@ final class DialogueMemoryPersistence {
         return values == null ? List.of() : List.copyOf(values);
     }
 
+    /**
+     * A save that threw. It is a warning, like a write that fails, so a save that keeps failing is
+     * not silent. The message is masked and holds no dialogue text.
+     */
     private void logSkipped(Throwable thrown) {
-        if (logger == null) {
-            return;
-        }
-        logger.fine("Skipped dialogue memory save: "
-                + SecretMask.redactUrl(String.valueOf(thrown.getMessage()), secretList()));
+        LogRedaction.warning(logger, "Skipped dialogue memory save", thrown, secretList());
     }
 }

@@ -18,6 +18,7 @@ public final class ContextSettings {
     private final int refreshSeconds;
     private final int suspendAfterTimeouts;
     private final int suspendSeconds;
+    private final boolean logTimeouts;
 
     public ContextSettings(
             boolean enabled,
@@ -29,6 +30,21 @@ public final class ContextSettings {
             int suspendAfterTimeouts,
             int suspendSeconds
     ) {
+        this(enabled, maxProviderTimeoutMillis, totalTimeoutMillis, maxCharsPerProvider, maxChars,
+                refreshSeconds, suspendAfterTimeouts, suspendSeconds, true);
+    }
+
+    public ContextSettings(
+            boolean enabled,
+            int maxProviderTimeoutMillis,
+            int totalTimeoutMillis,
+            int maxCharsPerProvider,
+            int maxChars,
+            int refreshSeconds,
+            int suspendAfterTimeouts,
+            int suspendSeconds,
+            boolean logTimeouts
+    ) {
         this.enabled = enabled;
         this.maxProviderTimeoutMillis = maxProviderTimeoutMillis;
         this.totalTimeoutMillis = totalTimeoutMillis;
@@ -37,10 +53,11 @@ public final class ContextSettings {
         this.refreshSeconds = refreshSeconds;
         this.suspendAfterTimeouts = suspendAfterTimeouts;
         this.suspendSeconds = suspendSeconds;
+        this.logTimeouts = logTimeouts;
     }
 
     public static ContextSettings defaults() {
-        return new ContextSettings(true, 200, 300, 200, 600, 30, 5, 60);
+        return new ContextSettings(true, 200, 300, 200, 600, 30, 5, 60, true);
     }
 
     public static ContextSettings read(FileConfiguration config) {
@@ -55,7 +72,8 @@ public final class ContextSettings {
                 clamp(config.getInt("context.max-chars", 600), 50, 4000),
                 clamp(config.getInt("context.refresh-seconds", 30), 1, 3600),
                 clamp(config.getInt("context.suspend-after-timeouts", 5), 1, 100),
-                clamp(config.getInt("context.suspend-seconds", 60), 1, 3600)
+                clamp(config.getInt("context.suspend-seconds", 60), 1, 3600),
+                config.getBoolean("context.log-timeouts", true)
         );
     }
 
@@ -93,6 +111,11 @@ public final class ContextSettings {
 
     public int suspendSeconds() {
         return suspendSeconds;
+    }
+
+    /** {@code context.log-timeouts}: one INFO line per provider timeout, at most once per error-log cooldown. */
+    public boolean logTimeouts() {
+        return logTimeouts;
     }
 
     private static int clamp(int value, int min, int max) {

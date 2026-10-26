@@ -17,7 +17,10 @@ that cannot run fails the script.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import http.client
+import io
 import json
 import os
 import re
@@ -29,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
 import zipfile
@@ -39,6 +43,9 @@ PAPI_URL = (
     "https://github.com/PlaceholderAPI/PlaceholderAPI/releases/download/"
     "2.12.3/PlaceholderAPI-2.12.3.jar"
 )
+PAPI_NAME = "PlaceholderAPI-2.12.3.jar"
+# sha256 of PlaceholderAPI-2.12.3.jar, the digest GitHub publishes for that release asset.
+PAPI_SHA256 = "fde03259f5af6938f3c33eeb4d814000a1adabf1d2304ce14970be81f609a437"
 FILL = "https://fill.papermc.io/v3/projects/paper/versions/{version}/builds"
 FILL_PROJECT = "https://fill.papermc.io/v3/projects/{project}/versions/{version}/builds"
 USER_AGENT = "NexusAI-smoke/1.0"
@@ -82,6 +89,12 @@ def main() -> int:
         choices=("auto", "startup", "full"),
         help="Folia only. auto runs full checks when plugin.yml sets folia-supported: true",
     )
+    parser.add_argument(
+        "--startup-banner",
+        default=os.environ.get("STARTUP_BANNER", ""),
+        choices=("", "true", "false"),
+        help="startup-banner value written into the smoke config; empty keeps the plugin default (true)",
+    )
     parser.add_argument("--self-check", action="store_true", help="check smoke helpers and exit")
     args = parser.parse_args()
     if args.self_check:
@@ -107,7 +120,8 @@ def main() -> int:
     print(f"server directory {work}")
     try:
         paper = download_paper(args.version, work / "paper.jar")
-        download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
+        seed_paperclip(work / "paper.jar", work)
+        install_papi(work / "plugins")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         check_api = False
         if args.driver_dir.strip():
@@ -125,12 +139,14 @@ def main() -> int:
             check_api = True
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         server_port = free_port()
         rcon_port = free_port()
         write_server(work, server_port, rcon_port)
-        return boot(work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, mock)
+        return boot(
+            work, args.version, paper, rcon_port, mock_port, args.timeout, check_api, mock,
+            startup_banner=args.startup_banner)
     except Exception as error:
         print(f"SMOKE FAIL {args.version}: {error}", file=sys.stderr)
         return 1
@@ -174,7 +190,7 @@ def class_major(jar: Path, entry: str) -> int:
 
 
 def download_paper(version: str, destination: Path) -> dict:
-    payload = json.loads(fetch(FILL.format(version=version)))
+    payload = fetch_listing(FILL.format(version=version))
     builds = payload["builds"] if isinstance(payload, dict) else payload
     stable = [build for build in builds if build.get("channel") == "STABLE"]
     if not stable:
@@ -184,27 +200,291 @@ def download_paper(version: str, destination: Path) -> dict:
         raise RuntimeError(f"refusing non-stable build {chosen}")
     download_info = chosen["downloads"]["server:default"]
     print(f"Paper {version} stable build {chosen['id']} ({download_info['name']})")
-    download(download_info["url"], destination)
+    download(download_info["url"], destination, sha256=fill_sha256(download_info))
     return {"id": chosen["id"], "name": download_info["name"]}
 
 
-def download(url: str, destination: Path) -> None:
+def fill_sha256(download_info: dict) -> str | None:
+    """The sha256 the Paper API publishes for a download, or None when it has none."""
+    checksums = download_info.get("checksums") or {}
+    value = checksums.get("sha256") if isinstance(checksums, dict) else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    return None
+
+
+DOWNLOAD_ATTEMPTS = 5
+
+
+def retry_pause(attempt: int) -> int:
+    """Seconds to wait after a failed attempt: 2, 4, 8, 16, then 30 at most."""
+    return min(30, 2 ** max(1, attempt))
+
+
+def cache_dir() -> Path:
+    """Download cache. NEXUSAI_SMOKE_CACHE overrides the default under the temp directory."""
+    configured = os.environ.get("NEXUSAI_SMOKE_CACHE", "").strip()
+    return Path(configured) if configured else Path(tempfile.gettempdir()) / "nexusai-smoke-cache"
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download(url: str, destination: Path, sha256: str | None = None, name: str | None = None,
+             attempts: int = DOWNLOAD_ATTEMPTS) -> None:
+    """Copy url to destination through the cache.
+
+    With sha256 the cache entry is cache/sha256/<hash>, a cached or downloaded file is checked
+    against it, and a mismatch deletes the file and downloads again, up to attempts times.
+    A file dropped in the cache under its own name (for example cache/mojang_26.2.jar) is used
+    when its hash matches. Without sha256 the entry is keyed by the URL, its sha256 is saved
+    beside it in <entry>.sha256, and an entry without that file or with a different hash is
+    deleted and downloaded again. A .jar without sha256 must also open as a zip archive whose
+    entries pass their CRC check. A download shorter than its Content-Length is rejected. A
+    transport error (OSError, or an http.client error such as IncompleteRead) is retried, and
+    the partial file is always removed.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    cache = Path(tempfile.gettempdir()) / "nexusai-smoke-cache" / digest
+    root = cache_dir()
+    check_zip = not sha256 and destination.name.endswith(".jar")
+    if sha256:
+        sha256 = sha256.lower()
+        cache = root / "sha256" / sha256
+        placed = root / name if name else None
+        if not _cached_ok(cache, sha256) and placed is not None and placed.is_file():
+            if file_sha256(placed) == sha256:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(placed, cache)
+                print(f"cache: using pre-placed {placed.name}")
+            else:
+                print(f"cache: pre-placed {placed.name} does not match sha256 {sha256}, ignored")
+    else:
+        cache = root / hashlib.sha256(url.encode("utf-8")).hexdigest()
     cache.parent.mkdir(parents=True, exist_ok=True)
-    if not cache.is_file() or cache.stat().st_size < 1000:
-        print(f"download {url}")
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(request, timeout=120) as response, cache.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
-    shutil.copy2(cache, destination)
+    if sha256 and _cached_ok(cache, sha256):
+        shutil.copy2(cache, destination)
+        _report_verified(destination, sha256, "cache, published sha256")
+        return
+    if not sha256 and _cached_by_url_ok(cache, check_zip):
+        shutil.copy2(cache, destination)
+        _report_verified(destination, _sidecar(cache).read_text(encoding="utf-8").strip(), "cache, saved sha256")
+        return
+    problem = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        partial = cache.with_name(cache.name + ".part")
+        try:
+            print(f"download {url}" + (f" (attempt {attempt})" if attempt > 1 else ""))
+            expected_length = _fetch_to(url, partial)
+            size = partial.stat().st_size
+            digest = file_sha256(partial)
+            if expected_length is not None and size != expected_length:
+                problem = f"got {size} of {expected_length} bytes"
+            elif sha256 and digest != sha256:
+                problem = f"sha256 mismatch (expected {sha256})"
+            elif not sha256 and size < 1000:
+                problem = f"only {size} bytes"
+            elif check_zip and not _zip_ok(partial):
+                problem = "not a valid jar (zip check failed)"
+            else:
+                os.replace(partial, cache)
+                if not sha256:
+                    _sidecar(cache).write_text(digest + "\n", encoding="utf-8")
+                shutil.copy2(cache, destination)
+                _report_verified(destination, digest, "download, published sha256" if sha256 else "download, no published sha256")
+                return
+        except (OSError, http.client.HTTPException) as error:
+            problem = f"{type(error).__name__}: {error}"
+        finally:
+            partial.unlink(missing_ok=True)
+        print(f"download {url} failed: {problem}", file=sys.stderr)
+        if attempt < attempts:
+            _sleep(retry_pause(attempt))
+    raise RuntimeError(f"download failed after {attempts} attempts: {url}: {problem}")
+
+
+def _report_verified(destination: Path, digest: str, source: str) -> None:
+    """One log line with the sha256 of the file that was checked and used."""
+    print(f"verified sha256 {digest} {destination.name} ({source})")
+
+
+def _cached_ok(cache: Path, sha256: str) -> bool:
+    if not cache.is_file():
+        return False
+    if file_sha256(cache) == sha256:
+        return True
+    print(f"cache: {cache.name} does not match its sha256, removed")
+    cache.unlink(missing_ok=True)
+    return False
+
+
+def _sidecar(cache: Path) -> Path:
+    return cache.with_name(cache.name + ".sha256")
+
+
+def _cached_by_url_ok(cache: Path, check_zip: bool) -> bool:
+    """A URL-keyed entry is used only when it matches the sha256 saved beside it (and opens as a jar)."""
+    side = _sidecar(cache)
+    if not cache.is_file():
+        side.unlink(missing_ok=True)
+        return False
+    try:
+        expected = side.read_text(encoding="utf-8").strip() if side.is_file() else ""
+    except OSError:
+        expected = ""
+    if not expected:
+        reason = "has no saved sha256"
+    elif file_sha256(cache) != expected:
+        reason = "does not match its saved sha256"
+    elif check_zip and not _zip_ok(cache):
+        reason = "is not a valid jar"
+    else:
+        return True
+    print(f"cache: {cache.name} {reason}, removed")
+    cache.unlink(missing_ok=True)
+    side.unlink(missing_ok=True)
+    return False
+
+
+def _zip_ok(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return archive.testzip() is None
+    except Exception:
+        return False
+
+
+def _fetch_to(url: str, target: Path) -> int | None:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as handle:
+        length = response.headers.get("Content-Length")
+        shutil.copyfileobj(response, handle)
+    return int(length) if length and length.isdigit() else None
+
+
+_sleep = time.sleep
+
+
+def install_papi(plugins: Path) -> None:
+    """PlaceholderAPI 2.12.3, checked against its pinned sha256, with a config that stays offline."""
+    jar = plugins / PAPI_NAME
+    remove_legacy_url_entry(PAPI_URL)
+    download(PAPI_URL, jar, sha256=PAPI_SHA256, name=PAPI_NAME)
+    write_papi_config(plugins / "PlaceholderAPI" / "config.yml", jar)
+
+
+def remove_legacy_url_entry(url: str) -> None:
+    """Deletes the URL-keyed cache entry an older harness kept for a file that is now pinned."""
+    entry = cache_dir() / hashlib.sha256(url.encode("utf-8")).hexdigest()
+    for stale in (entry, _sidecar(entry)):
+        if stale.is_file():
+            stale.unlink()
+            print(f"cache: removed old entry {stale.name} for {url}")
+
+
+def write_papi_config(path: Path, jar: Path) -> None:
+    """PlaceholderAPI's default config with the expansion cloud and the update check turned off.
+
+    Both reach the network on startup. A failed expansion cloud download logs a stack trace
+    (Failed to download expansion information) that the smoke log check counts as an error.
+    """
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            text = archive.read("config.yml").decode("utf-8")
+    except Exception:
+        text = ""
+    lines = []
+    seen = set()
+    for line in text.splitlines():
+        key = line.split(":", 1)[0]
+        if key in ("cloud_enabled", "check_updates"):
+            lines.append(f"{key}: false")
+            seen.add(key)
+        else:
+            lines.append(line)
+    for key in ("check_updates", "cloud_enabled"):
+        if key not in seen:
+            lines.append(f"{key}: false")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_download_context(jar: Path) -> list[tuple[str, str, str]]:
+    """Entries of META-INF/download-context in a paperclip jar: (sha256, url, file name)."""
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            text = archive.read("META-INF/download-context").decode("utf-8")
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return []
+    return parse_download_context(text)
+
+
+def parse_download_context(text: str) -> list[tuple[str, str, str]]:
+    entries = []
+    for line in text.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) == 3 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]) and "/" not in parts[2]:
+            entries.append((parts[0].lower(), parts[1], parts[2]))
+    return entries
+
+
+def seed_paperclip(jar: Path, work: Path) -> None:
+    """Put the vanilla server jar paperclip needs into work/cache before the first boot.
+
+    Paperclip downloads it on every fresh server directory and fails the boot on a hash
+    mismatch. Going through download() gives that file the same cache, hash check, and retries
+    as the Paper jar. Libraries ship inside the paperclip jar and need no download.
+    """
+    for sha256, url, name in read_download_context(jar):
+        download(url, work / "cache" / name, sha256=sha256, name=name)
+        print(f"paperclip: {name} ready in cache (sha256 checked)")
 
 
 def fetch(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
+
+
+_fetch_text = fetch
+LISTING_ATTEMPTS = 3
+
+
+def fetch_listing(url: str, attempts: int = LISTING_ATTEMPTS):
+    """A Paper API build list, with retries.
+
+    A good answer is saved under cache/api/. When the API cannot be reached after the retries,
+    the last saved answer for that URL is used, so a host with a warm cache can boot offline.
+    """
+    saved = cache_dir() / "api" / (hashlib.sha256(url.encode("utf-8")).hexdigest() + ".json")
+    problem = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            text = _fetch_text(url)
+            payload = json.loads(text)
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            temporary = saved.with_name(saved.name + ".part")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, saved)
+            return payload
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            problem = f"{type(error).__name__}: {error}"
+            print(f"listing {url} failed: {problem}", file=sys.stderr)
+        if attempt < attempts:
+            _sleep(retry_pause(attempt))
+    if saved.is_file():
+        try:
+            payload = json.loads(saved.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        if payload is not None:
+            print(f"cache: using the saved build list for {url}")
+            return payload
+    raise RuntimeError(f"could not list builds after {attempts} attempts: {url}: {problem}")
 
 
 def free_port() -> int:
@@ -485,7 +765,7 @@ def start_mock(
     return handle
 
 
-def write_config(path: Path, mock_port: int) -> None:
+def write_config(path: Path, mock_port: int, startup_banner: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"http://127.0.0.1:{mock_port}/v1"
     path.write_text(
@@ -512,6 +792,7 @@ def write_config(path: Path, mock_port: int) -> None:
             "  enabled: false",
             "  prompts: []",
             'fallback: "..."',
+        ] + ([f"startup-banner: {startup_banner}"] if startup_banner else []) + [
             "",
         ]),
         encoding="utf-8",
@@ -598,6 +879,7 @@ def boot(
     timeout: int,
     check_api: bool = False,
     mock: MockHandle | None = None,
+    startup_banner: str = "",
 ) -> int:
     log_chunks: list[str] = []
 
@@ -627,9 +909,9 @@ def boot(
         bufsize=1,
     )
     threading.Thread(target=reader, args=(process.stdout,), daemon=True).start()
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"server exited early with code {process.returncode}")
             text = "".join(log_chunks)
@@ -644,7 +926,7 @@ def boot(
         text = "".join(log_chunks)
         if not nexusai_enabled(text):
             raise RuntimeError("NexusAI did not log that it enabled")
-        problem = banner_problem(text)
+        problem = ready_line_problem(text) if startup_banner == "false" else banner_problem(text)
         if problem:
             raise RuntimeError(problem)
         if f"127.0.0.1:{mock_port}/v1" not in text:
@@ -710,9 +992,9 @@ def verify_knowledge(process, chunks: list[str], rcon_port: int, mock: MockHandl
     print(reply)
     if "Knowledge:" not in reply or "rules#" not in reply or "(keywords)" not in reply:
         raise RuntimeError("/nai test did not print the keyword selection")
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     body = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during knowledge smoke with code {process.returncode}")
         body = mock.knowledge_body
@@ -738,8 +1020,8 @@ def verify_json(process, chunks: list[str], rcon_port: int, timeout: int) -> Non
     queued = strip_colors(rcon("127.0.0.1", rcon_port, "smoke", "naiload json"))
     print("--- naiload json ---")
     print(queued)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during json smoke with code {process.returncode}")
         text = "".join(chunks)
@@ -809,19 +1091,51 @@ def verify_api_order(text: str) -> None:
 
 
 def verify_placeholder_order(text: str) -> None:
-    """One placeholder logs Pre then Post, both nexusai, and Post is before the visible text."""
+    """One placeholder logs Pre and Post for nexusai, and Post ran before the text was read.
+
+    The Post line comes from an HTTP thread and PLACEHOLDER_TEXT from the main thread, so
+    their console order is not proof. The load driver appends post=<requestId>, read from a
+    property the probe sets after it logs Post, which is.
+    """
     pre_index, pre_id, post_index, text_index = _paired_phase(
         text, "PLACEHOLDER", "nexusai", "PLACEHOLDER_TEXT", "text=pong"
     )
-    if pre_index is None or post_index is None or text_index is None:
+    if pre_index is None or text_index is None:
+        raise RuntimeError("events probe did not log a PLACEHOLDER pre for consumer nexusai before PLACEHOLDER_TEXT")
+    if post_index is None:
+        raise RuntimeError(f"events probe did not log a PLACEHOLDER post for requestId={pre_id}")
+    if pre_index >= text_index:
         raise RuntimeError(
-            "events probe did not log a PLACEHOLDER pre and post for consumer nexusai before PLACEHOLDER_TEXT"
+            f"expected PLACEHOLDER pre before PLACEHOLDER_TEXT; indexes were {pre_index}, {text_index}"
         )
-    if pre_index >= post_index or post_index >= text_index:
+    seen = _placeholder_post_seen(text.splitlines()[text_index])
+    if seen != pre_id:
         raise RuntimeError(
-            "expected PLACEHOLDER pre, then post, then PLACEHOLDER_TEXT; "
-            f"indexes were {pre_index}, {post_index}, {text_index} requestId={pre_id}"
+            f"PLACEHOLDER_TEXT was read with post={seen}, expected post={pre_id}; Post did not run first"
         )
+
+
+def _placeholder_post_seen(line: str) -> str | None:
+    marker = " post="
+    start = line.find(marker)
+    if start < 0:
+        return None
+    return line[start + len(marker):].split()[0]
+
+
+def wait_placeholder_post(process, chunks: list[str], timeout: float) -> None:
+    """Wait for the placeholder Post line; it can reach the console after PLACEHOLDER_TEXT."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = "".join(chunks)
+        _pre, pre_id, post_index, _text = _paired_phase(
+            text, "PLACEHOLDER", "nexusai", "PLACEHOLDER_TEXT", "text=pong"
+        )
+        if pre_id is None or post_index is not None:
+            return
+        if time.monotonic() >= deadline or process.poll() is not None:
+            return
+        time.sleep(0.2)
 
 
 def verify_action_thread(text: str) -> None:
@@ -877,15 +1191,19 @@ def _paired_phase(
     return pre_index, pre_id, post_index, appearance_index
 
 
+PLACEHOLDER_POST_WAIT_SECONDS = 10.0
+
+
 def wait_event_checks(process, chunks: list[str], timeout: int) -> None:
     """Poll until the placeholder text and the action result are both in the log."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during event smoke with code {process.returncode}")
         text = "".join(chunks)
         if "PLACEHOLDER_TEXT text=pong" in text and "ACTION_DONE" in text and "phase=action" in text:
             print("event smoke saw placeholder text and a character action")
+            wait_placeholder_post(process, chunks, PLACEHOLDER_POST_WAIT_SECONDS)
             return
         if "PLACEHOLDER_TEXT timeout" in text or "PLACEHOLDER_TEXT error=" in text:
             raise RuntimeError("placeholder expansion did not return the model text")
@@ -895,8 +1213,8 @@ def wait_event_checks(process, chunks: list[str], timeout: int) -> None:
 
 def wait_api_result(process, chunks: list[str], timeout: int) -> None:
     """Poll until one generate() result is a model reply and every call has finished."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during api smoke with code {process.returncode}")
         text = "".join(chunks)
@@ -980,6 +1298,22 @@ def banner_problem(text: str) -> str:
     return ""
 
 
+READY_LINE = re.compile(r"\[NexusAI\] NexusAI enabled\. Ready in \d+ ms$")
+
+
+def ready_line_problem(text: str) -> str:
+    """Empty when startup-banner: false left exactly one short ready line and no banner."""
+    lines = [log_message(line).rstrip("\r") for line in plain_log(text).splitlines()]
+    ready = [line for line in lines if READY_LINE.search(line)]
+    if len(ready) != 1:
+        return f"expected one short ready line, found {len(ready)}"
+    if any(BANNER_READY.search(line) and not READY_LINE.search(line) for line in lines):
+        return "startup banner printed although startup-banner is false"
+    if any(line.startswith("\u2500" * 10) for line in lines):
+        return "startup banner rule printed although startup-banner is false"
+    return ""
+
+
 def strip_colors(text: str) -> str:
     out = []
     skip = False
@@ -1008,9 +1342,9 @@ def console_command(process, line: str) -> None:
 
 
 def rcon(host: str, port: int, password: str, command: str) -> str:
-    deadline = time.time() + 20
+    deadline = time.monotonic() + 20
     last_error: Exception | None = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             with socket.create_connection((host, port), timeout=5) as sock:
                 sock.settimeout(10)
@@ -1085,7 +1419,8 @@ def run_folia(args) -> int:
     print(f"server directory {work}")
     try:
         chosen = download_folia(args.version, work / "folia.jar")
-        download(PAPI_URL, work / "plugins" / "PlaceholderAPI-2.12.3.jar")
+        seed_paperclip(work / "folia.jar", work)
+        install_papi(work / "plugins")
         shutil.copy2(plugin, work / "plugins" / plugin.name)
         if mode == "full":
             install_folia_probe(args.driver_dir, work / "plugins")
@@ -1093,7 +1428,7 @@ def run_folia(args) -> int:
             print("folia startup checks leave the load driver and events probe uninstalled")
         mock_port = free_port()
         mock = start_mock(mock_port)
-        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port)
+        write_config(work / "plugins" / "NexusAI" / "config.yml", mock_port, args.startup_banner)
         write_knowledge_fixture(work / "plugins" / "NexusAI")
         if mode == "full":
             append_context_prompt(work / "plugins" / "NexusAI")
@@ -1109,7 +1444,7 @@ def run_folia(args) -> int:
 def download_folia(version: str, destination: Path) -> dict:
     url = FILL_PROJECT.format(project="folia", version=version)
     try:
-        payload = json.loads(fetch(url))
+        payload = fetch_listing(url)
     except Exception as error:
         raise RuntimeError(f"could not list Folia builds for {version}: {error}") from error
     builds = payload["builds"] if isinstance(payload, dict) else payload
@@ -1123,7 +1458,7 @@ def download_folia(version: str, destination: Path) -> dict:
         raise RuntimeError(f"Folia build {chosen.get('id')} has no server download: {error}") from error
     print(f"Folia {version} {channel} build {chosen['id']} ({download_info['name']})")
     try:
-        download(download_info["url"], destination)
+        download(download_info["url"], destination, sha256=fill_sha256(download_info))
     except Exception as error:
         raise RuntimeError(
             f"could not download Folia {version} {channel} build {chosen['id']}: {error}"
@@ -1238,9 +1573,9 @@ def boot_folia(
         bufsize=1,
     )
     threading.Thread(target=reader, args=(process.stdout,), daemon=True).start()
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"server exited early with code {process.returncode}")
             text = "".join(log_chunks)
@@ -1489,9 +1824,9 @@ def usage_line_seen(rcon_text: str, log_text: str) -> bool:
 
 def verify_folia_usage(process, chunks, rcon_port: int, timeout: int) -> None:
     """RCON must see the usage header. The reply is sent before the command returns."""
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during /nai usage with code {process.returncode}")
         last = rcon("127.0.0.1", rcon_port, "smoke", "nai usage")
@@ -1510,8 +1845,8 @@ def verify_folia_default_test(process, chunks, rcon_port: int, mock: MockHandle,
     answers_before = mock_answer_count("".join(chunks))
     print("--- /nai test ---", flush=True)
     console_command(process, "nai test")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during /nai test with code {process.returncode}")
         text = strip_colors("".join(chunks))
@@ -1536,8 +1871,8 @@ def verify_folia_context_prompt(process, chunks, rcon_port: int, mock: MockHandl
     answers_before = mock_answer_count("".join(chunks))
     print("--- /nai test context_ping ---", flush=True)
     console_command(process, "nai test context_ping")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during context prompt with code {process.returncode}")
         text = "".join(chunks)
@@ -1558,8 +1893,8 @@ def verify_folia_context_prompt(process, chunks, rcon_port: int, mock: MockHandl
 
 
 def verify_folia_probe_events(process, chunks, timeout: int) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited during probe checks with code {process.returncode}")
         text = "".join(chunks)
@@ -1621,6 +1956,12 @@ def _smoke_self_check() -> None:
     _need(banner_problem(full.replace("Version", "[NexusAI] Version")) != "", "prefixed banner accepted")
     _need(banner_problem(full.replace("[01:00:01 INFO]: \n", "[01:00:01 INFO]: x\n", 1)) != "", "banner without spacer accepted")
     _need(banner_problem("\n".join(full.splitlines()[-3:])) != "", "short banner accepted")
+    short = "[01:00:00 INFO]: [NexusAI] Using provider\n[01:00:01 INFO]: [NexusAI] NexusAI enabled. Ready in 97 ms"
+    _need(nexusai_enabled(short), "short ready line missed")
+    _need(ready_line_problem(short) == "", "short ready line rejected")
+    _need(ready_line_problem(full) != "", "full banner accepted as the short line")
+    _need(ready_line_problem(short + "\n" + full) != "", "banner next to the short line accepted")
+    _need(banner_problem(short) != "", "short line accepted as the full banner")
 
     stable = [
         {"id": 3, "channel": "BETA"},
@@ -1769,6 +2110,354 @@ def _smoke_self_check() -> None:
         with zipfile.ZipFile(jar_path, "w") as archive:
             archive.writestr("plugin.yml", "name: NexusAI\nfolia-supported: false\n")
         _need(not read_folia_supported(jar_path), "jar flag was not false")
+    _placeholder_order_self_check()
+    _download_self_check()
+    _download_cache_self_check()
+
+
+def _placeholder_order_self_check() -> None:
+    pre = "NEXUSAI_EVENT phase=pre requestId=3 origin=PLACEHOLDER consumer=nexusai"
+    post = "NEXUSAI_EVENT phase=post requestId=3 origin=PLACEHOLDER consumer=nexusai"
+    shown = "PLACEHOLDER_TEXT text=pong post=3"
+    verify_placeholder_order("\n".join([pre, post, shown]))
+    # Post logged by the HTTP thread after the main thread line still passes.
+    verify_placeholder_order("\n".join([pre, shown, post]))
+    bad = {
+        "no post line": [pre, shown],
+        "no pre line": [post, shown],
+        "post not seen": [pre, post, "PLACEHOLDER_TEXT text=pong post=none"],
+        "old driver": [pre, post, "PLACEHOLDER_TEXT text=pong"],
+        "other request": [pre, post, "PLACEHOLDER_TEXT text=pong post=2"],
+        "text before pre": [shown, pre, post],
+    }
+    for name, lines in bad.items():
+        try:
+            verify_placeholder_order("\n".join(lines))
+        except RuntimeError:
+            continue
+        raise AssertionError(f"placeholder order accepted {name}")
+
+    class Running:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    chunks = [pre + "\n", shown + "\n"]
+    started = time.monotonic()
+    wait_placeholder_post(Running(), chunks, 0.5)
+    if time.monotonic() - started < 0.4:
+        raise AssertionError("post wait returned before its timeout")
+    chunks.append(post + "\n")
+    started = time.monotonic()
+    wait_placeholder_post(Running(), chunks, 5)
+    if time.monotonic() - started > 1:
+        raise AssertionError("post wait did not return once the line was there")
+
+    # wait_event_checks must wait for the Post line after it sees the text.
+    action = "NEXUSAI_EVENT phase=action requestId=1 character=smoke primary=true\nACTION_DONE result=ran\n"
+    global PLACEHOLDER_POST_WAIT_SECONDS
+    saved_wait = PLACEHOLDER_POST_WAIT_SECONDS
+    PLACEHOLDER_POST_WAIT_SECONDS = 0.5
+    try:
+        started = time.monotonic()
+        wait_event_checks(Running(), [pre + "\n", shown + "\n", action], 5)
+        if time.monotonic() - started < 0.4:
+            raise AssertionError("wait_event_checks did not wait for the placeholder Post line")
+        started = time.monotonic()
+        wait_event_checks(Running(), [pre + "\n", post + "\n", shown + "\n", action], 5)
+        if time.monotonic() - started > 0.4:
+            raise AssertionError("wait_event_checks waited although the Post line was there")
+    finally:
+        PLACEHOLDER_POST_WAIT_SECONDS = saved_wait
+
+
+def _download_self_check() -> None:
+    global _fetch_to
+    good = "a" * 64
+    _need(fill_sha256({"checksums": {"sha256": good.upper()}}) == good, "Fill sha256 not read")
+    _need(fill_sha256({"checksums": {"sha256": "abc"}}) is None, "short sha256 accepted")
+    _need(fill_sha256({}) is None, "missing checksums not handled")
+    context = parse_download_context(good + "\thttps://example.invalid/server.jar\tmojang_1.jar\nbad line\n")
+    _need(context == [(good, "https://example.invalid/server.jar", "mojang_1.jar")], f"download-context {context}")
+    _need(parse_download_context(good + "\thttps://x\t../evil.jar") == [], "path in download-context accepted")
+    saved_env = os.environ.get("NEXUSAI_SMOKE_CACHE")
+    real_fetch = _fetch_to
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.environ["NEXUSAI_SMOKE_CACHE"] = str(root / "cache")
+        try:
+            payload = b"paperclip" * 400
+            source = root / "source.jar"
+            source.write_bytes(payload)
+            digest = hashlib.sha256(payload).hexdigest()
+            url = source.as_uri()
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                download(url, root / "out" / "a.jar", sha256=digest)
+                download(url, root / "out" / "a2.jar", sha256=digest)
+            _need((root / "out" / "a.jar").read_bytes() == payload, "verified download content differs")
+            _need(f"verified sha256 {digest} a.jar (download, published sha256)" in printed.getvalue(),
+                  f"the verified sha256 of a download was not logged: {printed.getvalue()}")
+            _need(f"verified sha256 {digest} a2.jar (cache, published sha256)" in printed.getvalue(),
+                  f"the verified sha256 of a cached file was not logged: {printed.getvalue()}")
+            entry = root / "cache" / "sha256" / digest
+            _need(entry.is_file(), "verified download not cached by sha256")
+            entry.write_bytes(b"truncated")
+            download(url, root / "out" / "b.jar", sha256=digest)
+            _need((root / "out" / "b.jar").read_bytes() == payload, "corrupt cache entry was used")
+            entry.unlink()
+            calls = []
+
+            def flaky(fetch_url: str, target: Path):
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    target.write_bytes(payload[:100])
+                    return None
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = flaky
+            download(url, root / "out" / "c.jar", sha256=digest, attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "c.jar").read_bytes() == payload, "mismatch was not retried")
+            calls.clear()
+
+            jar_bytes = _self_check_jar()
+            jar_source = root / "plain.jar"
+            jar_source.write_bytes(jar_bytes)
+
+            def short(fetch_url: str, target: Path):
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    target.write_bytes(jar_bytes[:2000])
+                    return len(jar_bytes)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = short
+            download(jar_source.as_uri(), root / "out" / "f.jar", attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "f.jar").read_bytes() == jar_bytes, "short read was not retried")
+            # A file that is not a jar has only its length to go by.
+            blob = root / "plain.bin"
+            blob.write_bytes(payload)
+            calls.clear()
+
+            def short_blob(fetch_url: str, target: Path):
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    target.write_bytes(payload[:-100])
+                    return len(payload)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = short_blob
+            download(blob.as_uri(), root / "out" / "g.bin", attempts=2)
+            _need(len(calls) == 2 and (root / "out" / "g.bin").read_bytes() == payload, "short read of a non-jar was not retried")
+            _fetch_to = real_fetch
+            entry.unlink()
+            try:
+                download(url, root / "out" / "d.jar", sha256="b" * 64, attempts=1)
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("sha256 mismatch was accepted")
+            _need(not (root / "cache" / "sha256" / ("b" * 64)).exists(), "mismatched file was cached")
+            placed = root / "cache" / "mojang_1.jar"
+            placed.write_bytes(payload)
+            download("https://example.invalid/never-fetched.jar", root / "out" / "e.jar", sha256=digest, name="mojang_1.jar")
+            _need((root / "out" / "e.jar").read_bytes() == payload, "pre-placed file not used")
+        finally:
+            _fetch_to = real_fetch
+            if saved_env is None:
+                os.environ.pop("NEXUSAI_SMOKE_CACHE", None)
+            else:
+                os.environ["NEXUSAI_SMOKE_CACHE"] = saved_env
+
+
+def _self_check_jar() -> bytes:
+    """A small but real jar (zip) of a few KiB, for the URL-keyed cache checks."""
+    import io
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("plugin.yml", "name: Check\nversion: 1\nmain: a.B\n")
+        archive.writestr("config.yml", "check_updates: true\ncloud_enabled: true\ncloud_sorting: \"name\"\n")
+        archive.writestr("data.bin", os.urandom(4096))
+    return buffer.getvalue()
+
+
+def _download_cache_self_check() -> None:
+    """URL-keyed entries, transport errors, the pinned PlaceholderAPI, and the saved build list."""
+    global _fetch_to, _fetch_text, _sleep, download
+    saved_env = os.environ.get("NEXUSAI_SMOKE_CACHE")
+    real_fetch, real_text, real_sleep, real_download = _fetch_to, _fetch_text, _sleep, download
+    _sleep = lambda seconds: None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.environ["NEXUSAI_SMOKE_CACHE"] = str(root / "cache")
+        try:
+            jar_bytes = _self_check_jar()
+            source = root / "papi.jar"
+            source.write_bytes(jar_bytes)
+            url = source.as_uri()
+            entry = root / "cache" / hashlib.sha256(url.encode("utf-8")).hexdigest()
+            side = entry.with_name(entry.name + ".sha256")
+
+            url_printed = io.StringIO()
+            with contextlib.redirect_stdout(url_printed):
+                download(url, root / "out" / "1.jar")
+            _need(f"verified sha256 {hashlib.sha256(jar_bytes).hexdigest()} 1.jar (download, no published sha256)"
+                  in url_printed.getvalue(), f"the sha256 of a URL download was not logged: {url_printed.getvalue()}")
+            _need(entry.is_file() and side.read_text(encoding="utf-8").strip() == hashlib.sha256(jar_bytes).hexdigest(),
+                  "URL entry saved without its sha256")
+            fetches = []
+
+            def counting(fetch_url: str, target: Path):
+                fetches.append(fetch_url)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = counting
+            url_printed = io.StringIO()
+            with contextlib.redirect_stdout(url_printed):
+                download(url, root / "out" / "2.jar")
+            _need(fetches == [], "a good URL entry was downloaded again")
+            _need(f"verified sha256 {hashlib.sha256(jar_bytes).hexdigest()} 2.jar (cache, saved sha256)"
+                  in url_printed.getvalue(), f"the sha256 of a URL cache entry was not logged: {url_printed.getvalue()}")
+            for label, damage in (
+                ("truncated", lambda data: data[: len(data) // 2]),
+                ("flipped", lambda data: data[:100] + bytes([data[100] ^ 0xFF]) + data[101:]),
+            ):
+                entry.write_bytes(damage(jar_bytes))
+                fetches.clear()
+                download(url, root / "out" / f"{label}.jar")
+                _need(len(fetches) == 1, f"{label} URL entry was used without a download")
+                _need((root / "out" / f"{label}.jar").read_bytes() == jar_bytes, f"{label} URL entry was used")
+            # A valid jar that does not match the saved sha256 (a swapped entry) is not used.
+            entry.write_bytes(_self_check_jar())
+            fetches.clear()
+            download(url, root / "out" / "swapped.jar")
+            _need(len(fetches) == 1 and (root / "out" / "swapped.jar").read_bytes() == jar_bytes,
+                  "URL entry with a different sha256 was used")
+            side.unlink()
+            fetches.clear()
+            download(url, root / "out" / "nosidecar.jar")
+            _need(len(fetches) == 1 and side.is_file(), "URL entry without a saved sha256 was used")
+            # A same-size entry with a matching sidecar that is not a valid jar is not used either.
+            broken = b"x" * len(jar_bytes)
+            entry.write_bytes(broken)
+            side.write_text(hashlib.sha256(broken).hexdigest() + "\n", encoding="utf-8")
+            fetches.clear()
+            download(url, root / "out" / "notzip.jar")
+            _need(len(fetches) == 1 and (root / "out" / "notzip.jar").read_bytes() == jar_bytes,
+                  "URL entry that is not a jar was used")
+            bad = root / "bad.jar"
+            bad.write_bytes(b"y" * 5000)
+            try:
+                download(bad.as_uri(), root / "out" / "bad.jar", attempts=2)
+            except RuntimeError as error:
+                _need("zip check failed" in str(error), f"wrong failure for a non-jar download: {error}")
+            else:
+                raise RuntimeError("a download that is not a jar was accepted")
+
+            # Transport errors that are not OSError are retried, and no .part file is left.
+            errors = [http.client.IncompleteRead(b"partial"), http.client.BadStatusLine("XYZ garbage")]
+            fetches.clear()
+
+            def broken_transport(fetch_url: str, target: Path):
+                fetches.append(fetch_url)
+                if errors:
+                    target.write_bytes(b"half")
+                    raise errors.pop(0)
+                return real_fetch(fetch_url, target)
+
+            _fetch_to = broken_transport
+            fresh = root / "fresh.jar"
+            fresh.write_bytes(jar_bytes)
+            download(fresh.as_uri(), root / "out" / "fresh.jar", attempts=3)
+            _need(len(fetches) == 3 and (root / "out" / "fresh.jar").read_bytes() == jar_bytes,
+                  f"IncompleteRead or BadStatusLine was not retried ({len(fetches)} calls)")
+            _need(not list((root / "cache").rglob("*.part")), "a .part file was left after a retry")
+
+            def always_broken(fetch_url: str, target: Path):
+                target.write_bytes(b"half")
+                raise http.client.IncompleteRead(b"half")
+
+            _fetch_to = always_broken
+            try:
+                download((root / "never.jar").as_uri(), root / "out" / "never.jar", attempts=2)
+            except RuntimeError as error:
+                _need("IncompleteRead" in str(error), f"wrong failure after transport errors: {error}")
+            else:
+                raise RuntimeError("a download that always broke off was accepted")
+            _need(not list((root / "cache").rglob("*.part")), "a .part file was left after a failed download")
+            _fetch_to = real_fetch
+
+            # PlaceholderAPI is pinned to its sha256 and gets an offline config.
+            _need(re.fullmatch(r"[0-9a-f]{64}", PAPI_SHA256) is not None, "PlaceholderAPI sha256 is not pinned")
+            asked = []
+
+            def fake_download(fetch_url, destination, sha256=None, name=None, attempts=DOWNLOAD_ATTEMPTS):
+                asked.append((fetch_url, sha256, name))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(jar_bytes)
+
+            legacy = root / "cache" / hashlib.sha256(PAPI_URL.encode("utf-8")).hexdigest()
+            legacy.write_bytes(b"z" * 500)
+            legacy.with_name(legacy.name + ".sha256").write_text("0" * 64 + "\n", encoding="utf-8")
+            download = fake_download
+            install_papi(root / "server" / "plugins")
+            _need(not legacy.exists() and not legacy.with_name(legacy.name + ".sha256").exists(),
+                  "old URL-keyed PlaceholderAPI entry was kept")
+            download = real_download
+            _need(asked == [(PAPI_URL, PAPI_SHA256, PAPI_NAME)], f"PlaceholderAPI download was not pinned: {asked}")
+            config = (root / "server" / "plugins" / "PlaceholderAPI" / "config.yml").read_text(encoding="utf-8")
+            _need("cloud_enabled: false" in config and "cloud_enabled: true" not in config,
+                  "PlaceholderAPI expansion cloud left on")
+            _need("check_updates: false" in config and "cloud_sorting: \"name\"" in config,
+                  "PlaceholderAPI config lost its other keys")
+
+            # The build list is retried and its last good answer is used when the API is down.
+            listing = root / "builds.json"
+            listing.write_text('{"builds": [{"id": 7, "channel": "STABLE"}]}', encoding="utf-8")
+            calls = []
+
+            def flaky_text(fetch_url: str) -> str:
+                calls.append(fetch_url)
+                if len(calls) == 1:
+                    raise http.client.RemoteDisconnected("closed")
+                return real_text(fetch_url)
+
+            _fetch_text = flaky_text
+            first = fetch_listing(listing.as_uri(), attempts=2)
+            _need(len(calls) == 2 and first["builds"][0]["id"] == 7, "build list was not retried")
+
+            def offline_text(fetch_url: str) -> str:
+                raise urllib.error.URLError("[Errno 111] Connection refused")
+
+            _fetch_text = offline_text
+            cached = fetch_listing(listing.as_uri(), attempts=2)
+            _need(cached == first, "saved build list was not used offline")
+            try:
+                fetch_listing((root / "unknown.json").as_uri(), attempts=1)
+            except RuntimeError as error:
+                _need("could not list builds" in str(error), f"wrong failure for an unknown build list: {error}")
+            else:
+                raise RuntimeError("an unknown build list was returned without the API")
+
+            # Five attempts with growing pauses, and still a clear failure at the end.
+            pauses = []
+            _sleep = pauses.append
+            missing = (root / "gone.jar").as_uri()
+            try:
+                download(missing, root / "out" / "gone.jar")
+            except RuntimeError as error:
+                _need("after 5 attempts" in str(error), f"wrong failure after retries: {error}")
+            else:
+                raise RuntimeError("a missing download was accepted")
+            _need(pauses == [2, 4, 8, 16], f"download pauses were {pauses}, expected [2, 4, 8, 16]")
+            _need(not (root / "out" / "gone.jar").exists(), "a failed download left a file")
+        finally:
+            _fetch_to, _fetch_text, _sleep, download = real_fetch, real_text, real_sleep, real_download
+            if saved_env is None:
+                os.environ.pop("NEXUSAI_SMOKE_CACHE", None)
+            else:
+                os.environ["NEXUSAI_SMOKE_CACHE"] = saved_env
 
 
 if __name__ == "__main__":

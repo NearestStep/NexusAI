@@ -30,6 +30,7 @@ public final class DialogueSettings {
     private final int summaryMaxTokens;
     private final String summaryProvider;
     private final String summaryModel;
+    private final boolean logStopBudget;
 
     public DialogueSettings(
             boolean dialogueEnabled,
@@ -99,6 +100,38 @@ public final class DialogueSettings {
             String summaryProvider,
             String summaryModel
     ) {
+        this(dialogueEnabled, memoryTurns, persistMemory, memoryMaxChars, memoryExpiryHours,
+                sessionTimeoutSeconds, leaveRadius, maxRepliesPerSession, messageCooldownMillis,
+                conversationsPerPlayerPerDay, maxMessageLength, cacheGreeting, greetingCacheSeconds,
+                actionsEnabled, actionLog, maxActionsPerReply, summaryEnabled, summaryThresholdTurns,
+                summaryMaxChars, summaryMaxTokens, summaryProvider, summaryModel, true);
+    }
+
+    public DialogueSettings(
+            boolean dialogueEnabled,
+            int memoryTurns,
+            boolean persistMemory,
+            int memoryMaxChars,
+            int memoryExpiryHours,
+            int sessionTimeoutSeconds,
+            int leaveRadius,
+            int maxRepliesPerSession,
+            int messageCooldownMillis,
+            int conversationsPerPlayerPerDay,
+            int maxMessageLength,
+            boolean cacheGreeting,
+            int greetingCacheSeconds,
+            boolean actionsEnabled,
+            boolean actionLog,
+            int maxActionsPerReply,
+            boolean summaryEnabled,
+            int summaryThresholdTurns,
+            int summaryMaxChars,
+            int summaryMaxTokens,
+            String summaryProvider,
+            String summaryModel,
+            boolean logStopBudget
+    ) {
         this.dialogueEnabled = dialogueEnabled;
         this.memoryTurns = memoryTurns;
         this.persistMemory = persistMemory;
@@ -121,6 +154,7 @@ public final class DialogueSettings {
         this.summaryMaxTokens = summaryMaxTokens;
         this.summaryProvider = summaryProvider == null ? "" : summaryProvider;
         this.summaryModel = summaryModel == null ? "" : summaryModel;
+        this.logStopBudget = logStopBudget;
     }
 
     public static DialogueSettings defaults() {
@@ -158,7 +192,8 @@ public final class DialogueSettings {
                 clamp(config.getInt("dialogue.summary.max-chars", 400), 100, 2_000),
                 config.getInt("dialogue.summary.max-tokens", 200),
                 summaryProvider == null ? "" : summaryProvider.trim().toLowerCase(java.util.Locale.ROOT),
-                summaryModel == null ? "" : summaryModel.trim()
+                summaryModel == null ? "" : summaryModel.trim(),
+                config.getBoolean("dialogue.log-stop-budget", true)
         );
     }
 
@@ -231,6 +266,11 @@ public final class DialogueSettings {
 
     public int maxActionsPerReply() {
         return maxActionsPerReply;
+    }
+
+    /** {@code dialogue.log-stop-budget}: one INFO line when stop runs during the first memory load. */
+    public boolean logStopBudget() {
+        return logStopBudget;
     }
 
     public boolean summaryEnabled() {

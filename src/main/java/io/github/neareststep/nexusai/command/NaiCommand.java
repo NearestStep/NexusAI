@@ -612,19 +612,21 @@ public final class NaiCommand implements CommandExecutor, TabCompleter {
                 plugin.getAiHttpClient().testAsync(requestPrompt, requestOverrides, testTrace(playerId, requestOverrides)),
                 plugin.getLogger(),
                 "Failed to deliver /nai test result",
-                (answer, error) -> SenderTasks.run(plugin, sender, () -> {
-                    long latencyMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
-                    MessageService current = plugin.getMessageService();
-                    if (error != null) {
-                        String detail = AiErrors.detail(error);
-                        if (detail.isBlank()) {
-                            detail = error.getClass().getSimpleName();
+                (answer, error) -> {
+                    SenderTasks.runReply(plugin, sender, error, () -> {
+                        long latencyMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+                        MessageService current = plugin.getMessageService();
+                        if (error != null) {
+                            String detail = AiErrors.detail(error);
+                            if (detail.isBlank()) {
+                                detail = error.getClass().getSimpleName();
+                            }
+                            current.send(sender, "command.test-fail", testPlaceholders(latencyMs, redact(detail)));
+                        } else {
+                            current.send(sender, "command.test-ok", testPlaceholders(latencyMs, redact(answer == null ? "" : answer)));
                         }
-                        current.send(sender, "command.test-fail", testPlaceholders(latencyMs, redact(detail)));
-                    } else {
-                        current.send(sender, "command.test-ok", testPlaceholders(latencyMs, redact(answer == null ? "" : answer)));
-                    }
-                }, plugin.getLogger()));
+                    }, plugin.getLogger());
+                });
     }
 
     private void handlePrompts(CommandSender sender, MessageService messages, String[] args) {

@@ -23,7 +23,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -43,6 +48,12 @@ public final class AiHttpClient {
     private final Logger logger;
     private final ConcurrentHashMap<String, CompletableFuture<SharedCompletion>> inFlight = new ConcurrentHashMap<>();
     private volatile QuotaPolicy quotas;
+    static final String STOPPING = io.github.neareststep.nexusai.StopGate.MESSAGE;
+    private final ConcurrentHashMap<CompletableFuture<?>, Runnable> pending = new ConcurrentHashMap<>();
+    private volatile boolean closing;
+    private volatile boolean closed;
+    private volatile Executor completionExecutor = ForkJoinPool.commonPool();
+    private static volatile BooleanSupplier serverThread = AiHttpClient::bukkitServerThread;
 
     public AiHttpClient(
             AiCache cache,
@@ -58,6 +69,92 @@ public final class AiHttpClient {
         this.gate = Objects.requireNonNull(gate, "gate");
         this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
         this.logger = Objects.requireNonNull(logger, "logger");
+    }
+
+    /**
+     * Where a completion that arrives on the server thread runs. NexusAI passes its
+     * {@code nexusai-http-*} workers. Off the server thread the completion runs inline.
+     */
+    public void completionExecutor(Executor executor) {
+        this.completionExecutor = executor == null ? ForkJoinPool.commonPool() : executor;
+    }
+
+    /**
+     * Plugin disable. New requests stop at once and requests already sent are cancelled now:
+     * Paper marks the plugin disabled before {@code onDisable}, so a reply that arrived later
+     * could not be scheduled to its reader anyway. Callers see a {@link CancellationException}
+     * without a log line, an event, or a cache write. After this returns no completion handler
+     * of this client runs, so nothing touches the plugin classloader once Bukkit closes it.
+     *
+     * @return how many requests were cancelled
+     */
+    public int close() {
+        closing = true;
+        closed = true;
+        int cancelled = 0;
+        for (CompletableFuture<?> open : pending.keySet().toArray(new CompletableFuture<?>[0])) {
+            Runnable stop = pending.remove(open);
+            if (stop == null) {
+                continue;
+            }
+            open.cancel(false);
+            // Also when the provider ignores cancel: the caller is answered now, and a reply
+            // that still arrives later finds the client closed and does nothing.
+            stop.run();
+            cancelled++;
+        }
+        return cancelled;
+    }
+
+    /** Requests sent and not yet finished. */
+    public int pendingCount() {
+        return pending.size();
+    }
+
+    private void stopQuietly(String cacheKey, CompletableFuture<SharedCompletion> created) {
+        created.completeExceptionally(new CancellationException(STOPPING));
+        if (cacheKey != null) {
+            inFlight.remove(cacheKey, created);
+        }
+    }
+
+    /** Test hook: which thread counts as the server thread. {@code null} restores the Bukkit check. */
+    public static void serverThreadCheck(BooleanSupplier check) {
+        serverThread = check == null ? AiHttpClient::bukkitServerThread : check;
+    }
+
+    private void offServerThread(Runnable task) {
+        if (!onServerThread()) {
+            task.run();
+            return;
+        }
+        try {
+            completionExecutor.execute(task);
+        } catch (RejectedExecutionException full) {
+            try {
+                ForkJoinPool.commonPool().execute(task);
+            } catch (RejectedExecutionException alsoFull) {
+                // Both executors refuse (shutdown). The request must still finish, so it runs
+                // here; EventDispatcher skips the async Post or Fail on this thread with a FINE log.
+                task.run();
+            }
+        }
+    }
+
+    private static boolean onServerThread() {
+        try {
+            return serverThread.getAsBoolean();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean bukkitServerThread() {
+        try {
+            return org.bukkit.Bukkit.getServer() != null && org.bukkit.Bukkit.isPrimaryThread();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     /** Server, player, and consumer caps for placeholder, pool, prewarm, and {@code /nai test}. */
@@ -414,14 +511,54 @@ public final class AiHttpClient {
             QuotaPolicy.Hold quotaHold
     ) {
         GenerationOverrides effective = overrides == null ? GenerationOverrides.none() : overrides;
+        if (closing) {
+            stopQuietly(cacheKey, created);
+            return;
+        }
         CompletableFuture<ModelAnswer> upstream;
         try {
             upstream = provider.answer(prompt, effective, ignoreCooldown, trace);
         } catch (RuntimeException e) {
-            finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e, writeCache, cacheTtl, clearPause, quotaHold, trace);
+            offServerThread(() -> finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, null, e,
+                    writeCache, cacheTtl, clearPause, quotaHold, trace));
             return;
         }
+        // A reply that is already complete runs this callback on the calling thread, which for
+        // a placeholder is the server thread. Post and Fail are async events, and Bukkit refuses
+        // them there, so the callback moves to a NexusAI worker first.
+        pending.put(upstream, () -> stopQuietly(cacheKey, created));
         upstream.whenComplete((answer, error) -> {
+            pending.remove(upstream);
+            if (closed) {
+                // The plugin is being disabled. Nothing else runs, so no class is loaded from
+                // a classloader that is about to close.
+                stopQuietly(cacheKey, created);
+                return;
+            }
+            completion(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
+                    cacheTtl, clearPause, quotaHold, trace);
+        });
+        if (closed) {
+            pending.remove(upstream);
+            upstream.cancel(false);
+        }
+    }
+
+    private void completion(
+            String cacheKey,
+            String admissionKey,
+            long pauseStamp,
+            long failureEpoch,
+            CompletableFuture<SharedCompletion> created,
+            ModelAnswer answer,
+            Throwable error,
+            boolean writeCache,
+            Duration cacheTtl,
+            boolean clearPause,
+            QuotaPolicy.Hold quotaHold,
+            CallTrace trace
+    ) {
+        offServerThread(() -> {
             try {
                 finish(cacheKey, admissionKey, pauseStamp, failureEpoch, created, answer, error, writeCache,
                         effectiveCacheTtl(cacheTtl, answer), clearPause, quotaHold, trace);

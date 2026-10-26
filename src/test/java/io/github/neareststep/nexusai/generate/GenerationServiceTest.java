@@ -384,6 +384,41 @@ class GenerationServiceTest {
     }
 
     @Test
+    void aReplyAfterShutdownRunsNoHandlerOnTheHttpWorkers() throws Exception {
+        Harness harness = harness(false);
+        CompletableFuture<ChatExchange> blocked = new CompletableFuture<>();
+        CountDownLatch entered = new CountDownLatch(1);
+        harness.script.next = ignored -> {
+            entered.countDown();
+            return blocked;
+        };
+        CompletableFuture<GenerationResult> future = harness.service.generate(
+                harness.owner, GenerationRequest.template("stopping").build());
+        assertTrue(entered.await(5, TimeUnit.SECONDS));
+        java.util.concurrent.ThreadPoolExecutor workers = (java.util.concurrent.ThreadPoolExecutor) harness.http;
+        quiet(workers);
+        long before = workers.getTaskCount();
+        harness.service.shutdown();
+        assertEquals(NexusErrorKind.SHUTDOWN, future.get(5, TimeUnit.SECONDS).error().orElseThrow().kind());
+        quiet(workers);
+        long tasks = workers.getTaskCount();
+        // Only the task that answers pending callers: the cancelled provider call adds none.
+        assertEquals(before + 1, tasks);
+        // The provider answers after unload. Nothing may run: its classes could be gone.
+        blocked.complete(pong());
+        Thread.sleep(100L);
+        assertEquals(tasks, workers.getTaskCount());
+    }
+
+    private static void quiet(java.util.concurrent.ThreadPoolExecutor workers) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while ((workers.getCompletedTaskCount() < workers.getTaskCount() || workers.getActiveCount() > 0)
+                && System.nanoTime() < deadline) {
+            Thread.sleep(5L);
+        }
+    }
+
+    @Test
     void callbacksRunOnTheHttpThreadIncludingCacheHits() throws Exception {
         Harness harness = singleThreadHarness();
         CountDownLatch hold = new CountDownLatch(1);

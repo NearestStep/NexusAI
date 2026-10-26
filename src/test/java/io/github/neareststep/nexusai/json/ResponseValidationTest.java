@@ -183,6 +183,7 @@ class ResponseValidationTest {
 
     @Test
     void deliverOnRegionCompletesOnOwningThread() throws Exception {
+        java.util.concurrent.CountDownLatch attached = new java.util.concurrent.CountDownLatch(1);
         AtomicReference<Thread> delivery = new AtomicReference<>();
         AtomicInteger scheduled = new AtomicInteger();
         RegionTasks regions = new RegionTasks() {
@@ -194,14 +195,19 @@ class ResponseValidationTest {
             @Override
             public void run(Plugin plugin, Player player, Runnable body, Runnable retired) {
                 scheduled.incrementAndGet();
-                Thread worker = new Thread(body, "region-delivery");
+                // The region thread waits until the test has attached its stage, so the stage
+                // runs where the future completes and not on the test thread.
+                Thread worker = new Thread(() -> {
+                    try {
+                        if (attached.await(5, TimeUnit.SECONDS)) {
+                            body.run();
+                        }
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                    }
+                }, "region-delivery");
                 worker.setDaemon(true);
                 worker.start();
-                try {
-                    worker.join(5_000L);
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                }
             }
         };
         Box box = open(yaml -> yaml.set("plugin-api.response-validation.deliver-on-region", true), regions);
@@ -212,12 +218,14 @@ class ResponseValidationTest {
                 .player(player)
                 .responseValidation(ResponseValidation.builder().deliverOnRegion(true).build())
                 .build();
-        JsonGenerationResult result = box.service.generateJson(box.owner, request, QUEST)
+        java.util.concurrent.CompletableFuture<JsonGenerationResult> delivered = box.service
+                .generateJson(box.owner, request, QUEST)
                 .thenApply(value -> {
                     delivery.set(Thread.currentThread());
                     return value;
-                })
-                .get(5, TimeUnit.SECONDS);
+                });
+        attached.countDown();
+        JsonGenerationResult result = delivered.get(5, TimeUnit.SECONDS);
         assertTrue(result.success());
         assertEquals(1, scheduled.get());
         assertEquals("region-delivery", delivery.get().getName());

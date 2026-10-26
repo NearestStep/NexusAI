@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.dialogue;
 
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -26,7 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+@Timeout(value = 5, unit = TimeUnit.MINUTES)
 class MemoryStoreTest {
+    /**
+     * Latches and joins wait longer than the 5 minute test timeout, so a test host pause cannot make a
+     * paused load give up and leave memory unloaded; only the test timeout ends a stuck test.
+     */
+    private static final long LATCH_WAIT_MINUTES = 10L;
+
 
     @Test
     void summaryRoundTripAndLegacyFileLoads() throws Exception {
@@ -390,8 +398,25 @@ class MemoryStoreTest {
         assertEquals("keep-bak\n", Files.readString(bak, StandardCharsets.UTF_8));
         assertEquals("keep-notes\n", Files.readString(other, StandardCharsets.UTF_8));
         assertArrayEquals(before, Files.readAllBytes(file));
-        assertTrue(logged.stream().anyMatch(line -> line.contains("Removed 2 stale")));
+        assertTrue(logged.contains("Removed 2 stale dialogue-memory.yml temp files left after saves were interrupted."),
+                logged.toString());
         assertTrue(logged.stream().noneMatch(line -> line.contains("qa-ring-kA-0002y")));
+    }
+
+    @Test
+    void oneStaleTempFileIsReportedInTheSingular() throws Exception {
+        Path dir = Files.createTempDirectory("dialogue-stale-one");
+        Path file = dir.resolve("dialogue-memory.yml");
+        Files.writeString(file, "entries: {}\n", StandardCharsets.UTF_8);
+        Path stale = dir.resolve("dialogue-memory.yml." + UUID.randomUUID() + ".tmp");
+        Files.writeString(stale, "partial", StandardCharsets.UTF_8);
+        List<String> logged = new ArrayList<>();
+
+        new MemoryStore().load(file.toFile(), 60L, 10_000L, capturingLogger("stale-one", logged), List.of());
+
+        assertFalse(Files.exists(stale));
+        assertTrue(logged.contains("Removed 1 stale dialogue-memory.yml temp file left after a save was interrupted."),
+                logged.toString());
     }
 
     @Test
@@ -704,7 +729,7 @@ class MemoryStoreTest {
         MemoryStore.pauseDuringLoad = () -> {
             insideLoad.countDown();
             try {
-                if (!releaseLoad.await(5, TimeUnit.SECONDS)) {
+                if (!releaseLoad.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES)) {
                     throw new IllegalStateException("load was not released");
                 }
             } catch (InterruptedException e) {
@@ -720,10 +745,10 @@ class MemoryStoreTest {
         }, "memory-save");
         try {
             loader.start();
-            assertTrue(insideLoad.await(5, TimeUnit.SECONDS));
+            assertTrue(insideLoad.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
             assertTrue(store.transcript(player, "blacksmith", 60L, 8, 100, 10_000L).isEmpty());
             saver.start();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(LATCH_WAIT_MINUTES);
             while (!store.diskLock.hasQueuedThread(saver)) {
                 if (saveFinished.getCount() == 0) {
                     fail("save wrote before the load released the lock");
@@ -735,8 +760,8 @@ class MemoryStoreTest {
             }
             assertTrue(Files.readString(file).contains("kept-from-disk"));
             releaseLoad.countDown();
-            assertTrue(saveFinished.await(5, TimeUnit.SECONDS));
-            loader.join(5_000L);
+            assertTrue(saveFinished.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
+            loader.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
             assertEquals("kept-from-disk",
                     store.transcript(player, "blacksmith", 60L, 8, 100, 10_000L).get(0).text());
             String saved = Files.readString(file);
@@ -744,8 +769,8 @@ class MemoryStoreTest {
         } finally {
             MemoryStore.pauseDuringLoad = null;
             releaseLoad.countDown();
-            loader.join(5_000L);
-            saver.join(5_000L);
+            loader.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
+            saver.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
         }
     }
 

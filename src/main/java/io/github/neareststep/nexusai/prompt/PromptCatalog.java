@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.api.KnowledgeSelect;
+import io.github.neareststep.nexusai.config.ConfigIdentifiers;
 import io.github.neareststep.nexusai.config.FallbackModel;
 import io.github.neareststep.nexusai.config.GenerationOverrides;
 import io.github.neareststep.nexusai.config.PluginConfig;
@@ -418,7 +419,8 @@ public final class PromptCatalog {
         String model = null;
         if (modelSet) {
             Object raw = section.get("model");
-            model = raw == null ? "" : String.valueOf(raw).trim();
+            model = raw == null ? "" : ConfigIdentifiers.clean("Prompt '" + id + "' model",
+                    String.valueOf(raw).trim(), warnings);
             if (model.isEmpty()) {
                 warnings.add("Prompt '" + id + "' has an empty model. The model from config.yml will be used.");
                 modelSet = false;
@@ -515,8 +517,10 @@ public final class PromptCatalog {
             warnings.add("Prompt '" + id + "' fallback-model must set provider and model. It was ignored.");
             return null;
         }
-        String provider = model.getString("provider", "");
-        String name = model.getString("model", "");
+        String provider = ConfigIdentifiers.clean("Prompt '" + id + "' fallback-model.provider",
+                model.getString("provider", ""), warnings);
+        String name = ConfigIdentifiers.clean("Prompt '" + id + "' fallback-model.model",
+                model.getString("model", ""), warnings);
         FallbackModel parsed = FallbackModel.of(provider, name);
         if (!parsed.configured()) {
             warnings.add("Prompt '" + id + "' fallback-model must set provider and model. It was ignored.");

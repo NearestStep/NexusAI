@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.config;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.util.Objects;
 
 /**
@@ -57,7 +59,7 @@ public final class GenerationOverrides {
         this.maxTokensSet = maxTokensSet;
         this.maxTokens = maxTokens;
         this.modelSet = modelSet;
-        this.model = model;
+        this.model = Utf16.replaceLoneSurrogates(model);
         this.formatSet = formatSet;
         this.format = format;
         this.fallbackSet = fallbackSet;

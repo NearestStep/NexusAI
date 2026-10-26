@@ -1,6 +1,7 @@
 package io.github.neareststep.nexusai.knowledge;
 
 import io.github.neareststep.nexusai.knowledge.KeywordSettings.OnNoMatch;
+import io.github.neareststep.nexusai.text.Utf16;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -82,7 +83,7 @@ public final class KeywordSelector {
         String content = render(ranked);
         boolean truncated = false;
         if (content.length() > maxChars) {
-            content = content.substring(0, maxChars);
+            content = Utf16.head(content, maxChars);
             truncated = true;
             logger.warning("Knowledge text was truncated to " + maxChars + " characters for this request.");
         }

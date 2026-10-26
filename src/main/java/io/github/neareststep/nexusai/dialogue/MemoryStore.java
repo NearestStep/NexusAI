@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
 import io.github.neareststep.nexusai.config.LogRedaction;
 import io.github.neareststep.nexusai.config.SecretMask;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -108,13 +109,41 @@ public final class MemoryStore {
     static volatile Runnable beforeLoaderRewrite;
 
     /**
+     * Runs just before a save or a masking rewrite turns a document into text, with that document.
+     * Tests throw from it to stand for a YAML library that rejects the document, or one character
+     * of it. A null hook is the production path.
+     */
+    static volatile java.util.function.Consumer<YamlConfiguration> beforeDocumentDump;
+
+    /**
      * Runs on the stop thread after the unsaved-character count is taken and before stop waits.
      * Tests add characters here. A null hook is the production path.
      */
     static volatile Runnable afterStopCount;
 
+    /**
+     * Runs with {@link #diskLock} held after a load has put the transcripts from the file into the
+     * store and before it finishes. Tests hold a load here, as a large file is still loading after
+     * its first entries are in memory. A null hook is the production path.
+     */
+    static volatile Runnable afterLoadPublish;
+
     /** When set, the next stop rename fails and the temporary file is removed. */
     static volatile boolean failNextPublish;
+
+    /**
+     * Asked once per stop splice after the characters already in the file are counted. Returning
+     * true makes the splice behave as if the file layout could not be edited in place, which is the
+     * {@code null} result of {@code editsAbsent}. Tests use it to reach the full-document save. A
+     * null hook is the production path.
+     */
+    static volatile java.util.function.BooleanSupplier refuseSpliceEdits;
+
+    /**
+     * Runs with the character id before a stop splice builds that character's block. Tests throw
+     * from it to stand for a block YAML cannot write. A null hook is the production path.
+     */
+    static volatile java.util.function.Consumer<String> beforeCharacterBlock;
 
     /**
      * Set when stop gives up on a load that is still reading. The load returns without
@@ -171,6 +200,16 @@ public final class MemoryStore {
 
     /** Characters in memory when this stop began. {@code -1} when stop is not running. */
     private volatile int stopUnsavedCount = -1;
+    /** Characters stop wrote to the file since {@link #beginStopCount}, or -1 outside stop. */
+    private final AtomicInteger stopWritten = new AtomicInteger(-1);
+    /** Characters held in memory that stop found already in the file, or -1 outside stop. */
+    private final AtomicInteger stopAlreadyInFile = new AtomicInteger(-1);
+    /**
+     * Keys of the characters held in memory when stop began, or null outside stop. The appended and
+     * already-in-file counts use only these, so characters a still-running load or a late turn puts
+     * into memory after that point are not counted.
+     */
+    private volatile Set<String> stopHeldKeys;
 
     @FunctionalInterface
     interface CorruptMove {
@@ -361,6 +400,10 @@ public final class MemoryStore {
                 published++;
                 loadedKeys.add(key(player, characterId));
             }
+        }
+        Runnable published0 = afterLoadPublish;
+        if (published0 != null) {
+            published0.run();
         }
         noteLoadMatchesDisk(file, yaml, changesBefore, published, dropped, loadedKeys);
     }
@@ -605,8 +648,18 @@ public final class MemoryStore {
         if (store != null && store.loaderMustNotPublish) {
             return false;
         }
-        allowLongSimpleKeys(yaml);
-        String body = yaml.saveToString();
+        String body;
+        try {
+            body = dumpBody(yaml);
+        } catch (RuntimeException e) {
+            body = replaceLoneSurrogates(yaml) ? dumpOrNull(yaml) : null;
+            if (body == null) {
+                if (logger != null) {
+                    LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets);
+                }
+                return false;
+            }
+        }
         if (store != null && store.loaderMustNotPublish) {
             return false;
         }
@@ -693,13 +746,23 @@ public final class MemoryStore {
                 return StopSave.NOT_WRITTEN;
             }
             if (matchesDisk(file, summaries)) {
+                noteStopAlreadyInFile(Math.max(0, countForWarning(summaries) - stopWrittenCount()));
                 return StopSave.SKIPPED;
             }
             long snapshot = changes.get();
+            Set<String> skipped = new HashSet<>();
             WriteResult wrote = publishYaml(
-                    file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+                    file, document(summaries), logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos, skipped);
             if (wrote == WriteResult.PUBLISHED) {
                 noteSaved(file, snapshot, summaries);
+            }
+            if (wrote == WriteResult.PUBLISHED) {
+                // The whole document was written, so every held character counts as appended,
+                // except one YAML could not write: it was left out and is not in the file either.
+                // An earlier splice pass may have counted some as already in the file; drop that
+                // count so appended plus already in file never exceeds the held count.
+                stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : 0);
+                noteStopWritten(countForWarning(summaries) - heldAtStop(skipped));
             }
             return switch (wrote) {
                 case PUBLISHED -> StopSave.SAVED;
@@ -717,7 +780,7 @@ public final class MemoryStore {
             return;
         }
         long snapshot = changes.get();
-        if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos) == WriteResult.PUBLISHED) {
+        if (publishYaml(file, document(summaries), logger, summaries, publish, deadlineNanos, null) == WriteResult.PUBLISHED) {
             noteSaved(file, snapshot, summaries);
         }
     }
@@ -745,6 +808,9 @@ public final class MemoryStore {
     /**
      * Writes {@code yaml} via a temp file and {@code publish}. A backup failure is logged and does
      * not also log a save failure. The temporary file is removed when the rename does not happen.
+     *
+     * @param skipped when not null, receives the keys ({@code player + '\0' + character}) of the
+     *                characters left out because YAML could not write them
      */
     private WriteResult publishYaml(
             File file,
@@ -752,7 +818,8 @@ public final class MemoryStore {
             Logger logger,
             boolean summaries,
             Publish publish,
-            long deadlineNanos
+            long deadlineNanos,
+            Set<String> skipped
     ) {
         if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
             return WriteResult.PAST_DEADLINE;
@@ -776,11 +843,21 @@ public final class MemoryStore {
                 }
             }
             String body;
-            if (containsForcedQuote(yaml)) {
-                body = dumpDocument(configurationMap(yaml));
-            } else {
-                allowLongSimpleKeys(yaml);
-                body = yaml.saveToString();
+            try {
+                body = dumpBody(yaml);
+            } catch (RuntimeException e) {
+                body = replaceLoneSurrogates(yaml) ? dumpOrNull(yaml) : null;
+                if (body == null) {
+                    body = dumpSkippingBrokenCharacters(yaml, logger, skipped);
+                }
+                if (body == null) {
+                    // Same warning as a write that fails; stop and the periodic save then also
+                    // name how many characters were not saved.
+                    if (logger != null) {
+                        LogRedaction.warning(logger, "Failed to save dialogue-memory.yml", e, secrets());
+                    }
+                    return WriteResult.FAILED;
+                }
             }
             if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) {
                 return WriteResult.PAST_DEADLINE;
@@ -810,6 +887,146 @@ public final class MemoryStore {
             }
             return WriteResult.FAILED;
         }
+    }
+
+    /**
+     * The text of {@code yaml}. A document with a string that has to be escaped (line separators
+     * and other controls) goes through {@link #dumpDocument(Map)}; any other document is written by
+     * Bukkit as before.
+     */
+    private static String dumpBody(YamlConfiguration yaml) {
+        java.util.function.Consumer<YamlConfiguration> hook = beforeDocumentDump;
+        if (hook != null) {
+            hook.accept(yaml);
+        }
+        if (containsForcedQuote(yaml)) {
+            return dumpDocument(configurationMap(yaml));
+        }
+        allowLongSimpleKeys(yaml);
+        return yaml.saveToString();
+    }
+
+    private static String dumpOrNull(YamlConfiguration yaml) {
+        try {
+            return dumpBody(yaml);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Replaces lone surrogates in every string of {@code yaml} with U+FFFD. Memory never holds
+     * one ({@link TurnMemory.Line}), but a file can: YAML reads an escaped {@code \ud800}. Runs only
+     * after a dump failed, so a normal save does not walk the document twice.
+     *
+     * @return true when something was replaced
+     */
+    private static boolean replaceLoneSurrogates(ConfigurationSection section) {
+        boolean changed = false;
+        for (String key : section.getKeys(false)) {
+            Object value = section.get(key);
+            if (value instanceof ConfigurationSection child) {
+                changed |= replaceLoneSurrogates(child);
+                continue;
+            }
+            Object clean = withoutLoneSurrogates(value);
+            if (clean != value) {
+                section.set(key, clean);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /** {@code value} itself when it holds no lone surrogate, otherwise a cleaned copy. */
+    private static Object withoutLoneSurrogates(Object value) {
+        if (value instanceof String text) {
+            return Utf16.replaceLoneSurrogates(text);
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = null;
+            for (int i = 0; i < list.size(); i++) {
+                Object one = list.get(i);
+                Object clean = withoutLoneSurrogates(one);
+                if (clean != one && copy == null) {
+                    copy = new ArrayList<>(list);
+                }
+                if (copy != null) {
+                    copy.set(i, clean);
+                }
+            }
+            return copy == null ? value : copy;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> copy = null;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                Object clean = withoutLoneSurrogates(entry.getValue());
+                if (clean != entry.getValue() && copy == null) {
+                    copy = new LinkedHashMap<>(map);
+                }
+                if (copy != null) {
+                    copy.put(entry.getKey(), clean);
+                }
+            }
+            return copy == null ? value : copy;
+        }
+        return value;
+    }
+
+    /**
+     * After the whole document failed to dump: tries each character on its own, leaves out the
+     * ones that fail, and dumps the rest. One warning gives the count and the cause; it holds no
+     * dialogue text. Null when no single character is to blame or the rest still fails. The keys of
+     * the characters left out go to {@code skippedKeys} when it is not null and the rest was dumped.
+     */
+    private String dumpSkippingBrokenCharacters(YamlConfiguration yaml, Logger logger, Set<String> skippedKeys) {
+        ConfigurationSection entries = yaml.getConfigurationSection("entries");
+        if (entries == null) {
+            return null;
+        }
+        List<String> skipped = new ArrayList<>();
+        List<String> keys = new ArrayList<>();
+        RuntimeException cause = null;
+        for (String player : entries.getKeys(false)) {
+            ConfigurationSection characters = entries.getConfigurationSection(player);
+            if (characters == null) {
+                continue;
+            }
+            for (String id : characters.getKeys(false)) {
+                YamlConfiguration one = new YamlConfiguration();
+                Map<String, Object> character = new LinkedHashMap<>();
+                character.put(id, plainValue(characters.get(id)));
+                Map<String, Object> byPlayer = new LinkedHashMap<>();
+                byPlayer.put(player, character);
+                one.set("entries", byPlayer);
+                try {
+                    dumpBody(one);
+                } catch (RuntimeException e) {
+                    characters.set(id, null);
+                    skipped.add(player + "/" + id);
+                    keys.add(player + "\u0000" + id);
+                    if (cause == null) {
+                        cause = e;
+                    }
+                }
+            }
+        }
+        if (skipped.isEmpty()) {
+            return null;
+        }
+        String body = dumpOrNull(yaml);
+        if (body == null) {
+            return null;
+        }
+        if (skippedKeys != null) {
+            skippedKeys.addAll(keys);
+        }
+        if (logger != null) {
+            logger.warning(LogRedaction.summaryWithCause(leftOutText(skipped.size()), cause, secrets()));
+            logger.fine((skipped.size() == 1 ? "Dialogue character" : "Dialogue characters")
+                    + " left out of dialogue-memory.yml: " + String.join(", ", skipped));
+        }
+        return body;
     }
 
     /**
@@ -1010,7 +1227,14 @@ public final class MemoryStore {
 
     /** Characters that were only in memory when stop began. Later loads do not change the warning. */
     void beginStopCount(boolean summaries) {
-        stopUnsavedCount = unsavedCharacterCount(summaries);
+        Set<String> held;
+        synchronized (this) {
+            held = Set.copyOf(transcriptsAbsent(Set.of(), summaries).keySet());
+        }
+        stopHeldKeys = held;
+        stopUnsavedCount = held.size();
+        stopWritten.set(0);
+        stopAlreadyInFile.set(0);
         Runnable hook = afterStopCount;
         if (hook != null) {
             hook.run();
@@ -1019,6 +1243,59 @@ public final class MemoryStore {
 
     void endStopCount() {
         stopUnsavedCount = -1;
+        stopHeldKeys = null;
+        stopWritten.set(-1);
+        stopAlreadyInFile.set(-1);
+    }
+
+    /** Characters held in memory when stop began. */
+    int stopHeldCount(boolean summaries) {
+        return countForWarning(summaries);
+    }
+
+    /** Characters stop has written to the file so far, at most the held count. Zero outside stop. */
+    int stopWrittenCount() {
+        int written = Math.max(0, stopWritten.get());
+        int held = stopUnsavedCount;
+        return held >= 0 ? Math.min(written, held) : written;
+    }
+
+    /**
+     * Characters held in memory that stop found already in the file. Never more than the held
+     * count minus {@link #stopWrittenCount()}, so the two add up to at most the held count. Zero
+     * outside stop.
+     */
+    int stopAlreadyInFileCount() {
+        int already = Math.max(0, stopAlreadyInFile.get());
+        int held = stopUnsavedCount;
+        return held >= 0 ? Math.min(already, Math.max(0, held - stopWrittenCount())) : already;
+    }
+
+    /** How many of {@code keys} were held in memory when stop began. All of them outside stop. */
+    private int heldAtStop(Set<String> keys) {
+        return heldAtStop(keys, stopHeldKeys);
+    }
+
+    private static int heldAtStop(Set<String> keys, Set<String> held) {
+        if (held == null) {
+            return keys.size();
+        }
+        int count = 0;
+        for (String key : keys) {
+            if (held.contains(key)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void noteStopWritten(int count) {
+        stopWritten.getAndUpdate(seen -> seen < 0 ? seen : seen + Math.max(0, count));
+    }
+
+    /** A later pass over the same file sees at least the characters an earlier pass saw. */
+    private void noteStopAlreadyInFile(int count) {
+        stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : Math.max(seen, count));
     }
 
     private int countForWarning(boolean summaries) {
@@ -1074,15 +1351,22 @@ public final class MemoryStore {
         Map<String, StoredTranscript> extra;
         synchronized (this) {
             extra = transcriptsAbsent(outline.characterKeys, summaries);
+            noteStopAlreadyInFile(transcriptsPresent(outline.characterKeys, summaries));
         }
         if (extra.isEmpty()) {
             return SpliceResult.NOTHING;
         }
-        List<TextEdit> edits = editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
+        java.util.function.BooleanSupplier refuse = refuseSpliceEdits;
+        List<TextEdit> edits = refuse != null && refuse.getAsBoolean()
+                ? null
+                : editsAbsent(text, outline, redactExtra(extra, secrets), summaries);
         if (edits == null) {
             return SpliceResult.FAILED;
         }
         WriteResult wrote = publishEdits(file, text, edits, logger, summaries, outline.format2, secrets, deadlineNanos);
+        if (wrote == WriteResult.PUBLISHED) {
+            noteStopWritten(heldAtStop(extra.keySet()));
+        }
         return switch (wrote) {
             case PUBLISHED -> SpliceResult.PUBLISHED;
             case PAST_DEADLINE -> SpliceResult.PAST_DEADLINE;
@@ -1182,6 +1466,7 @@ public final class MemoryStore {
         Map<String, StoredTranscript> extra;
         synchronized (this) {
             extra = transcriptsAbsent(present, summaries);
+            noteStopAlreadyInFile(transcriptsPresent(present, summaries));
         }
         if (extra.isEmpty()) {
             return FullAppend.NOTHING;
@@ -1192,7 +1477,23 @@ public final class MemoryStore {
         for (Map.Entry<String, StoredTranscript> entry : redactExtra(extra, secrets).entrySet()) {
             writeTranscript(yaml, entry.getKey(), entry.getValue(), summaries);
         }
-        return switch (publishYamlLocked(file, yaml, logger, summaries, deadlineNanos)) {
+        Set<String> skipped = new HashSet<>();
+        WriteResult appended = publishYamlLocked(file, yaml, logger, summaries, deadlineNanos, skipped);
+        if (appended == WriteResult.PUBLISHED) {
+            Set<String> written = extra.keySet();
+            if (!skipped.isEmpty()) {
+                // Characters YAML could not write were left out of the file: not appended, and
+                // one that was already in the file is not there any more.
+                written = new HashSet<>(written);
+                written.removeAll(skipped);
+                Set<String> kept = new HashSet<>(present);
+                kept.removeAll(skipped);
+                int inFile = heldAtStop(kept, stopHeldKeys);
+                stopAlreadyInFile.getAndUpdate(seen -> seen < 0 ? seen : Math.min(seen, inFile));
+            }
+            noteStopWritten(heldAtStop(written));
+        }
+        return switch (appended) {
             case PUBLISHED -> FullAppend.PUBLISHED;
             case PAST_DEADLINE -> FullAppend.NOT_FINISHED;
             case FAILED -> FullAppend.UNWRITTEN;
@@ -1237,7 +1538,7 @@ public final class MemoryStore {
     }
 
     private WriteResult publishYamlLocked(
-            File file, YamlConfiguration yaml, Logger logger, boolean summaries, long deadlineNanos) {
+            File file, YamlConfiguration yaml, Logger logger, boolean summaries, long deadlineNanos, Set<String> skipped) {
         synchronized (publishGate) {
             if (saveBlocked || !file.isFile()) {
                 return WriteResult.FAILED;
@@ -1246,7 +1547,8 @@ public final class MemoryStore {
                 return WriteResult.PUBLISHED;
             }
             loaderMustNotPublish = true;
-            WriteResult published = publishYaml(file, yaml, logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos);
+            WriteResult published = publishYaml(
+                    file, yaml, logger, summaries, MemoryStore::moveIntoPlace, deadlineNanos, skipped);
             if (published != WriteResult.PUBLISHED) {
                 loaderMustNotPublish = false;
             }
@@ -1662,7 +1964,18 @@ public final class MemoryStore {
         if (logger == null || count <= 0 || reason == null) {
             return;
         }
-        logger.warning("Did not save " + count + " dialogue characters because " + reason.text + ".");
+        logger.warning("Did not save " + dialogueCharacters(count) + " because " + reason.text + ".");
+    }
+
+    /** {@code "1 dialogue character"} or {@code "<count> dialogue characters"}, for log lines. */
+    static String dialogueCharacters(int count) {
+        return count + (count == 1 ? " dialogue character" : " dialogue characters");
+    }
+
+    /** The warning text, without the cause, for characters left out of a save. */
+    static String leftOutText(int count) {
+        return "Left " + dialogueCharacters(count) + " out of dialogue-memory.yml because YAML could not write "
+                + (count == 1 ? "it" : "them") + "; the other characters were saved";
     }
 
     /**
@@ -1780,6 +2093,20 @@ public final class MemoryStore {
      */
     private static String characterBlock(
             String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
+        try {
+            return characterBlockOrNull(characterId, transcript, summaries, indent, nl);
+        } catch (RuntimeException e) {
+            // A block YAML cannot write is refused like one that does not round-trip.
+            return null;
+        }
+    }
+
+    private static String characterBlockOrNull(
+            String characterId, StoredTranscript transcript, boolean summaries, int indent, String nl) {
+        java.util.function.Consumer<String> hook = beforeCharacterBlock;
+        if (hook != null) {
+            hook.accept(characterId);
+        }
         if (yamlKey(characterId) != null && !transcriptNeedsQuote(transcript)) {
             String classic = classicCharacterBlock(characterId, transcript, summaries, indent, nl);
             if (blockRoundTrips(characterId, transcript, summaries, classic)) {
@@ -1905,7 +2232,9 @@ public final class MemoryStore {
                     } else if (value.indexOf('\n') >= 0) {
                         style = DumperOptions.ScalarStyle.LITERAL;
                     } else {
-                        style = null;
+                        // PLAIN is a request: the emitter quotes the value when a plain scalar
+                        // would not read back as the same string. SnakeYAML 2.6 rejects a null style.
+                        style = DumperOptions.ScalarStyle.PLAIN;
                     }
                     return representScalar(Tag.STR, value, style);
                 });
@@ -2388,6 +2717,35 @@ public final class MemoryStore {
         return keys;
     }
 
+    /**
+     * Characters held in memory whose key is already in {@code present}. During stop only the
+     * characters held when stop began count; otherwise those with lines or a summary in memory.
+     */
+    private int transcriptsPresent(Set<String> present, boolean summaries) {
+        Set<String> held = stopHeldKeys;
+        if (held != null) {
+            int count = 0;
+            for (String key : held) {
+                if (present.contains(key)) {
+                    count++;
+                }
+            }
+            return count;
+        }
+        int count = 0;
+        for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
+            if (!present.contains(entry.getKey())) {
+                continue;
+            }
+            TurnMemory memory = entry.getValue();
+            String summary = summaries ? memory.summary() : "";
+            if (!memory.view().isEmpty() || (summary != null && !summary.isBlank())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private Map<String, StoredTranscript> transcriptsAbsent(Set<String> present, boolean summaries) {
         Map<String, StoredTranscript> extra = new LinkedHashMap<>();
         for (Map.Entry<String, TurnMemory> entry : memories.entrySet()) {
@@ -2795,9 +3153,14 @@ public final class MemoryStore {
             }
         }
         if (removed > 0 && logger != null) {
-            logger.info("Removed " + removed
-                    + " stale dialogue-memory.yml temp file(s) left after a save was interrupted.");
+            logger.info(removedTempsText(removed));
         }
+    }
+
+    static String removedTempsText(int removed) {
+        return removed == 1
+                ? "Removed 1 stale dialogue-memory.yml temp file left after a save was interrupted."
+                : "Removed " + removed + " stale dialogue-memory.yml temp files left after saves were interrupted.";
     }
 
     private static String key(UUID player, String characterId) {

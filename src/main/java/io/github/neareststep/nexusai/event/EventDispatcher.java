@@ -42,12 +42,15 @@ public final class EventDispatcher {
 
     static final long SLOW_NANOS = 50_000_000L;
     static final long WARN_GAP_NANOS = 5L * 60L * 1_000_000_000L;
+    /** Delivery failures logged at WARNING per event class in one {@link #WARN_GAP_NANOS} window. */
+    static final int FAILURE_WARNINGS = 3;
 
     private static final EventDispatcher NONE = new EventDispatcher(
             Logger.getLogger("NexusAI"),
             java.util.List::of,
             event -> { },
             System::nanoTime,
+            () -> false,
             () -> false);
 
     private static volatile EventDispatcher current = NONE;
@@ -56,6 +59,8 @@ public final class EventDispatcher {
     private final Consumer<Event> caller;
     private final LongSupplier nanoTime;
     private final BooleanSupplier serverStopping;
+    private final BooleanSupplier primaryThread;
+    private final ConcurrentHashMap<Class<?>, Failures> failures = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Class<?>, Long> warnedAt = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Open> opens = new ConcurrentHashMap<>();
 
@@ -64,7 +69,8 @@ public final class EventDispatcher {
             Supplier<Iterable<String>> secrets,
             Consumer<Event> caller,
             LongSupplier nanoTime,
-            BooleanSupplier serverStopping
+            BooleanSupplier serverStopping,
+            BooleanSupplier primaryThread
     ) {
         this.logger = logger == null ? Logger.getLogger("NexusAI") : logger;
         EventTexts.secrets(secrets);
@@ -72,6 +78,7 @@ public final class EventDispatcher {
         this.caller = caller == null ? event -> { } : caller;
         this.nanoTime = nanoTime == null ? System::nanoTime : nanoTime;
         this.serverStopping = serverStopping == null ? () -> false : serverStopping;
+        this.primaryThread = primaryThread == null ? () -> false : primaryThread;
     }
 
     public static EventDispatcher get() {
@@ -80,7 +87,8 @@ public final class EventDispatcher {
 
     /** Production dispatcher. Bukkit delivers the event and catches listener failures. */
     public static EventDispatcher bukkit(Logger logger, Supplier<Iterable<String>> secrets) {
-        return new EventDispatcher(logger, secrets, EventDispatcher::bukkitCall, System::nanoTime, EventDispatcher::serverStopping);
+        return new EventDispatcher(logger, secrets, EventDispatcher::bukkitCall, System::nanoTime, EventDispatcher::serverStopping,
+                EventDispatcher::bukkitPrimaryThread);
     }
 
     /**
@@ -93,7 +101,19 @@ public final class EventDispatcher {
             LongSupplier nanoTime,
             BooleanSupplier serverStopping
     ) {
-        return new EventDispatcher(logger, secrets, caller, nanoTime, serverStopping);
+        return new EventDispatcher(logger, secrets, caller, nanoTime, serverStopping, () -> false);
+    }
+
+    /** Tests also pass which thread counts as the server thread. */
+    public static EventDispatcher create(
+            Logger logger,
+            Supplier<Iterable<String>> secrets,
+            Consumer<Event> caller,
+            LongSupplier nanoTime,
+            BooleanSupplier serverStopping,
+            BooleanSupplier primaryThread
+    ) {
+        return new EventDispatcher(logger, secrets, caller, nanoTime, serverStopping, primaryThread);
     }
 
     public static void install(EventDispatcher dispatcher) {
@@ -365,16 +385,78 @@ public final class EventDispatcher {
     }
 
     private void dispatch(Event event) {
+        if (event.isAsynchronous() && onPrimaryThread()) {
+            // Bukkit refuses an async event on the server thread (and Folia on a region thread).
+            // Firing it later from another thread would come after the request already finished,
+            // so it is skipped. NexusAI moves its completions off that thread first; this is the
+            // last-resort path, for example when both executors reject during shutdown.
+            if (logger.isLoggable(Level.FINE)) {
+                logger.fine("Skipped " + event.getEventName()
+                        + " on the server thread: Bukkit does not allow an async event there");
+            }
+            return;
+        }
         long started = nanoTime.getAsLong();
         try {
             caller.accept(event);
         } catch (Throwable thrown) {
-            logger.log(Level.SEVERE, "Could not deliver " + event.getEventName(), thrown);
+            deliveryFailed(event, thrown);
         } finally {
             long took = nanoTime.getAsLong() - started;
             if (took > SLOW_NANOS) {
                 warnSlow(event, took);
             }
+        }
+    }
+
+    private void deliveryFailed(Event event, Throwable thrown) {
+        String name = event.getEventName();
+        String message = "Could not deliver " + name + ": " + thrown.getClass().getSimpleName()
+                + (thrown.getMessage() == null ? "" : ": " + EventTexts.message(thrown.getMessage()));
+        if (stopping()) {
+            logger.log(Level.FINE, message, thrown);
+            return;
+        }
+        long now = nanoTime.getAsLong();
+        Failures row = failures.computeIfAbsent(event.getClass(), key -> new Failures(now));
+        int seen;
+        synchronized (row) {
+            if (now - row.windowStart >= WARN_GAP_NANOS) {
+                row.windowStart = now;
+                row.count = 0;
+            }
+            seen = ++row.count;
+        }
+        if (seen <= FAILURE_WARNINGS) {
+            logger.warning(message);
+        } else if (seen == FAILURE_WARNINGS + 1) {
+            logger.warning("Further failures delivering " + name + " are not logged for 5 minutes (FINE logs each one)");
+        }
+        logger.log(Level.FINE, message, thrown);
+    }
+
+    private static final class Failures {
+        private long windowStart;
+        private int count;
+
+        private Failures(long windowStart) {
+            this.windowStart = windowStart;
+        }
+    }
+
+    private boolean onPrimaryThread() {
+        try {
+            return primaryThread.getAsBoolean();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean bukkitPrimaryThread() {
+        try {
+            return Bukkit.getServer() != null && Bukkit.isPrimaryThread();
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -436,19 +518,16 @@ public final class EventDispatcher {
         }
     }
 
+    /** Throws what {@code callEvent} throws; {@link #dispatch} logs it and the request still finishes. */
     private static void bukkitCall(Event event) {
-        try {
-            if (Bukkit.getServer() == null) {
-                return;
-            }
-            PluginManager manager = Bukkit.getPluginManager();
-            if (manager == null) {
-                return;
-            }
-            manager.callEvent(event);
-        } catch (Throwable ignored) {
-            // The server is stopping, or Bukkit is not standing. The request still finishes.
+        if (Bukkit.getServer() == null) {
+            return;
         }
+        PluginManager manager = Bukkit.getPluginManager();
+        if (manager == null) {
+            return;
+        }
+        manager.callEvent(event);
     }
 
     private static void installCancelMask() {

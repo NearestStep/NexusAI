@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExamplesConfigTest {
 
     private static final Set<String> ROOT = Set.of(
-            "config-version", "locale", "api", "providers", "model-queue-strategy",
+            "config-version", "locale", "startup-banner", "api", "providers", "model-queue-strategy",
             "model-queue-remaining-threshold", "model-queue", "fallback-model", "knowledge",
             "formats", "cache", "latency", "limits", "pool", "prewarm", "moderation", "fallback",
             "dialogue", "actions", "context", "world-context", "plugin-api", "quotas", "sanitize", "http");
@@ -82,7 +82,7 @@ class ExamplesConfigTest {
             "enabled", "memory-turns", "persist-memory", "memory-max-chars", "memory-expiry-hours",
             "session-timeout-seconds", "leave-radius", "max-replies-per-session",
             "message-cooldown-millis", "conversations-per-player-per-day", "max-message-length",
-            "cache-greeting", "summary");
+            "cache-greeting", "summary", "log-stop-budget");
 
     private static final Set<String> SUMMARY = Set.of(
             "enabled", "threshold-turns", "max-chars", "max-tokens", "provider", "model");
@@ -105,7 +105,7 @@ class ExamplesConfigTest {
 
     private static final Set<String> CONTEXT = Set.of(
             "enabled", "max-provider-timeout-millis", "total-timeout-millis", "max-chars-per-provider",
-            "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds");
+            "max-chars", "refresh-seconds", "suspend-after-timeouts", "suspend-seconds", "log-timeouts");
 
     private static final Set<String> WORLD_CONTEXT = Set.of(
             "enabled", "radius", "max-blocks", "max-block-types", "max-inventory-items", "max-chars",

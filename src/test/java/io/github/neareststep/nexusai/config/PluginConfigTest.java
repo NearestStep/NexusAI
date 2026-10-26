@@ -463,6 +463,53 @@ class PluginConfigTest {
     }
 
     @Test
+    void startupBannerDefaultsToTrueAndReadsBothValues() {
+        PluginConfig defaults = new PluginConfig(baseYaml());
+        assertTrue(defaults.startupBanner());
+        assertNull(defaults.startupBannerWarning());
+
+        YamlConfiguration off = baseYaml();
+        off.set("startup-banner", false);
+        PluginConfig offCfg = new PluginConfig(off);
+        assertFalse(offCfg.startupBanner());
+        assertNull(offCfg.startupBannerWarning());
+
+        YamlConfiguration on = baseYaml();
+        on.set("startup-banner", true);
+        PluginConfig onCfg = new PluginConfig(on);
+        assertTrue(onCfg.startupBanner());
+        assertNull(onCfg.startupBannerWarning());
+
+        YamlConfiguration unknown = baseYaml();
+        unknown.set("startup-banner", "loud");
+        PluginConfig bad = new PluginConfig(unknown);
+        assertTrue(bad.startupBanner());
+        assertEquals("Unknown startup-banner 'loud'. Use true or false. Using true.", bad.startupBannerWarning());
+
+        bad.reload(off);
+        assertFalse(bad.startupBanner());
+        assertNull(bad.startupBannerWarning());
+    }
+
+    @Test
+    void startupBannerReadsYamlTextAndOldWords() throws Exception {
+        for (String value : List.of("true", "full", "TRUE")) {
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.loadFromString("startup-banner: " + value + "\n");
+            PluginConfig config = new PluginConfig(yaml);
+            assertTrue(config.startupBanner(), value);
+            assertNull(config.startupBannerWarning(), value);
+        }
+        for (String value : List.of("false", "off", "\"off\"", "False", "compact", "COMPACT")) {
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.loadFromString("startup-banner: " + value + "\n");
+            PluginConfig config = new PluginConfig(yaml);
+            assertFalse(config.startupBanner(), value);
+            assertNull(config.startupBannerWarning(), value);
+        }
+    }
+
+    @Test
     void missingUsageDefaultsToEstimateAndRejectsUnknownValues() {
         PluginConfig defaults = new PluginConfig(baseYaml());
         assertEquals(MissingUsage.ESTIMATE, defaults.missingUsage());

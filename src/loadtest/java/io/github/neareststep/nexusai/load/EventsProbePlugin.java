@@ -87,6 +87,8 @@ public final class EventsProbePlugin extends JavaPlugin implements Listener {
         }
     }
 
+    static final String PLACEHOLDER_POST_PROPERTY = "nexusai.eventsprobe.placeholderPost";
+
     @EventHandler
     public void onPre(NexusPreGenerateEvent event) {
         line("pre", event.requestId(), event.origin(), event.consumer());
@@ -95,6 +97,11 @@ public final class EventsProbePlugin extends JavaPlugin implements Listener {
     @EventHandler
     public void onPost(NexusPostGenerateEvent event) {
         line("post", event.requestId(), event.origin(), event.consumer());
+        if (event.origin() == RequestOrigin.PLACEHOLDER) {
+            // The load driver reads this when it sees the placeholder text, so the smoke can
+            // tell that Post ran first even when console lines from two threads interleave.
+            System.setProperty(PLACEHOLDER_POST_PROPERTY, Long.toString(event.requestId()));
+        }
     }
 
     @EventHandler

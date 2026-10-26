@@ -152,7 +152,7 @@ shop_tip:
 
 Until a plugin with that id is registered, startup logs `Prompt 'shop_tip' lists unknown context provider 'economy'.` The prompt still loads. The value is sanitized (markup is always removed), wrapped as player input, and becomes part of the `cached_` cache key. Round the value (`~12k`) so every coin does not open a new cache row. The class that does this for a balance is `src/test/java/io/github/neareststep/nexusai/context/ExampleBalanceProvider.java`. The prompt file is [examples/context-prompt](../examples/context-prompt/README.md).
 
-`context.enabled: false` skips every provider.
+`context.enabled: false` skips every provider. Timeouts, the thread pool, and the pause after repeated failures are described in [Limitations and best practices](limitations.md#context-provider-timeouts).
 
 ## Dialogue summaries
 
@@ -185,6 +185,12 @@ A periodic save (every 30 seconds) and the save on stop write the file only when
 
 `dialogue.memory-expiry-hours` is applied on every save as well as on load: a transcript whose last update is older than that is cleared from memory before the write, so it is not written back. If every transcript has expired, the file becomes a valid empty document (`format` and an empty `entries` section), never 0 bytes. When stop runs while the first load is still reading a large file, NexusAI only appends characters that are missing from the file; expired in-memory transcripts are not appended, and expired entries already in the file stay there until the next load, which skips them, and the next full save removes them.
 
+Stop works within a time budget only in one case: the first load after `dialogue.persist-memory` was switched from false to true with `/nai reload` is still running when the server stops. On a normal startup the file is loaded before the server finishes enabling, and stop writes without a budget. In that one case stop waits up to 1 s for the load, then has a budget of 5 s plus 1 ms for every 8 KiB of `dialogue-memory.yml`, at most 10 s, to read the keys in the file and append the characters that are only in memory. The file on disk stays whole: it is replaced only by a complete new file. If the budget runs out, those characters are not written and the log shows one warning, for example `Did not save 2 dialogue characters because it did not finish within the stop budget.` Saves every 30 seconds are skipped until that first load has finished. When stop has to write the whole file, the stop takes longer than an append: in a test with a 13 MB file it took about 4.6 s instead of about 2.6 s for an append, still inside the budget.
+
+In that one case stop also logs one INFO line, after the `Did not save ...` warning when that warning applies, for example `Stop ran during the first dialogue memory load and used the stop budget: 5001 ms for a 12 KiB dialogue-memory.yml, 40 ms used. 2 dialogue characters held in memory: appended 1, already in file 1.` The first number is the budget that started after the 1 s wait for the load. `appended` counts characters stop wrote, and `already in file` counts characters the file already had, which are not lost. When stop cannot append and writes the whole file instead (for example the file has YAML anchors or flow style, or a raw U+2028), `appended` counts every character held in memory except one that YAML could not write, and `already in file` is 0, even for characters that were in the file. Both cover only the characters held in memory when stop began, so they never add up to more than that number. With one character the line says `1 dialogue character`. A normal stop, including one after that load has finished, does not log it. `dialogue.log-stop-budget: false` turns the line off. A missing `dialogue.log-stop-budget` is appended as `true` on startup and `/nai reload`.
+
+A value with U+2028, U+2029, U+0085, `\r`, or another control character is written double-quoted with escapes (`\L`, `\P`, `\N`, `\r`), on SnakeYAML 2.2 and 2.6 alike. Length cuts keep surrogate pairs whole, and a lone UTF-16 surrogate (half of an emoji) is stored and written as U+FFFD, including one read from the file. If YAML still cannot write one dialogue character, only that character is left out and the rest of the file is saved. Every save that leaves it out (a periodic save, or stop) logs one warning, so it repeats while the character is in memory: `Left 1 dialogue character out of dialogue-memory.yml because YAML could not write it; the other characters were saved (<exception>: <masked message>)`, or `Left <N> dialogue characters out of dialogue-memory.yml because YAML could not write them; ...` for more than one. A save that cannot turn memory into YAML at all logs `Failed to save dialogue-memory.yml (<exception>: <masked message>)`, leaves the file as it was, and is followed by the `Did not save ...` warning. None of these lines contains dialogue text.
+
 ## The `lang/` folder is empty
 
 On enable, NexusAI copies every bundled locale into `plugins/NexusAI/lang/` when that file is missing. An empty folder is filled. A file that is already there is not overwritten. Bundled codes: `en`, `ru`, `uk`, `de`, `es`, `fr`, `it`, `pl`, `pt_BR`, `nl`, `cs`, `tr`, `zh_CN`, `ja`, `ko`.
@@ -201,13 +207,13 @@ The default is **false**. MiniMessage click and hover tags, hex colours, and JSO
 
 ## Java, Paper, and Folia
 
-Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. The jar is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. `plugin.yml` sets `folia-supported: true`.
+Paper/Purpur 1.20.6-26.2, Folia 1.21.8, 1.21.11, 26.1.2, and 26.2 only. Java **21** or newer. Java 25 is needed for every 26.x server (Paper, Purpur, and Folia 26.1.2 and 26.2); Paper and Purpur 1.20.6 to 1.21.x and Folia 1.21.8 and 1.21.11 run on Java 21. The jar is built with JDK 25 and `--release 21`. `api-version` is `1.20.6`. `plugin.yml` sets `folia-supported: true`.
 
 Tested with PlaceholderAPI 2.12.3 on Paper 1.20.6, 1.21.1, 1.21.4, 1.21.8, and 26.2, and on Folia 1.21.8 build 6 STABLE, 1.21.11 build 14 STABLE, 26.1.2 build 8 STABLE, and 26.2 build 7 BETA, as of 2026-10-09.
 
 Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not supported. Spigot and CraftBukkit are not supported.
 
-On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency stays PlaceholderAPI 2.11.6.
+On Paper and Purpur, PlaceholderAPI 2.11.6 or newer is enough. On Folia, PlaceholderAPI 2.11.7 or newer is required, because an older PlaceholderAPI does not load on Folia by itself. NexusAI does not check that version. The compile-only dependency is PlaceholderAPI 2.12.3.
 
 Call `NexusAIApi.generate` and `generateJson` from any thread. Do not join the future on the main thread or a region thread. The future completes on a NexusAI thread. To touch the world from the callback, schedule that work: the player's scheduler for that player, or the global region scheduler when there is no player. On Paper both of those are the main thread. Player state for a request (world, biome, permission groups for quotas, and `%` values in `vars:`) is read on the thread that owns the player. A foreign PlaceholderAPI expansion used from `vars:` is called on that same thread. After that call, the expansion's own thread rules apply. NexusAI does not make a third-party expansion safe on Folia. API answers still take hundreds of milliseconds to several seconds, so they are not for real-time PvP reactions — see [Limitations and best practices](limitations.md#response-latency).
 
@@ -220,6 +226,10 @@ Valid `config.yml` keeps the values and comments you wrote. Missing default keys
 From 1.0.x to 1.1.0 the appended keys are `model-queue-strategy`, `context.*`, `dialogue.summary.*`, `http.max-in-flight`, and `http.queue-size`. Both HTTP keys are appended as `64`. A `0` or a negative value on either key is treated as 64. Nothing you already set is rewritten. Details and rollback: [Migration to 1.1.0](migration-1.1.0.md).
 
 1.2.0 keeps `config-version` at 2 and appends `plugin-api.*`, `quotas.*` (with `enabled: false`), `knowledge.select`, and `knowledge.keywords.*`. Quotas and keyword selection stay off until you turn them on. Details: [Migration to 1.2.0](migration-1.2.0.md).
+
+1.3.0 appends 19 keys: `cache.enabled`, `cache.max-memory-bytes`, `latency.*`, `world-context.*`, and `plugin-api.response-validation.*`. Details: [Migration to 1.3.0](migration-1.3.0.md).
+
+1.3.1 appends three keys: `startup-banner: true`, so the full console banner stays on, `context.log-timeouts: true`, and `dialogue.log-stop-budget: true`. An upgrade from 1.2.x straight to 1.3.1 appends 22 keys in one start with one backup. Details: [Migration to 1.3.1](migration-1.3.1.md).
 
 If `config.yml` is not valid YAML, startup and `/nai reload` leave the file as it is. Reload reports the failure and keeps the configuration already in memory.
 

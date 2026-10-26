@@ -4,6 +4,7 @@ import io.github.neareststep.nexusai.api.ContextRequest;
 import io.github.neareststep.nexusai.api.NexusContextProvider;
 import io.github.neareststep.nexusai.prompt.PromptContext;
 
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.AbstractExecutorService;
@@ -40,7 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ContextServiceTest {
 
     private final AtomicLong clock = new AtomicLong(1_700_000_000_000L);
-    private final List<String> lines = new ArrayList<>();
+    private final List<String> lines = Collections.synchronizedList(new ArrayList<>());
     private ScheduledExecutorService scheduler;
     private ExecutorService workers;
     private ContextRegistry registry;
@@ -425,6 +427,118 @@ class ContextServiceTest {
         assertEquals(0, calls.get());
     }
 
+    @Test
+    void singleTimeoutLogsOneInfoLineWithTheLimit() throws Exception {
+        registry.add("SlowPlug", hanging("slow", 30));
+        ContextService tight = service(workers, settings(40, 200, 100, 60, 200, 600));
+        assertEquals("", tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS));
+        assertEquals(List.of("INFO Context provider 'slow' timed out after 30 ms and was skipped."), timeoutLines());
+    }
+
+    @Test
+    void timeoutLinesAreLimitedToOnePerCooldownAndCountTheRest() throws Exception {
+        registry.add("SlowPlug", hanging("slow", 30));
+        ContextService tight = service(workers, settings(40, 200, 100, 60, 200, 600));
+        for (int i = 0; i < 6; i++) {
+            tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+            clock.addAndGet(1_000L);
+        }
+        assertEquals(1, timeoutLines().size(), lines.toString());
+        assertEquals(6, row(tight, "slow").timeouts());
+
+        clock.addAndGet(30_000L);
+        tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        assertEquals(List.of(
+                "INFO Context provider 'slow' timed out after 30 ms and was skipped.",
+                "INFO Context provider 'slow' timed out after 30 ms and was skipped. 5 more timeouts since the last notice."),
+                timeoutLines());
+    }
+
+    @Test
+    void timeoutCooldownIsPerProvider() throws Exception {
+        registry.add("SlowPlug", hanging("slow", 30));
+        registry.add("LatePlug", hanging("late", 20));
+        ContextService tight = service(workers, settings(40, 200, 100, 60, 200, 600));
+        tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        List<String> logged = timeoutLines();
+        assertEquals(2, logged.size(), logged.toString());
+        assertTrue(logged.contains("INFO Context provider 'slow' timed out after 30 ms and was skipped."), logged.toString());
+        assertTrue(logged.contains("INFO Context provider 'late' timed out after 20 ms and was skipped."), logged.toString());
+    }
+
+    @Test
+    void logTimeoutsFalseKeepsTimeoutsOutOfTheLog() throws Exception {
+        registry.add("SlowPlug", hanging("slow", 30));
+        ContextSettings quiet = new ContextSettings(true, 40, 200, 200, 600, 30, 5, 60, false);
+        assertFalse(quiet.logTimeouts());
+        ContextService tight = service(workers, quiet);
+        for (int i = 0; i < 5; i++) {
+            tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        }
+        assertTrue(timeoutLines().isEmpty(), lines.toString());
+        assertEquals(5, row(tight, "slow").timeouts());
+        assertEquals(1, snapshot().stream().filter(line -> line.contains("suspended until")).count());
+    }
+
+    @Test
+    void reloadResetsTheTimeoutCooldown() throws Exception {
+        registry.add("SlowPlug", hanging("slow", 30));
+        ContextService tight = service(workers, settings(40, 200, 100, 60, 200, 600));
+        tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        tight.apply(settings(40, 200, 100, 60, 200, 600), 30);
+        tight.collect(request(), PromptContext.all()).get(1, TimeUnit.SECONDS);
+        assertEquals(2, timeoutLines().size(), lines.toString());
+    }
+
+    @Test
+    void timeoutLineText() {
+        assertEquals("Context provider 'shop' timed out after 200 ms and was skipped.",
+                ContextService.timeoutLine("shop", 200, 0));
+        assertEquals("Context provider 'shop' timed out after 200 ms and was skipped. 1 more timeout since the last notice.",
+                ContextService.timeoutLine("shop", 200, 1));
+        assertEquals("Context provider 'shop' timed out after 15 ms and was skipped. 12 more timeouts since the last notice.",
+                ContextService.timeoutLine("shop", 15, 12));
+    }
+
+    @Test
+    void contextLogTimeoutsDefaultsToTrueAndReadsFalse() throws Exception {
+        YamlConfiguration yaml = new YamlConfiguration();
+        assertTrue(ContextSettings.read(yaml).logTimeouts());
+        assertTrue(ContextSettings.defaults().logTimeouts());
+        yaml.loadFromString("context:\n  log-timeouts: false\n");
+        assertFalse(ContextSettings.read(yaml).logTimeouts());
+    }
+
+    private List<String> snapshot() {
+        synchronized (lines) {
+            return List.copyOf(lines);
+        }
+    }
+
+    private List<String> timeoutLines() {
+        return snapshot().stream().filter(line -> line.contains("timed out after")).toList();
+    }
+
+    private static NexusContextProvider hanging(String id, int timeoutMillis) {
+        return new NexusContextProvider() {
+            @Override
+            public String id() {
+                return id;
+            }
+
+            @Override
+            public Duration timeout() {
+                return Duration.ofMillis(timeoutMillis);
+            }
+
+            @Override
+            public CompletableFuture<String> provide(ContextRequest request) {
+                return new CompletableFuture<>();
+            }
+        };
+    }
+
     private ContextService.StatusRow row(ContextService service, String id) {
         return service.status(clock.get(), ZoneId.of("UTC")).stream()
                 .filter(item -> item.id().equals(id))
@@ -464,7 +578,7 @@ class ContextServiceTest {
             int perProvider,
             int totalChars
     ) {
-        return new ContextSettings(true, providerTimeout, totalTimeout, perProvider, totalChars, 30, suspendAfter, suspendSeconds);
+        return new ContextSettings(true, providerTimeout, totalTimeout, perProvider, totalChars, 30, suspendAfter, suspendSeconds, true);
     }
 
     private static ContextRequest request() {

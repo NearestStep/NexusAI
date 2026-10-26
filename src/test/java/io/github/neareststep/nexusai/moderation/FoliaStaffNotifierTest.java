@@ -168,6 +168,9 @@ class FoliaStaffNotifierTest {
                         if ("getName".equals(method.getName())) {
                             return "NexusAI";
                         }
+                        if ("isEnabled".equals(method.getName())) {
+                            return true;
+                        }
                         if (method.getReturnType() == boolean.class) {
                             return false;
                         }

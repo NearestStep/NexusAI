@@ -49,6 +49,7 @@ import io.github.neareststep.nexusai.knowledge.KnowledgeRequest;
 import io.github.neareststep.nexusai.knowledge.KnowledgeRequests;
 import io.github.neareststep.nexusai.prompt.NamedPrompt;
 import io.github.neareststep.nexusai.prompt.ResolvedPrompt;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.jetbrains.annotations.ApiStatus;
@@ -88,6 +89,8 @@ public final class GenerationService {
     private volatile GenerationRuntime runtime;
     private volatile QuotaPolicy quotas;
     private volatile boolean closed;
+    /** Provider calls still open. Shutdown cancels them so no reply handler runs after unload. */
+    private final java.util.Set<CompletableFuture<?>> providerCalls = ConcurrentHashMap.newKeySet();
 
     /** Runs on the worker when a second call has joined an in-flight request. Null in production. */
     static volatile Runnable onInFlightJoin;
@@ -160,6 +163,14 @@ public final class GenerationService {
      */
     public void shutdown() {
         closed = true;
+        int cancelled = 0;
+        for (CompletableFuture<?> call : providerCalls.toArray(new CompletableFuture<?>[0])) {
+            if (providerCalls.remove(call)) {
+                call.cancel(false);
+                cancelled++;
+            }
+        }
+        io.github.neareststep.nexusai.StopGate.dropped(cancelled);
         Runnable task = () -> {
             for (Map.Entry<CompletableFuture<GenerationResult>, CallTrace> entry : new ArrayList<>(pending.entrySet())) {
                 deliver(entry.getKey(), entry.getValue(), shutdownResult(entry.getValue()), true);
@@ -466,7 +477,7 @@ public final class GenerationService {
             finishHttp(request, current, trace, future, lookup, prepared, shared, admissionKey, pauseStamp, failureEpoch, null, thrown);
             return;
         }
-        answer.whenComplete((value, error) -> runHttpFinish(current, prepared, shared, future, trace, () ->
+        whenProvider(answer, (value, error) -> runHttpFinish(current, prepared, shared, future, trace, () ->
                 finishHttp(request, current, trace, future, lookup, prepared, shared, admissionKey, pauseStamp, failureEpoch, value, error)));
     }
 
@@ -666,8 +677,8 @@ public final class GenerationService {
                 }
                 Prepared repairPrepared = new Prepared(
                         prepared.prompt, repairOverrides, prepared.cacheKey, prepared.ttl, prepared.writeCache);
-                routing.repeat(prepared.prompt, repairOverrides, answer.providerId(), answer.model(), trace)
-                        .whenComplete((value, repairError) -> runHttpFinish(
+                whenProvider(routing.repeat(prepared.prompt, repairOverrides, answer.providerId(), answer.model(), trace),
+                        (value, repairError) -> runHttpFinish(
                                 current, repairPrepared, shared, future, trace, () -> finishHttp(
                                         request, current, trace, future, lookup, repairPrepared, shared,
                                         admissionKey, pauseStamp, failureEpoch, value, repairError)));
@@ -985,6 +996,28 @@ public final class GenerationService {
             return;
         }
         current.http().completeShared(prepared.cacheKey, shared, completion);
+    }
+
+    /**
+     * Runs {@code then} when the provider answers, unless the service was shut down first: then
+     * nothing runs, because shutdown already answered every caller and the plugin classloader
+     * may be closing. Shutdown cancels calls still open.
+     */
+    private void whenProvider(
+            CompletableFuture<ModelAnswer> answer,
+            java.util.function.BiConsumer<ModelAnswer, Throwable> then
+    ) {
+        providerCalls.add(answer);
+        answer.whenComplete((value, error) -> {
+            providerCalls.remove(answer);
+            if (closed) {
+                return;
+            }
+            then.accept(value, error);
+        });
+        if (closed && providerCalls.remove(answer)) {
+            answer.cancel(false);
+        }
     }
 
     /**
@@ -1446,7 +1479,7 @@ public final class GenerationService {
         if (raw == null) {
             return "";
         }
-        return raw.length() <= 64 ? raw : raw.substring(0, 64);
+        return Utf16.head(raw, 64);
     }
 
     private boolean acceptCachedJson(

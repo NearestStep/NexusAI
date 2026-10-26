@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.prompt;
 
 import io.github.neareststep.nexusai.config.AtomicFiles;
 import io.github.neareststep.nexusai.config.FileBackup;
+import io.github.neareststep.nexusai.text.Utf16;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -112,7 +113,12 @@ public final class PromptImporter {
             return new Report(true, false, null, fileName, added, skipped, conflicting, null, incoming.warnings());
         }
 
-        String updated = splice(existingText, importText, writeIds);
+        String updated;
+        try {
+            updated = splice(existingText, importText, writeIds);
+        } catch (RuntimeException e) {
+            return Report.failed("could not copy the prompts from " + fileName);
+        }
         Path backup = null;
         try {
             if (Files.isRegularFile(promptsFile)) {
@@ -309,7 +315,7 @@ public final class PromptImporter {
             ConfigurationSection copy = one.createSection(id);
             copySection(section, copy);
         } else if (yaml.contains(id)) {
-            one.set(id, yaml.get(id));
+            one.set(id, clean(yaml.get(id)));
         } else {
             return null;
         }
@@ -319,11 +325,36 @@ public final class PromptImporter {
     private static void copySection(ConfigurationSection from, ConfigurationSection to) {
         for (String key : from.getKeys(false)) {
             if (from.isConfigurationSection(key)) {
-                copySection(from.getConfigurationSection(key), to.createSection(key));
+                copySection(from.getConfigurationSection(key), to.createSection(Utf16.replaceLoneSurrogates(key)));
             } else {
-                to.set(key, from.get(key));
+                to.set(Utf16.replaceLoneSurrogates(key), clean(from.get(key)));
             }
         }
+    }
+
+    /**
+     * A value with every lone UTF-16 surrogate replaced by U+FFFD. SnakeYAML refuses to write a lone
+     * surrogate (an escaped {@code "\\ud83d"} in the import file loads as one).
+     */
+    private static Object clean(Object value) {
+        if (value instanceof String text) {
+            return Utf16.replaceLoneSurrogates(text);
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = new ArrayList<>(list.size());
+            for (Object item : list) {
+                copy.add(clean(item));
+            }
+            return copy;
+        }
+        if (value instanceof java.util.Map<?, ?> map) {
+            java.util.Map<Object, Object> copy = new java.util.LinkedHashMap<>();
+            for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
+                copy.put(clean(entry.getKey()), clean(entry.getValue()));
+            }
+            return copy;
+        }
+        return value;
     }
 
     private static boolean isTopLevelKey(String line) {
@@ -333,6 +364,11 @@ public final class PromptImporter {
         char first = line.charAt(0);
         if (first == ' ' || first == '\t' || first == '#' || first == '-') {
             return false;
+        }
+        if ((first == '?' || first == ':') && (line.length() == 1 || line.charAt(1) == ' ' || line.charAt(1) == '\t')) {
+            // An explicit "? key" / ": value" entry starts a new top-level entry, so the block
+            // above it ends here and is not copied together with it.
+            return true;
         }
         return line.indexOf(':') > 0;
     }
@@ -347,6 +383,6 @@ public final class PromptImporter {
             return "";
         }
         String trimmed = requested.trim();
-        return trimmed.length() > 80 ? trimmed.substring(0, 80) : trimmed;
+        return Utf16.head(trimmed, 80);
     }
 }

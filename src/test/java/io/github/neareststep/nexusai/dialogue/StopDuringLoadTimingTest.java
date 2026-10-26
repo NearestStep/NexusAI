@@ -2,6 +2,7 @@ package io.github.neareststep.nexusai.dialogue;
 
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,7 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class StopDuringLoadTimingTest {
 
+    /** Latch and join waits: long enough for a host pause, ended early by the release in normal runs. */
+    private static final long LATCH_WAIT_MINUTES = 10L;
+
     @Test
+    @Timeout(value = 30, unit = TimeUnit.MINUTES)
     void pausedLoadStopSplicesAFileWithOrdinaryPunctuation() throws Exception {
         Logger logger = Logger.getLogger("stop-during-load");
         logger.setUseParentHandlers(false);
@@ -63,7 +68,7 @@ class StopDuringLoadTimingTest {
             MemoryStore.pauseDuringLoad = () -> {
                 inside.countDown();
                 try {
-                    release.await(60, TimeUnit.SECONDS);
+                    release.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -72,7 +77,7 @@ class StopDuringLoadTimingTest {
             long fullBefore = MemoryStore.fullDocumentAppends.get();
             try {
                 files.onReload();
-                assertTrue(inside.await(30, TimeUnit.SECONDS));
+                assertTrue(inside.await(LATCH_WAIT_MINUTES, TimeUnit.MINUTES));
                 long started = System.nanoTime();
                 files.shutdown();
                 elapsed = (System.nanoTime() - started) / 1_000_000L;
@@ -81,7 +86,7 @@ class StopDuringLoadTimingTest {
                 release.countDown();
                 Thread pending = files.diskLoader();
                 if (pending != null) {
-                    pending.join(60_000L);
+                    pending.join(TimeUnit.MINUTES.toMillis(LATCH_WAIT_MINUTES));
                 }
             }
             YamlConfiguration yaml = YamlConfiguration.loadConfiguration(copy.toFile());
@@ -93,7 +98,11 @@ class StopDuringLoadTimingTest {
             assertTrue(yaml.get("entries." + first + ".npc_d") != null, "new character missing");
             assertTrue(kept.contains("DISKA1"), kept);
             assertFalse(kept.contains("late"), kept);
-            assertTrue(elapsed < 20_000L, "stop took " + elapsed + " ms, cpus=" + cpus + ", heapMax=" + heap);
+            // Stop is bounded by the join grace plus the append budget for this file size.
+            long bound = DialogueMemoryPersistence.shutdownLoadGraceMillis
+                    + DialogueMemoryPersistence.appendBudgetMillis(size) + 10_000L;
+            assertTrue(elapsed < bound, "stop took " + elapsed + " ms (bound " + bound + " ms), cpus=" + cpus
+                    + ", heapMax=" + heap);
         }
     }
 

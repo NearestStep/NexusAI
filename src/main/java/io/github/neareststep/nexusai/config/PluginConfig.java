@@ -124,6 +124,7 @@ public final class PluginConfig {
     private final List<String> httpLimitWarnings = new ArrayList<>();
     private final List<String> shortKeyWarnings = new ArrayList<>();
     private final List<String> structuredOutputWarnings = new ArrayList<>();
+    private final List<String> identifierWarnings = new ArrayList<>();
     private boolean pluginApiEnabled = true;
     private int pluginApiMaxTemplateChars = 8000;
     private int pluginApiMaxVarChars = 1000;
@@ -140,6 +141,8 @@ public final class PluginConfig {
     private Map<String, QuotaSettings.GroupLimit> quotaGroups = Map.of();
     private Map<String, QuotaSettings.ConsumerLimit> quotaConsumers = Map.of();
     private final List<String> quotaWarnings = new ArrayList<>();
+    private boolean startupBanner = true;
+    private String startupBannerWarning;
 
     public PluginConfig(FileConfiguration config) {
         reload(config);
@@ -151,13 +154,17 @@ public final class PluginConfig {
         keyFileWarnings.clear();
         shortKeyWarnings.clear();
         structuredOutputWarnings.clear();
+        identifierWarnings.clear();
         httpLimitWarnings.clear();
         pluginApiWarnings.clear();
         quotaWarnings.clear();
         knowledgeWarnings.clear();
+        startupBannerWarning = null;
 
-        this.provider = config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT);
-        this.model = config.getString("api.model", "gpt-4o-mini");
+        this.provider = ConfigIdentifiers.clean("api.provider",
+                config.getString("api.provider", "openai").trim().toLowerCase(Locale.ROOT), identifierWarnings);
+        this.model = ConfigIdentifiers.clean("api.model", config.getString("api.model", "gpt-4o-mini"),
+                identifierWarnings);
         this.baseUrl = resolveBaseUrl(provider, substitute(config.getString("api.base-url", "")));
         this.systemPrompt = blankToNull(config.getString("api.system-prompt", ""));
         double temperatureRaw = config.getDouble("api.temperature", -1.0d);
@@ -241,8 +248,10 @@ public final class PluginConfig {
             this.modelQueueStrategyWarning = null;
         }
         this.fallbackModel = FallbackModel.of(
-                config.getString("fallback-model.provider", ""),
-                config.getString("fallback-model.model", ""));
+                ConfigIdentifiers.clean("fallback-model.provider",
+                        config.getString("fallback-model.provider", ""), identifierWarnings),
+                ConfigIdentifiers.clean("fallback-model.model",
+                        config.getString("fallback-model.model", ""), identifierWarnings));
         this.knowledgeMaxChars = positiveOrDefault(config.getInt("knowledge.max-chars", 6000), 6000);
         this.knowledgeMaxFileChars = positiveOrDefault(config.getInt("knowledge.max-file-chars", 4000), 4000);
         readKnowledge(config);
@@ -255,7 +264,41 @@ public final class PluginConfig {
         readHttpLimits(config);
         readPluginApi(config);
         readQuotas(config);
+        readStartupBanner(config);
         noteShortKeys();
+    }
+
+    private void readStartupBanner(FileConfiguration config) {
+        Object raw = config.get("startup-banner", Boolean.TRUE);
+        Boolean parsed = parseStartupBanner(raw);
+        if (parsed == null) {
+            this.startupBanner = true;
+            this.startupBannerWarning = "Unknown startup-banner '" + raw + "'. Use true or false. Using true.";
+        } else {
+            this.startupBanner = parsed;
+            this.startupBannerWarning = null;
+        }
+    }
+
+    /**
+     * {@code true} or {@code false}. A missing or blank value is {@code true}. The words
+     * {@code full}, {@code compact}, and {@code off} from 1.3.0 development builds are read as
+     * {@code true}, {@code false}, and {@code false}: {@code compact} asked for less than the full
+     * banner, so it maps to the one-line output. Anything else is {@code null}.
+     */
+    static Boolean parseStartupBanner(Object raw) {
+        if (raw == null) {
+            return Boolean.TRUE;
+        }
+        if (raw instanceof Boolean bool) {
+            return bool;
+        }
+        String text = String.valueOf(raw).trim().toLowerCase(Locale.ROOT);
+        return switch (text) {
+            case "", "true", "full" -> Boolean.TRUE;
+            case "false", "off", "compact" -> Boolean.FALSE;
+            default -> null;
+        };
     }
 
     private void readQuotas(FileConfiguration config) {
@@ -512,7 +555,8 @@ public final class PluginConfig {
             if (one == null) {
                 continue;
             }
-            String normalizedId = id.trim().toLowerCase(Locale.ROOT);
+            String normalizedId = ConfigIdentifiers.clean("providers key",
+                    id.trim().toLowerCase(Locale.ROOT), identifierWarnings);
             String type = ProviderCatalog.normalizeType(one.getString("type"), normalizedId);
             String url = substitute(one.getString("url", "")).trim();
             if (url.isBlank()) {
@@ -567,8 +611,10 @@ public final class PluginConfig {
             if (providerValue == null || modelValue == null) {
                 continue;
             }
-            String providerId = String.valueOf(providerValue).trim().toLowerCase(Locale.ROOT);
-            String modelId = String.valueOf(modelValue).trim();
+            String providerId = ConfigIdentifiers.clean("model-queue provider",
+                    String.valueOf(providerValue).trim().toLowerCase(Locale.ROOT), identifierWarnings);
+            String modelId = ConfigIdentifiers.clean("model-queue model",
+                    String.valueOf(modelValue).trim(), identifierWarnings);
             if (providerId.isEmpty() || modelId.isEmpty()) {
                 continue;
             }
@@ -1479,6 +1525,19 @@ public final class PluginConfig {
         return new QuotaSettings(quotasEnabled, serverTokensPerDay, playerTokensPerDay, quotaGroups, quotaConsumers);
     }
 
+    /** {@code startup-banner}. Missing means {@code true}: the full console banner. */
+    public boolean startupBanner() {
+        return startupBanner;
+    }
+
+    /**
+     * Non-null when {@code startup-banner} is not {@code true} or {@code false}.
+     * The plugin logs it once per startup and per {@code /nai reload}.
+     */
+    public String startupBannerWarning() {
+        return startupBannerWarning;
+    }
+
     /**
      * Load warnings for keys too short to show a suffix. The key text is not included.
      */
@@ -1487,6 +1546,11 @@ public final class PluginConfig {
     }
 
     /** Unknown {@code structured-output} values. Empty when every provider is {@code auto} or a known mode. */
+    /** One warning per provider or model name that had a lone surrogate. */
+    public List<String> identifierWarnings() {
+        return List.copyOf(identifierWarnings);
+    }
+
     public List<String> structuredOutputWarnings() {
         return List.copyOf(structuredOutputWarnings);
     }

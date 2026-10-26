@@ -1,5 +1,7 @@
 package io.github.neareststep.nexusai.dialogue;
 
+import io.github.neareststep.nexusai.text.Utf16;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -108,10 +110,12 @@ public final class TurnMemory {
             Line only = lines.get(0);
             int keep = Math.max(0, only.text().length() - (chars() - cap));
             String text = only.text();
-            if (dropped != null && keep < text.length()) {
-                dropped.add(new Line(only.role(), text.substring(0, text.length() - keep)));
+            // Cut at a code point: an emoji cut in half would leave a lone surrogate.
+            int cut = Utf16.boundaryAfter(text, text.length() - keep);
+            if (dropped != null && cut > 0) {
+                dropped.add(new Line(only.role(), text.substring(0, cut)));
             }
-            lines.set(0, new Line(only.role(), text.substring(text.length() - keep)));
+            lines.set(0, new Line(only.role(), text.substring(cut)));
         }
         if (dropped != null && !dropped.isEmpty()) {
             absorb(dropped, cap);
@@ -171,7 +175,7 @@ public final class TurnMemory {
             lines.addAll(stored);
         }
         this.updatedAt = updatedAt;
-        this.summary = summary == null ? "" : summary;
+        this.summary = summary == null ? "" : Utf16.replaceLoneSurrogates(summary);
         this.summaryUpdatedAt = this.summary.isBlank() ? 0L : summaryUpdatedAt;
         changed();
     }
@@ -221,7 +225,7 @@ public final class TurnMemory {
         if (claimEpoch != epoch) {
             return false;
         }
-        summary = text == null ? "" : text;
+        summary = text == null ? "" : Utf16.replaceLoneSurrogates(text);
         summaryUpdatedAt = summary.isBlank() ? 0L : nowMillis;
         summaryInFlight = false;
         changed();
@@ -248,8 +252,7 @@ public final class TurnMemory {
         if (!pendingFold.isEmpty() && pendingChars() > cap) {
             Line only = pendingFold.get(0);
             int keep = Math.max(0, only.text().length() - (pendingChars() - cap));
-            String text = only.text();
-            pendingFold.set(0, new Line(only.role(), text.substring(Math.max(0, text.length() - keep))));
+            pendingFold.set(0, new Line(only.role(), Utf16.tail(only.text(), keep)));
         }
     }
 
@@ -271,7 +274,14 @@ public final class TurnMemory {
         return users;
     }
 
+    /**
+     * One stored line. A lone surrogate in {@code text} becomes U+FFFD, so memory never holds text
+     * that YAML cannot write. Text without one is kept as the same instance.
+     */
     public record Line(String role, String text) {
+        public Line {
+            text = Utf16.replaceLoneSurrogates(text);
+        }
     }
 
     public record Fold(String previousSummary, List<Line> lines, int epoch) {
