@@ -2,21 +2,23 @@
 
 [![Join our Discord](docs/assets/discord-button.png)](https://discord.gg/uNpDrJ6wff)
 
+Also on: [Modrinth](https://modrinth.com/plugin/ainexus) · [Hangar](https://hangar.papermc.io/NearestStep/NexusAI) · [CurseForge](https://www.curseforge.com/minecraft/bukkit-plugins/nexusai) · [SpigotMC](https://www.spigotmc.org/resources/nexusai.138867/)
+
 Plugin for Paper, Purpur, and Folia. It requests text from an OpenAI-compatible model and exposes that text through PlaceholderAPI.
 
 `%ainexus_cached_*%` returns a cached answer. On a miss it starts a background request when requests are allowed, and returns a stored pooled answer without removing it, or the fallback string. `%ainexus_generate_*%` removes one pooled answer, or returns the fallback string.
 
 ## Start here
 
-- [Quick start](docs/quickstart.md) — install, a key, one prompt, `/nai test`, `/nai status`
-- [FAQ](docs/faq.md) — no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
+- [Quick start](docs/quickstart.md): install, a key, one prompt, `/nai test`, `/nai status`
+- [FAQ](docs/faq.md): no key, HTTP 401 and 429, empty replies, `knowledge/` encoding, placeholders, limits, round-robin, context providers, dialogue summaries
 - [Migration from 1.0.x](docs/migration-1.1.0.md)
 - [Migration to 1.2.0](docs/migration-1.2.0.md)
 - [Migration to 1.3.0](docs/migration-1.3.0.md)
 - [Migration to 1.3.1](docs/migration-1.3.1.md)
 - [Plugin API](docs/api.md)
-- [Limitations and best practices](docs/limitations.md) — latency, world context, validating model replies
-- [Examples](examples/README.md) — NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
+- [Limitations and best practices](docs/limitations.md): latency, world context, validating model replies
+- [Examples](examples/README.md): NPC dialogue, PlaceholderAPI, round-robin, key file, `context:`
 
 ## Requirements
 
@@ -38,7 +40,7 @@ Other Folia versions may work and are not tested. Paper and Purpur 26.3 are not 
 
 ## Installation
 
-1. Put `NexusAI-1.3.0.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.3.0.jar`. `version` in `build.gradle.kts` is `1.3.0`.
+1. Put `NexusAI-1.3.1.jar` in `plugins/`. A local `./gradlew shadowJar` writes `build/libs/NexusAI-1.3.1.jar`. `version` in `build.gradle.kts` is `1.3.1`.
 2. Install PlaceholderAPI
 3. Set the API key (prefer environment), then follow the [quick start](docs/quickstart.md):
 
@@ -52,7 +54,7 @@ export NEXUSAI_API_KEY=sk-...
 
 Or set `api.key` in `plugins/NexusAI/config.yml` (do not commit secrets). On a POSIX system, `config.yml` and `prompts.yml` created by the plugin on first start are mode `0600`. A file that is already there keeps its mode. `/nai prompts import` creates a missing `prompts.yml` the same way. `actions.log` and `moderation.log` are also created and kept as mode `0600`, including after a looser mode or a rotation.
 
-Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests — placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`, including the bracketed form `[::1]`, a host ending in `.local`, or any base URL on port `11434`) are called without an `Authorization` header.
+Without a key the plugin still loads. Remote providers log a warning and do **not** send HTTP requests, so placeholders return `fallback`. Local endpoints (the `ollama` preset, `localhost` / `127.0.0.1` / `0.0.0.0` / `::1`, including the bracketed form `[::1]`, a host ending in `.local`, or any base URL on port `11434`) are called without an `Authorization` header.
 
 ## Configuration
 
@@ -181,7 +183,7 @@ Daily counters for each provider and each queue entry are stored in `plugins/Nex
 
 `http.max-in-flight` (default 64) is how many HTTP calls may be in progress. `http.queue-size` (default 64) is how many more may wait for a slot. The four `nexusai-http-*` threads are unchanged. A call past both caps fails at once with `HTTP queue is full` and a placeholder keeps its fallback. One warning is written per 30 seconds. Both values must be greater than 0. `0` or a negative value is replaced with 64 before the limit is applied, on startup and on `/nai reload`. Each bad key logs its own warning, naming the key, the rejected value, and 64. A call that does not fit fails at once with `HTTP queue is full` and is not dropped quietly. `/nai reload` applies a new cap without replacing the worker threads.
 
-One connection error, or a timeout, pauses every provider for `limits.provider-pause-seconds` (default 60). A weak endpoint — a local proxy, Ollama, or a free-tier host — should use a lower `http.max-in-flight`, because 64 parallel calls are enough to make that endpoint fail and pause every request to it. While that global pause is in effect, placeholders stay on their fallback text and `/nai talk` is not sent. The player sees `talk.busy`. `fallback-model` is not used after a connection error, a timeout, or HTTP 500.
+One connection error, or a timeout, pauses every provider for `limits.provider-pause-seconds` (default 60). A weak endpoint, such as a local proxy, Ollama, or a free-tier host, should use a lower `http.max-in-flight`, because 64 parallel calls are enough to make that endpoint fail and pause every request to it. While that global pause is in effect, placeholders stay on their fallback text and `/nai talk` is not sent. The player sees `talk.busy`. `fallback-model` is not used after a connection error, a timeout, or HTTP 500.
 
 HTTP 429 pauses the provider that returned it. `/nai talk` uses `fallback-model` only for that kind of named pause, and only when no unpaused queue provider is left and the fallback model is a different provider that is not paused. A successful talk reply does not clear the queue provider's cooldown, and it does not arm the request-gate pause. The queue row stays on cooldown, and a later placeholder follows the usual queue-then-fallback order, so it can receive a fresh answer from that same fallback model. Placeholders stay on their fallback text when the request gate itself is paused: a placeholder's own 429, a fallback on the same provider, a fallback that also returns 429, or a global pause. `/nai status` then shows `Provider pause: rate limit`. If talk has no such fallback, the line is not sent and the player sees the `talk.busy` line (`The character is busy. Try again later.`). A reply that is empty only after colour codes or markup are removed, and a rejected reply, do not cool that fallback; the next line tries it again. Content that is missing, null, or only whitespace is a transport error: the player sees `talk.busy` and that row cools down for `limits.provider-pause-seconds`, on the fallback and on the main path. A boundary marker returned next to a real tool call rejects the whole reply, and the action does not run. The provider error, including an HTTP 429 body, is written to the server log with secrets masked. It is not shown in chat. `/nai reload` applies a new `http.max-in-flight` and `http.queue-size` to the next `/nai talk` as well as to placeholders.
 
@@ -203,11 +205,11 @@ On startup and `/nai reload`, `config.yml`, `prompts.yml`, `pool.yml`, and `usag
 
 Optional request fields. `system-prompt` is omitted when empty, and `temperature` is omitted when negative. `api.max-tokens` defaults to **256** and is sent as `max_tokens` on every bundled provider (`openai`, `groq`, `cerebras`, `gemini`, `deepseek`, `ollama`, `openrouter`). They all use the same chat-completions body. o-series and gpt-5 models receive `max_completion_tokens` instead, and temperature is left off. `0` or a negative value, including `-1`, leaves the field off. A missing `api.max-tokens` in an older `config.yml` is appended as `256` on startup, with the usual `<file>.bak` copy. A value you already set, other than the old default `0` on a file that is not yet version 2, is left as it is. See [Migration](#migration).
 
-- `api.system-prompt` — sent as the system message before the user prompt. The format instruction is appended after it. The player-input guard is appended after that only when the request contains wrapped player input. An empty system prompt with no wrapped input sends no system message
-- `api.temperature` and `api.max-tokens` — copied onto the JSON body. A prompt may set `max-tokens`, and so may a pool entry. That value replaces `api.max-tokens` for that call. A model-queue row does not have its own cap; it uses this value unless the prompt or pool entry overrides it
+- `api.system-prompt`: sent as the system message before the user prompt. The format instruction is appended after it. The player-input guard is appended after that only when the request contains wrapped player input. An empty system prompt with no wrapped input sends no system message
+- `api.temperature` and `api.max-tokens`: copied onto the JSON body. A prompt may set `max-tokens`, and so may a pool entry. That value replaces `api.max-tokens` for that call. A model-queue row does not have its own cap; it uses this value unless the prompt or pool entry overrides it
 - each `pool.entries[]` item may override those three for pool refills only
-- `api.strip-markdown`, `api.max-answer-chars`, `api.max-answer-lines` — applied to every answer (`0` means no limit)
-- `api.reasoning-effort` — sent only for reasoning models (`o1` / `o3` / `o4`, `gpt-5` and names that continue it such as `gpt-5-mini` or `gpt-5.1`, `gpt-oss`, `deepseek-r1`, `qwq`, names containing `reasoner`). Their token budget is raised to at least 2048. o-series and gpt-5 models receive `max_completion_tokens` instead of `max_tokens`, and temperature is not sent. Other reasoning names keep `max_tokens`. Set the effort to `off` to skip the field.
+- `api.strip-markdown`, `api.max-answer-chars`, `api.max-answer-lines`: applied to every answer (`0` means no limit)
+- `api.reasoning-effort`: sent only for reasoning models (`o1` / `o3` / `o4`, `gpt-5` and names that continue it such as `gpt-5-mini` or `gpt-5.1`, `gpt-oss`, `deepseek-r1`, `qwq`, names containing `reasoner`). Their token budget is raised to at least 2048. o-series and gpt-5 models receive `max_completion_tokens` instead of `max_tokens`, and temperature is not sent. Other reasoning names keep `max_tokens`. Set the effort to `off` to skip the field.
 
 Answers whose `content` is an array of parts are joined into one string.
 
@@ -527,7 +529,7 @@ HTTP 401 and 403 are reported as an invalid or unauthorized key. HTTP 429 is rep
 %ainexus_generate_<prompt>%
 ```
 
-Takes and **removes** one answer from that prompt's pool. If the prompt is not listed in `pool.entries`, or `pool.enabled` is false, `generate_` always returns fallback: the first request logs one warning and `/nai status` lists it as `generate_ requested but not pooled`; `/nai reload` clears that list. If the pool is empty — immediate `fallback`; `PoolService` may refill when the prompt is listed in `pool.entries`. On refill, finished text with none of this entry's `{token}` markers left is stored only once per prompt, and handing it out does not make it eligible again until `/nai reload` or a restart. Repeated model output of that kind does not fill `size` and is not returned a second time; later reads get `fallback` until a different answer is stored. An answer that still contains a configured token such as `{player_name}` is a template: the same template may occupy every slot up to `size`, because each player receives their own substitution. After the error backoff the pool asks again until it has enough answers or it logs that it stopped. A reply that is empty only after markup is removed holds that prompt for 30 seconds. A later success on the same key does not end the hold. `/nai reload` does. While the hold is active the pool sends nothing for that prompt. After the timer it sends at most one refill, then waits again if the next reply is markup-only. A short pool also asks again after a provider error or pause ends, without waiting for a placeholder read. Refills, prewarm, and cache misses all spend the shared server rate limit. A player request also spends `player-requests-per-minute` and `player-requests-per-day`. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider except `/nai test`. A numeric `Retry-After` on HTTP 429 is used only when it is longer than `provider-pause-seconds`. `/nai test` does not shorten or extend that pause.
+Takes and **removes** one answer from that prompt's pool. If the prompt is not listed in `pool.entries`, or `pool.enabled` is false, `generate_` always returns fallback: the first request logs one warning and `/nai status` lists it as `generate_ requested but not pooled`; `/nai reload` clears that list. If the pool is empty, it returns `fallback` immediately; `PoolService` may refill when the prompt is listed in `pool.entries`. On refill, finished text with none of this entry's `{token}` markers left is stored only once per prompt, and handing it out does not make it eligible again until `/nai reload` or a restart. Repeated model output of that kind does not fill `size` and is not returned a second time; later reads get `fallback` until a different answer is stored. An answer that still contains a configured token such as `{player_name}` is a template: the same template may occupy every slot up to `size`, because each player receives their own substitution. After the error backoff the pool asks again until it has enough answers or it logs that it stopped. A reply that is empty only after markup is removed holds that prompt for 30 seconds. A later success on the same key does not end the hold. `/nai reload` does. While the hold is active the pool sends nothing for that prompt. After the timer it sends at most one refill, then waits again if the next reply is markup-only. A short pool also asks again after a provider error or pause ends, without waiting for a placeholder read. Refills, prewarm, and cache misses all spend the shared server rate limit. A player request also spends `player-requests-per-minute` and `player-requests-per-day`. After a provider error the prompt backs off; HTTP 401, 402, and 429 pause every request to that provider except `/nai test`. A numeric `Retry-After` on HTTP 429 is used only when it is longer than `provider-pause-seconds`. `/nai test` does not shorten or extend that pause.
 
 With `pool.persist: true` (default), answers are written to `plugins/NexusAI/pool.yml` on shutdown and, while the server is running, after `pool.save-delay-seconds` of quiet. They are loaded again on startup and `/nai reload`, so a restart does not buy a full pool if it was already filled. Loading does not remove duplicate lines, so repeated `{token}` templates survive a restart. Duplicate finished answers saved by 0.5.0-SNAPSHOT stay in the file and are handed out once each. To start with a clean pool, stop the server and delete `plugins/NexusAI/pool.yml`. Answers are regenerated, which spends provider requests. If `pool.yml` cannot be parsed, the log is a single warning: the absolute path, the parser message with the line and column collapsed onto that same line, that the file was left untouched, and that the answer pool stays empty until the file is fixed and reloaded. There is no error stack trace. NexusAI does not overwrite that file. The first save that removes markup from answers already in the file copies it to `pool.yml.bak` (or `pool.yml.bak.<timestamp>` when that backup already exists), keeps the file mode, and replaces the file with an atomic write. The backup path is logged. A later save of answers that are already clean does not write another backup. A lone UTF-16 surrogate in an answer (half of an emoji) is stored and written as U+FFFD; the first save that repairs one already in the file, for example an escaped `\ud83d`, takes the same backup.
 
@@ -571,7 +573,7 @@ Behavior:
 2. Otherwise start a background request when requests are allowed, and return a stored pooled answer without removing it, or `fallback` if the pool has none
 3. Later resolves of the same prompt return the cache until TTL expires
 4. Prompt longer than `limits.max-prompt-length` → `fallback`, no HTTP
-5. In-flight deduplication — parallel identical requests share one HTTP call
+5. In-flight deduplication: parallel identical requests share one HTTP call
 6. `cache.max-size` is Caffeine's maximum. The cache does not promise to drop the oldest key in the same millisecond a new one is written
 
 ### Prewarm
@@ -813,28 +815,28 @@ Common first-week questions are in [docs/faq.md](docs/faq.md): a missing key, HT
 
 Jackson and Caffeine are shaded and relocated under `io.github.neareststep.nexusai.libs.*`.
 
-Test stack: JUnit 5 (no Mockito — Java 25 toolchain). The compiler target is Java 21 (`--release 21`).
+Test stack: JUnit 5 (no Mockito, Java 25 toolchain). The compiler target is Java 21 (`--release 21`).
 
 ## Architecture (short)
 
-- `PluginConfig` — config.yml + env + provider defaults + locale
-- `PromptCatalog` — prompts.yml ids, vars, and per-prompt overrides
-- `ConfigMerger` — adds missing config keys without overwriting user values
-- `MessageService` — `lang/*.yml` with English fallback
-- `AiCache` — Caffeine (TTL + max-size + `isFresh`)
-- `AiPool` / `PoolService` / `PoolStore` — unique answer queues for `generate_`, saved to `pool.yml`
-- `VarSubstitutor` — `{token}` delivery substitution from pool `vars`
-- `PrewarmService` — TTL warm-up/refresh for `cached_`
-- `RateLimiter` / `RequestGate` — per-player and server limits, per-prompt backoff, provider pause
-- `AiDiagnostics` — last error and rate-limited WARNING logs
-- `AiProvider` / `OpenAiProvider` — HTTP `/chat/completions`. Calls use `HttpClient.sendAsync`. `HttpPool` keeps four `nexusai-http-*` threads and a bounded worker queue. `HttpGate` caps in-flight calls (`http.max-in-flight`, default 64) and the wait queue (`http.queue-size`, default 64). A full queue fails with `HTTP queue is full` (`LOCAL_LIMIT`) and placeholders keep their fallback. One connection error pauses that provider for `limits.provider-pause-seconds` (60), so a weak endpoint should use a lower `http.max-in-flight`. `NexusAI.getHttpPool().snapshot()` is the load-test hook.
-- `AiHttpClient` — cache + in-flight + `generateFreshAsync` for the pool
-- `AiPlaceholderExpansion` — `%ainexus_generate_*%` / `%ainexus_cached_*%`
-- `ContextRegistry` / `ContextService` / `ContextSnapshots` — context providers, timeouts, and the `cached_` snapshot used in the cache key
-- `NaiCommand` — `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. Those calls use the Paper region scheduler on Paper and Purpur.
-- `DialogueEngine` / `NexusAIApi` — character sessions, memory, and tool actions. Placeholders do not enter this path.
-- `api.event` / `EventDispatcher` — Bukkit events for a real model call, a character action, and a moderation flag. An event object is created only when that event has listeners.
-- `ChatModerationListener` / `ModerationService` — optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
+- `PluginConfig`: config.yml + env + provider defaults + locale
+- `PromptCatalog`: prompts.yml ids, vars, and per-prompt overrides
+- `ConfigMerger`: adds missing config keys without overwriting user values
+- `MessageService`: `lang/*.yml` with English fallback
+- `AiCache`: Caffeine (TTL + max-size + `isFresh`)
+- `AiPool` / `PoolService` / `PoolStore`: unique answer queues for `generate_`, saved to `pool.yml`
+- `VarSubstitutor`: `{token}` delivery substitution from pool `vars`
+- `PrewarmService`: TTL warm-up/refresh for `cached_`
+- `RateLimiter` / `RequestGate`: per-player and server limits, per-prompt backoff, provider pause
+- `AiDiagnostics`: last error and rate-limited WARNING logs
+- `AiProvider` / `OpenAiProvider`: HTTP `/chat/completions`. Calls use `HttpClient.sendAsync`. `HttpPool` keeps four `nexusai-http-*` threads and a bounded worker queue. `HttpGate` caps in-flight calls (`http.max-in-flight`, default 64) and the wait queue (`http.queue-size`, default 64). A full queue fails with `HTTP queue is full` (`LOCAL_LIMIT`) and placeholders keep their fallback. One connection error pauses that provider for `limits.provider-pause-seconds` (60), so a weak endpoint should use a lower `http.max-in-flight`. `NexusAI.getHttpPool().snapshot()` is the load-test hook.
+- `AiHttpClient`: cache + in-flight + `generateFreshAsync` for the pool
+- `AiPlaceholderExpansion`: `%ainexus_generate_*%` / `%ainexus_cached_*%`
+- `ContextRegistry` / `ContextService` / `ContextSnapshots`: context providers, timeouts, and the `cached_` snapshot used in the cache key
+- `NaiCommand`: `/nai` commands, including `/nai test`, `/nai prompts`, and `/nai talk`. Results that follow an HTTP call are scheduled on the sender's region (player entity scheduler, or the global region scheduler otherwise). Dialogue actions use the same schedulers. Those calls use the Paper region scheduler on Paper and Purpur.
+- `DialogueEngine` / `NexusAIApi`: character sessions, memory, and tool actions. Placeholders do not enter this path.
+- `api.event` / `EventDispatcher`: Bukkit events for a real model call, a character action, and a moderation flag. An event object is created only when that event has listeners.
+- `ChatModerationListener` / `ModerationService`: optional public-chat check. The listener returns without waiting. Staff notices use the global region scheduler and each staff member's entity scheduler.
 
 ## Community and support
 
@@ -846,4 +848,4 @@ Questions, setup help and release news on our Discord:
 
 ## License
 
-MIT License — Copyright (c) 2026 mo00Wy. Full text: [LICENSE](LICENSE).
+MIT License: Copyright (c) 2026 mo00Wy. Full text: [LICENSE](LICENSE).
